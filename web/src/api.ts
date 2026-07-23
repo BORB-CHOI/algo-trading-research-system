@@ -18,6 +18,65 @@ export type CandlesResponse = {
   candles: Candle[]
 }
 
+export type ScreenItem = {
+  code: string
+  name: string
+  market: string
+  close: number
+  amount: number // 거래대금(원)
+  marcap: number // 시총(원)
+}
+
+export type ScreenResponse = {
+  date: string // 실제 기준 거래일 (휴장일이면 직전 거래일)
+  total: number
+  items: ScreenItem[]
+}
+
+export type ScreenParams = {
+  date?: string
+  minAmount?: number // 원
+  minMarcap?: number // 원
+  maxMarcap?: number // 원
+}
+
+export type Signal = {
+  time: string // 'YYYY-MM-DD'
+  side: 'buy' | 'sell'
+  price: number
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const res = await fetch(url)
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(body.detail ?? `요청 실패 (${res.status})`)
+  }
+  return (await res.json()) as T
+}
+
+export async function fetchScreen(p: ScreenParams): Promise<ScreenResponse> {
+  const params = new URLSearchParams()
+  if (p.date) params.set('date', p.date)
+  if (p.minAmount != null) params.set('min_amount', String(p.minAmount))
+  if (p.minMarcap != null) params.set('min_marcap', String(p.minMarcap))
+  if (p.maxMarcap != null) params.set('max_marcap', String(p.maxMarcap))
+  return getJson(`/api/screen?${params.toString()}`)
+}
+
+export async function fetchStrategies(): Promise<string[]> {
+  const { strategies } = await getJson<{ strategies: string[] }>('/api/strategies')
+  return strategies
+}
+
+export async function fetchSignals(
+  code: string,
+  strategy: string,
+): Promise<{ signals: Signal[] }> {
+  const params = new URLSearchParams({ code, strategy })
+  return getJson(`/api/signals?${params.toString()}`)
+}
+
 export async function fetchCandles(
   code: string,
   start?: string,

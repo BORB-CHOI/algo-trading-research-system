@@ -23,7 +23,10 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
+from src.layer3_strategy.case_overlay import STRATEGIES
+from src.layer3_strategy.screening import ScreeningRule, screen
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
 # Amount(거래대금)는 KLineChart 의 turnover 로. Stocks(상장주식수)는 액면분할 감지용(ADR-0006).
@@ -43,6 +46,10 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+# 주봉/월봉은 일봉을 pandas resample 로 합성한다(분봉 데이터 없음). 주봉 라벨은 금요일 기준.
+_RESAMPLE_RULES = {"week": "W-FRI", "month": "ME"}
 
 
 @lru_cache(maxsize=8)
@@ -127,6 +134,38 @@ def get_candles(
     return df
 
 
+def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
+    """일봉 → 주봉/월봉. 봉 날짜는 그 기간의 마지막 실제 거래일."""
+    if timespan == "day" or df.empty:
+        return df
+    d = df.assign(TradeDate=df["Date"]).set_index("Date")
+    agg = (
+        d.resample(_RESAMPLE_RULES[timespan])
+        .agg(
+            Code=("Code", "first"),
+            Name=("Name", "last"),
+            Open=("Open", "first"),
+            High=("High", "max"),
+            Low=("Low", "min"),
+            Close=("Close", "last"),
+            Volume=("Volume", "sum"),
+            Amount=("Amount", "sum"),
+            TradeDate=("TradeDate", "last"),
+        )
+        .dropna(subset=["Close"])  # 거래일이 없던 주/월 버킷 제거
+    )
+    return agg.reset_index(drop=True).rename(columns={"TradeDate": "Date"})
+
+
+# 조건검색은 시총·소속부까지 필요해 캔들 캐시와 컬럼을 분리한다.
+_SCREEN_COLS = ["Date", "Code", "Name", "Market", "Dept", "Close", "Amount", "Marcap"]
+
+
+@lru_cache(maxsize=4)
+def _load_year_screen(year: int) -> pd.DataFrame:
+    return load_years(year, year)[_SCREEN_COLS].copy()
+
+
 @lru_cache(maxsize=1)
 def _symbol_master() -> pd.DataFrame:
     """종목 검색용 마스터 — 가장 최근 연도에서 종목별 최신 이름·시장."""
@@ -168,8 +207,9 @@ def api_candles(
     start: str | None = Query(None, description="시작일 YYYY-MM-DD"),
     end: str | None = Query(None, description="종료일 YYYY-MM-DD"),
     adjust: bool = Query(True, description="액면분할/병합 수정주가 보정 (ADR-0006)"),
+    period: str = Query("day", pattern="^(day|week|month)$", description="봉 주기 (일/주/월)"),
 ) -> dict:
-    df = get_candles(code, start, end, adjust)
+    df = resample_candles(get_candles(code, start, end, adjust), period)
     if df.empty:
         raise HTTPException(
             status_code=404,
@@ -202,4 +242,85 @@ def api_candles(
         "name": str(df["Name"].iloc[-1]),
         "count": len(candles),
         "candles": candles,
+    }
+
+
+@app.get("/api/screen")
+def api_screen(
+    date: str | None = Query(None, description="기준일 YYYY-MM-DD (기본: 최신 거래일)"),
+    min_amount: float | None = Query(None, description="일 거래대금 하한 (원)"),
+    min_marcap: float | None = Query(None, description="시총 하한 (원)"),
+    max_marcap: float | None = Query(None, description="시총 상한 (원)"),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    """조건검색 종목선별 (BORB-39 ③). layer1 유니버스 제외 + layer3 screen() 재사용.
+
+    임계값은 요청마다 사용자가 준다 — 서버에 확정값을 박지 않는다(CLAUDE.md placeholder 원칙).
+    """
+    years = available_years()
+    if not years:
+        raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
+    year = min(int(date[:4]), years[-1]) if date else years[-1]
+    if year not in years:
+        raise HTTPException(status_code=404, detail=f"{year}년 데이터가 없습니다.")
+
+    df = _load_year_screen(year)
+    if date:
+        df = df[df["Date"] <= pd.Timestamp(date)]
+    if df.empty:
+        raise HTTPException(status_code=404, detail=f"{date} 이전 거래일 데이터가 없습니다.")
+    base_date = df["Date"].max()  # 기준일이 휴장일이면 직전 거래일로
+    df = df[df["Date"] == base_date]
+
+    df = apply_exclusions(df, DEFAULT_POLICY)  # 스팩·KONEX·우선주·리츠·관리종목 제외 (ADR-0003)
+    rule = ScreeningRule(min_amount=min_amount, min_marcap=min_marcap, max_marcap=max_marcap)
+    df = screen(df, rule).sort_values("Amount", ascending=False)
+
+    total = len(df)
+    df = df.head(limit)
+    return {
+        "date": base_date.strftime("%Y-%m-%d"),
+        "total": total,
+        "items": [
+            {
+                "code": r.Code,
+                "name": r.Name,
+                "market": r.Market,
+                "close": float(r.Close),
+                "amount": float(r.Amount),
+                "marcap": float(r.Marcap),
+            }
+            for r in df.itertuples()
+        ],
+    }
+
+
+@app.get("/api/strategies")
+def api_strategies() -> dict:
+    """전략 오버레이 목록 (BORB-39 ④). 전략은 파이썬에 등록된 결정론적 함수뿐이다."""
+    return {"strategies": sorted(STRATEGIES)}
+
+
+@app.get("/api/signals")
+def api_signals(
+    code: str = Query(..., description="종목코드 6자리"),
+    strategy: str = Query(..., description="STRATEGIES 에 등록된 전략 이름"),
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+) -> dict:
+    """전략 신호를 차트에 얹기 위한 조회. **시각화 전용** — 주문·검증 아님."""
+    fn = STRATEGIES.get(strategy)
+    if fn is None:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 전략: {strategy}")
+    df = get_candles(code, start, end, adjust=True)
+    if df.empty:
+        raise HTTPException(status_code=404, detail=f"'{code}' 구간 데이터가 없습니다.")
+    signals = fn(df)
+    return {
+        "code": code.strip().zfill(6),
+        "strategy": strategy,
+        "signals": [
+            {"time": r.Date.strftime("%Y-%m-%d"), "side": r.side, "price": float(r.price)}
+            for r in signals.itertuples()
+        ],
     }
