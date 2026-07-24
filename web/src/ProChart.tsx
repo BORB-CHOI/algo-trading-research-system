@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
-import { registerIndicator, type KLineData } from 'klinecharts'
+import { dispose as disposeKLineChart, registerIndicator, type KLineData } from 'klinecharts'
 import {
   KLineChartPro,
   type Datafeed,
@@ -14,18 +14,6 @@ import { fetchSignals, type Signal } from './api'
 const RED = '#e01e1e'
 const BLUE = '#1668d0'
 
-// ── 전략 신호 저장소 ──────────────────────────────────────────
-// 신호 계산은 전부 파이썬(/api/signals). 여기는 받은 결과를 그리기만 한다.
-// 지표 calc/draw 가 모듈 전역을 읽는 구조라 chart 인스턴스 없이도 갱신된다.
-const signalByTime = new Map<number, Signal>()
-
-function setSignals(signals: Signal[]): void {
-  signalByTime.clear()
-  for (const s of signals) {
-    signalByTime.set(new Date(`${s.time}T00:00:00`).getTime(), s)
-  }
-}
-
 let indicatorsRegistered = false
 function ensureIndicators(): void {
   if (indicatorsRegistered) return
@@ -38,22 +26,40 @@ function ensureIndicators(): void {
     figures: [{ key: 'turnover', title: '거래대금: ', type: 'bar' }],
     calc: (dataList) => dataList.map((d) => ({ turnover: (d.turnover as number | undefined) ?? 0 })),
   })
+}
 
-  // 전략 신호 마커 — 캔들 위에 ▲(매수)/▼(매도)를 그린다. 일봉 기준.
+// ── 전략 신호 지표 — 차트 인스턴스별 ──────────────────────────
+// 신호 계산은 전부 파이썬(/api/signals). 여기는 받은 결과를 그리기만 한다.
+// 멀티뷰에서 차트마다 종목이 다를 수 있으므로, 신호 저장소를 전역 하나로 두면
+// 마지막 응답이 모든 차트에 그려진다. 차트마다 고유 이름의 지표를 등록해
+// 클로저로 자기 저장소만 읽게 한다. (klinecharts 에 unregister 가 없어
+// 정의 자체는 남지만, 마운트당 1개라 유해하지 않다.)
+type SignalStore = {
+  indicatorName: string
+  set: (signals: Signal[]) => void
+  clear: () => void
+  size: () => number
+}
+
+let signalSeq = 0
+
+function createSignalIndicator(): SignalStore {
+  const byTime = new Map<number, Signal>()
+  const name = `SIGNALS_${++signalSeq}`
   registerIndicator({
-    name: 'SIGNALS',
+    name,
     shortName: '전략신호',
     figures: [],
     calc: (dataList) => dataList.map(() => ({})),
     draw: ({ ctx, kLineDataList, visibleRange, xAxis, yAxis }) => {
-      if (signalByTime.size === 0) return true
+      if (byTime.size === 0) return true
       ctx.save()
       ctx.font = '12px sans-serif'
       ctx.textAlign = 'center'
       for (let i = visibleRange.from; i < visibleRange.to; i++) {
         const bar = kLineDataList[i]
         if (!bar) continue
-        const sig = signalByTime.get(bar.timestamp)
+        const sig = byTime.get(bar.timestamp)
         if (!sig) continue
         const x = xAxis.convertToPixel(i)
         if (sig.side === 'buy') {
@@ -68,6 +74,15 @@ function ensureIndicators(): void {
       return true
     },
   })
+  return {
+    indicatorName: name,
+    set(signals) {
+      byTime.clear()
+      for (const s of signals) byTime.set(new Date(`${s.time}T00:00:00`).getTime(), s)
+    },
+    clear: () => byTime.clear(),
+    size: () => byTime.size,
+  }
 }
 
 function toDate(ms: number): string {
@@ -167,6 +182,9 @@ export type ProChartHandle = {
 export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref) {
   const elRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<KLineChartPro | null>(null)
+  // 이 차트 전용 신호 저장소·지표 (인스턴스당 1회 생성)
+  const signalsRef = useRef<SignalStore | null>(null)
+  if (!signalsRef.current) signalsRef.current = createSignalIndicator()
   const symbolRef = useRef<SymbolInfo>({
     ticker: '005930',
     name: '삼성전자',
@@ -190,19 +208,20 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
         volumePrecision: 0,
         priceCurrency: 'krw',
       }
-      signalByTime.clear() // 종목이 바뀌면 이전 종목 신호는 무효
+      signalsRef.current?.clear() // 종목이 바뀌면 이전 종목 신호는 무효
       chartRef.current?.setSymbol(symbolRef.current)
     },
     async applyStrategy(strategy) {
+      const store = signalsRef.current!
       if (!strategy) {
-        setSignals([])
+        store.set([])
       } else {
         const { signals } = await fetchSignals(symbolRef.current.ticker, strategy)
-        setSignals(signals)
+        store.set(signals)
       }
       // Pro 는 지표 재계산 API 를 노출하지 않아 setSymbol 로 데이터 재적재를 유도한다.
       chartRef.current?.setSymbol(symbolRef.current)
-      return signalByTime.size
+      return store.size()
     },
   }))
 
@@ -214,20 +233,25 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
 
     chartRef.current = new KLineChartPro({
       container: el,
-      theme: 'light',
+      theme: 'dark', // HTS 다크 셸과 통일 (ADR-0008)
       styles: KOREAN_STYLES,
       locale: 'ko-KR',
       drawingBarVisible: true, // 추세선·피보나치 등 그리기 툴바
       symbol: symbolRef.current,
       period: DAY,
       periods: [DAY, WEEK, MONTH],
-      mainIndicators: ['MA', 'SIGNALS'], // 이평선 + 전략 신호 마커(신호 없으면 안 그림)
+      // 이평선 + 이 차트 전용 전략 신호 마커(신호 없으면 안 그림)
+      mainIndicators: ['MA', signalsRef.current!.indicatorName],
       subIndicators: ['VOL'], // 거래량 창
       datafeed: new ApiDatafeed(),
     })
 
-    // Pro 는 dispose API 가 없어 컨테이너를 비워 정리한다(StrictMode 중복 방지).
     return () => {
+      // Pro 는 dispose 를 노출하지 않지만, 내부 klinecharts 는 전역 인스턴스 맵에
+      // 등록돼 있어 dispose() 없이는 패널을 닫을 때마다 차트가 잔류한다(메모리 누수).
+      // init 이 컨테이너에 남긴 k-line-chart-id 속성으로 찾아 직접 해제한다.
+      const inner = el.querySelector('[k-line-chart-id]')
+      if (inner) disposeKLineChart(inner as HTMLElement)
       el.innerHTML = ''
       chartRef.current = null
     }

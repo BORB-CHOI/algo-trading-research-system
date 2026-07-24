@@ -23,8 +23,24 @@ export type ScreenItem = {
   name: string
   market: string
   close: number
+  chg: number | null // 직전 거래일 대비 등락률(%). 연초 첫 거래일 등은 null
   amount: number // 거래대금(원)
   marcap: number // 시총(원)
+}
+
+export type Quote = ScreenItem
+
+export type QuotesResponse = {
+  date: string | null
+  quotes: Quote[]
+}
+
+export async function fetchQuotes(codes: string[]): Promise<QuotesResponse> {
+  if (codes.length === 0) return { date: null, quotes: [] }
+  const params = new URLSearchParams({ codes: codes.join(',') })
+  const res = await fetch(`/api/quotes?${params.toString()}`)
+  if (!res.ok) return { date: null, quotes: [] }
+  return (await res.json()) as QuotesResponse
 }
 
 export type ScreenResponse = {

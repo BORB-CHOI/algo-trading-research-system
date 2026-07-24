@@ -1,54 +1,317 @@
-/* HTS 데모 — 다크 HTS 톤. 창관리 스타일은 dockview 테마(abyss)가 담당. */
+/* HTS 셸 — 고밀도 다크 HTS 톤(키움 참고). 창관리 스타일은 dockview 테마(abyss) 오버라이드가 담당.
+   패널은 아래 :root 토큰과 공용 클래스(.panel-body .toolbar .form-row .grid .num .up .down .flat .hint .badge)만 쓴다. */
+
+:root {
+  --hts-bg: #0d0f12;        /* 앱 배경 */
+  --hts-panel: #14171c;     /* 패널 배경 */
+  --hts-elev: #171b21;      /* 헤더/툴바 */
+  --hts-border: #262c36;
+  --hts-hover: #1b2129;
+  --hts-active: #20304a;
+  --hts-text: #d5dae3;
+  --hts-text-2: #8b93a3;
+  --hts-text-3: #5a6272;
+  --hts-up: #f04452;        /* 상승 = 빨강 (한국식) */
+  --hts-down: #3485fa;      /* 하락 = 파랑 (한국식) */
+  --hts-accent: #2f6fed;
+  --hts-accent-hov: #4980f0;
+  /* 내부 파생값 (패널은 참조 금지) */
+  --hts-row-line: #1c212a;
+  --hts-scrollbar: #2a313d;
+  --hts-scrollbar-hov: #3a4353;
+  --hts-btn-hov: #20262f;
+  --hts-btn-hov-border: #333b48;
+  --hts-accent-down: #2a63d4; /* 액센트 눌림 */
+  --hts-accent-rgb: 47, 111, 237; /* --hts-accent 의 RGB (반투명 파생용) */
+}
+
 html, body, #root { height: 100%; margin: 0; }
-body { background: #101216; color: #cfd3dc; font: 13px/1.4 'Malgun Gothic', sans-serif; }
+body {
+  background: var(--hts-bg);
+  color: var(--hts-text);
+  font: 12px/1.45 'Malgun Gothic', 'Apple SD Gothic Neo', 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
 
-.hts { display: flex; flex-direction: column; height: 100%; }
+.hts {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  scrollbar-color: var(--hts-scrollbar) transparent; /* Firefox — 하위로 상속 */
+  scrollbar-width: thin;
+}
 
+/* ── 얇은 커스텀 스크롤바 (6px) ───────────────────────────────── */
+.hts *::-webkit-scrollbar { width: 6px; height: 6px; }
+.hts *::-webkit-scrollbar-track { background: transparent; }
+.hts *::-webkit-scrollbar-thumb { background: var(--hts-scrollbar); border-radius: 3px; }
+.hts *::-webkit-scrollbar-thumb:hover { background: var(--hts-scrollbar-hov); }
+.hts *::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── 상단바 ───────────────────────────────────────────────────── */
 .topbar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  background: #171a20;
-  border-bottom: 1px solid #262b35;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  background: var(--hts-elev);
+  border-bottom: 1px solid var(--hts-border);
 }
 
-.topbar .brand { margin-right: 10px; color: #e8eaf0; }
-.topbar .brand b { color: #4d9fff; }
-
-.topbar button {
-  background: #222733;
-  color: #cfd3dc;
-  border: 1px solid #313848;
-  border-radius: 3px;
-  padding: 3px 8px;
-  font-size: 12px;
-  cursor: pointer;
+.topbar .brand {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hts-text);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
+.topbar .brand b { color: var(--hts-accent-hov); font-weight: 700; }
 
-.topbar button:hover { background: #2c3342; }
-.topbar .sep { width: 1px; height: 18px; background: #313848; margin: 0 4px; }
-.topbar .hint-inline { color: #6b7280; font-size: 11px; margin-left: auto; }
+.topbar .sep { flex: none; width: 1px; height: 16px; background: var(--hts-border); }
+.topbar .spacer { flex: 1; }
+
+/* 세그먼트형 버튼 그룹 — 구분선으로 묶인 한 덩어리 */
+.topbar .btn-group { display: flex; align-items: center; }
+.topbar .btn-group button { border-radius: 0; margin-left: -1px; }
+.topbar .btn-group button:first-child { border-radius: 3px 0 0 3px; margin-left: 0; }
+.topbar .btn-group button:last-child { border-radius: 0 3px 3px 0; }
+.topbar .btn-group button:hover,
+.topbar .btn-group button:active { position: relative; z-index: 1; } /* 겹친 테두리 위로 */
+
+.topbar .hint-inline {
+  color: var(--hts-text-3);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .dock-area { flex: 1; min-height: 0; }
 
-/* 패널 공통 */
-.panel-body { padding: 8px; height: 100%; overflow: auto; box-sizing: border-box; }
-.form-row { display: flex; gap: 4px; margin-bottom: 6px; }
-.form-row input {
-  flex: 1; min-width: 0;
-  background: #0d0f13; color: #dfe3ec;
-  border: 1px solid #313848; border-radius: 3px; padding: 4px 6px; font-size: 12px;
+/* ── 컨트롤 공통 (버튼/입력/셀렉트 — 높이 24px, 다크) ─────────── */
+.topbar button,
+.toolbar button,
+.form-row button,
+.panel-body button {
+  height: 24px;
+  padding: 0 10px;
+  background: var(--hts-hover);
+  color: var(--hts-text);
+  border: 1px solid var(--hts-border);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 22px;
+  cursor: pointer;
+  white-space: nowrap;
 }
-.form-row button, .panel-body button {
-  background: #1f4fd8; color: #fff; border: none; border-radius: 3px;
-  padding: 4px 10px; font-size: 12px; cursor: pointer;
-}
-.panel-body .hint { color: #8a93a5; font-size: 12px; margin: 4px 0; }
+.topbar button:hover,
+.toolbar button:hover,
+.form-row button:hover,
+.panel-body button:hover { background: var(--hts-btn-hov); border-color: var(--hts-btn-hov-border); }
+.topbar button:active,
+.toolbar button:active,
+.form-row button:active,
+.panel-body button:active { background: var(--hts-active); border-color: var(--hts-accent); }
 
-.grid { width: 100%; border-collapse: collapse; font-size: 12px; }
-.grid td { padding: 4px 6px; border-bottom: 1px solid #20242d; cursor: pointer; }
-.grid tr:hover td { background: #1b2029; }
-.grid .num { text-align: right; color: #9aa2b1; }
-.grid .num button { background: #222733; border: 1px solid #313848; color: #cfd3dc; padding: 2px 6px; }
+/* 주 동작 버튼(조회 등)은 액센트 */
+.form-row button,
+.hts button.primary {
+  background: var(--hts-accent);
+  border-color: var(--hts-accent);
+  color: #fff;
+}
+.form-row button:hover,
+.hts button.primary:hover { background: var(--hts-accent-hov); border-color: var(--hts-accent-hov); }
+.form-row button:active,
+.hts button.primary:active { background: var(--hts-accent-down); border-color: var(--hts-accent-down); }
+
+.toolbar input, .toolbar select,
+.form-row input, .form-row select,
+.panel-body input, .panel-body select {
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  background: var(--hts-bg);
+  color: var(--hts-text);
+  border: 1px solid var(--hts-border);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 12px;
+}
+.toolbar input:focus, .toolbar select:focus,
+.form-row input:focus, .form-row select:focus,
+.panel-body input:focus, .panel-body select:focus {
+  outline: none;
+  border-color: var(--hts-accent);
+}
+.hts input::placeholder { color: var(--hts-text-3); }
+
+/* ── 패널 공용 ────────────────────────────────────────────────── */
+/* 툴바(고정) + 본문(스크롤) 세로 구성 — 툴바가 스크롤에 딸려 사라지지 않게 한다 */
+.panel-col {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--hts-panel);
+}
+.panel-col .panel-body { flex: 1; min-height: 0; height: auto; }
+
+.panel-body {
+  padding: 8px;
+  height: 100%;
+  overflow: auto;
+  box-sizing: border-box;
+  background: var(--hts-panel);
+}
+
+.panel-body h3, .panel-body h4, .panel-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hts-text);
+}
+
+/* 패널 상단 컨트롤 줄 */
+.toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  background: var(--hts-elev);
+  border-bottom: 1px solid var(--hts-border);
+}
+
+.form-row { display: flex; gap: 4px; margin-bottom: 6px; }
+.form-row input { flex: 1; min-width: 0; }
+
+.hint { color: var(--hts-text-2); font-size: 11px; margin: 4px 0; }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  background: var(--hts-hover);
+  border: 1px solid var(--hts-border);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--hts-text-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 시세표 (고밀도 그리드) ───────────────────────────────────── */
+.grid {
+  width: 100%;
+  border-collapse: separate; /* sticky thead 테두리 유지 */
+  border-spacing: 0;
+  font-size: 12px;
+}
+.grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  background: var(--hts-elev);
+  color: var(--hts-text-2);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  border-bottom: 1px solid var(--hts-border);
+  white-space: nowrap;
+}
+.grid thead th.num { text-align: right; }
+.grid tbody tr { height: 24px; }
+.grid td {
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--hts-row-line);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.grid tbody tr:hover td { background: var(--hts-hover); }
+.grid tbody tr.selected td, .grid tbody tr.active td { background: var(--hts-active); }
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+.grid .num { color: var(--hts-text); }
+
+/* 등락 색 — 한국식: 상승 빨강 / 하락 파랑 */
+.up { color: var(--hts-up); }
+.down { color: var(--hts-down); }
+.flat { color: var(--hts-text-2); }
+
+/* 행 hover 시에만 보이는 삭제(×) 버튼 — 숨김 상태에선 클릭도 차단 */
+.grid .row-del { opacity: 0; pointer-events: none; }
+.grid tbody tr:hover .row-del { opacity: 1; pointer-events: auto; }
+
+/* 표 안의 소형 버튼(삭제 등) */
+.grid button {
+  height: 18px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  background: transparent;
+  color: var(--hts-text-2);
+  border: 1px solid var(--hts-border);
+}
+.grid button:hover { color: var(--hts-text); background: var(--hts-hover); }
+
+/* ── dockview 테마 오버라이드 (변수 우선) ─────────────────────── */
+.dockview-theme-abyss {
+  /* 탭바 28px·12px, 토큰 색으로 통일 */
+  --dv-tabs-and-actions-container-height: 28px;
+  --dv-tabs-and-actions-container-font-size: 12px;
+  --dv-tab-font-size: 12px;
+  --dv-tab-close-icon-size: 12px;
+  --dv-group-view-background-color: var(--hts-panel);
+  --dv-tabs-and-actions-container-background-color: var(--hts-elev);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--hts-panel);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--hts-elev);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--hts-panel);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--hts-elev);
+  --dv-activegroup-visiblepanel-tab-color: var(--hts-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--hts-text-2);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--hts-text-2);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--hts-text-3);
+  --dv-tab-divider-color: var(--hts-border);
+  --dv-separator-border: var(--hts-border);
+  --dv-paneview-header-border-color: var(--hts-border);
+  --dv-paneview-active-outline-color: var(--hts-accent);
+  --dv-tabs-container-scrollbar-color: var(--hts-text-3);
+  --dv-icon-hover-background-color: var(--hts-hover);
+  --dv-drag-over-background-color: rgba(var(--hts-accent-rgb), 0.18);
+  --dv-drag-over-border-color: var(--hts-accent);
+  --dv-floating-titlebar-background-color: var(--hts-elev);
+  --dv-floating-titlebar-height: 26px;
+  --dv-floating-border: 1px solid var(--hts-border);
+  --dv-context-menu-background-color: var(--hts-elev);
+  --dv-context-menu-color: var(--hts-text);
+}
+
+/* 활성 탭 — 상단 2px 액센트 라인 (변수로는 불가, 셀렉터 오버라이드) */
+.dockview-theme-abyss .dv-tab.dv-active-tab { position: relative; }
+.dockview-theme-abyss .dv-tab.dv-active-tab::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 2px;
+  background: var(--hts-accent);
+  z-index: 999;
+}
+/* 비활성 그룹의 활성 탭은 액센트를 흐리게 */
+.dockview-theme-abyss .dv-groupview.dv-inactive-group > .dv-tabs-and-actions-container .dv-tab.dv-active-tab::after {
+  background: rgba(var(--hts-accent-rgb), 0.35);
+}

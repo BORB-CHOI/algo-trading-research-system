@@ -5,7 +5,20 @@ export type SymbolPick = { code: string; name: string; market: string }
 
 const EVENT = 'hts:symbol'
 
+// 마지막 선택값 — 나중에 추가/복원된 패널이 현재 상태를 이어받게 한다(replay).
+let lastSymbol: SymbolPick | null = null
+let lastStrategy = ''
+
+export function currentSymbol(): SymbolPick | null {
+  return lastSymbol
+}
+
+export function currentStrategy(): string {
+  return lastStrategy
+}
+
 export function pickSymbol(s: SymbolPick): void {
+  lastSymbol = s
   window.dispatchEvent(new CustomEvent(EVENT, { detail: s }))
 }
 
@@ -19,6 +32,7 @@ export function onSymbolPick(fn: (s: SymbolPick) => void): () => void {
 const STRATEGY_EVENT = 'hts:strategy'
 
 export function pickStrategy(name: string): void {
+  lastStrategy = name
   window.dispatchEvent(new CustomEvent(STRATEGY_EVENT, { detail: name }))
 }
 

@@ -247,6 +247,7 @@ def api_screen(
 
     total = len(df)
     df = df.head(limit)
+    chg = _change_vs_prev(year, base_date)
     return {
         "date": base_date.strftime("%Y-%m-%d"),
         "total": total,
@@ -256,12 +257,59 @@ def api_screen(
                 "name": r.Name,
                 "market": r.Market,
                 "close": float(r.Close),
+                "chg": chg.get(r.Code),
                 "amount": float(r.Amount),
                 "marcap": float(r.Marcap),
             }
             for r in df.itertuples()
         ],
     }
+
+
+def _change_vs_prev(year: int, base_date: pd.Timestamp) -> dict[str, float]:
+    """기준일 종가의 직전 거래일 대비 등락률(%). 직전 거래일이 같은 해에 없으면 빈 dict."""
+    df = _load_year_screen(year)
+    prev_dates = df.loc[df["Date"] < base_date, "Date"]
+    if prev_dates.empty:
+        return {}
+    prev_date = prev_dates.max()
+    d0 = df[df["Date"] == base_date].set_index("Code")["Close"]
+    d1 = df[df["Date"] == prev_date].set_index("Code")["Close"]
+    common = d0.index.intersection(d1.index)
+    chg = (d0.loc[common] / d1.loc[common] - 1) * 100
+    return {str(c): round(float(v), 2) for c, v in chg.items() if pd.notna(v)}
+
+
+@app.get("/api/quotes")
+def api_quotes(
+    codes: str = Query(..., description="쉼표로 구분한 종목코드 목록 (예: 005930,000660)"),
+) -> dict:
+    """관심종목 패널용 시세 스냅샷 — 최신 거래일 종가·등락률·거래대금·시총."""
+    wanted = [c.strip().zfill(6) for c in codes.split(",") if c.strip()][:100]
+    years = available_years()
+    if not years or not wanted:
+        return {"date": None, "quotes": []}
+    df = _load_year_screen(years[-1])
+    base_date = df["Date"].max()
+    chg = _change_vs_prev(years[-1], base_date)
+    d0 = df[df["Date"] == base_date].set_index("Code")
+    quotes = []
+    for code in wanted:
+        if code not in d0.index:
+            continue
+        r = d0.loc[code]
+        quotes.append(
+            {
+                "code": code,
+                "name": str(r["Name"]),
+                "market": str(r["Market"]),
+                "close": float(r["Close"]),
+                "chg": chg.get(code),
+                "amount": float(r["Amount"]),
+                "marcap": float(r["Marcap"]),
+            }
+        )
+    return {"date": base_date.strftime("%Y-%m-%d"), "quotes": quotes}
 
 
 @app.get("/api/heatmap")

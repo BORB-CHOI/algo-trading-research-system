@@ -1,4 +1,4 @@
-import { useRef, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 import {
   DockviewReact,
   type DockviewApi,
@@ -14,11 +14,11 @@ import {
   ScreenPanel,
   StrategyPanel,
   WatchlistPanel,
-} from './panels'
+} from './panels/index'
 
 // dockview 에 등록하는 패널 종류. 창관리(탭·분할·플로팅·팝아웃)는 전부 dockview 몫.
 const components: Record<string, (p: IDockviewPanelProps) => ReactElement> = {
-  chart: () => <ChartPanel />,
+  chart: (p) => <ChartPanel panelApi={p.api} />,
   screen: () => <ScreenPanel />,
   strategy: () => <StrategyPanel />,
   map: () => <MapPanel />,
@@ -43,6 +43,21 @@ let seq = 0
 
 export function HtsApp() {
   const apiRef = useRef<DockviewApi | null>(null)
+  // 데이터 기준일 — heatmap 응답의 date 가 실제 마지막 거래일. 실패 시 배지 숨김.
+  const [dataDate, setDataDate] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    fetch('/api/heatmap?top=10')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then(({ date }: { date: string }) => {
+        if (alive && date) setDataDate(date)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
 
   function addPanel(kind: string, floating = false) {
     const api = apiRef.current
@@ -123,15 +138,23 @@ export function HtsApp() {
     <div className="hts">
       <header className="topbar">
         <span className="brand">케이스 검사기 <b>HTS</b></span>
-        {Object.keys(components).map((k) => (
-          <button key={k} onClick={() => addPanel(k)}>
-            + {TITLES[k]}
-          </button>
-        ))}
         <span className="sep" />
-        <button onClick={() => addPanel('chart', true)}>플로팅 차트</button>
-        <button onClick={popoutActive}>활성 그룹 → 새창</button>
-        <button onClick={resetLayout}>레이아웃 초기화</button>
+        {/* 패널 추가 버튼 그룹 — 세그먼트로 묶음 */}
+        <div className="btn-group">
+          {Object.keys(components).map((k) => (
+            <button key={k} onClick={() => addPanel(k)}>
+              + {TITLES[k]}
+            </button>
+          ))}
+        </div>
+        <span className="spacer" />
+        {/* 우측 유틸 */}
+        <div className="btn-group">
+          <button onClick={() => addPanel('chart', true)}>플로팅 차트</button>
+          <button onClick={popoutActive}>활성 그룹 → 새창</button>
+          <button onClick={resetLayout}>레이아웃 초기화</button>
+        </div>
+        {dataDate && <span className="badge">데이터 {dataDate}</span>}
         <span className="hint-inline">탭을 드래그해 분할·이동, 경계선 드래그로 리사이즈</span>
       </header>
       <div className="dock-area">
