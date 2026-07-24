@@ -11,14 +11,16 @@
 - **임계값 서버 기본값 금지**: 모든 값(임계값·지표 기간)은 항상 요청에서 받는다.
   UI 의 5/20 같은 숫자는 placeholder 일 뿐 서버에 박지 않는다.
 - 이동평균·신고가·등락률 등 모든 계산은 **종가(Close) 기준**이다.
-- 수정주가 보정(ADR-0006)은 적용하지 않는다 — 룩백 구간에 액면분할이 낀 종목은
-  이평·신고가가 왜곡될 수 있다. 케이스 검사기 시각화 용도의 알려진 한계로 문서화한다.
+- **수정주가 보정(ADR-0006) 적용**: 패널에 Stocks(상장주식수)가 있으면 액면분할/병합을
+  기준일 기준 back-adjust 한다 — 룩백에 분할이 껴도 이평·신고가·등락률이 왜곡되지 않는다.
+  판정 임계값은 layer1 `adjust.py` 와 동일 상수를 쓴다(정본 하나).
 - 성능: 종목 루프 금지. Date×Code 와이드 프레임에 pandas 벡터 연산만 쓴다.
+  (예외: 패턴분석은 TA-Lib C 함수를 종목별로 호출한다 — C 루프라 허용)
 
-## 조건 목록 v1
+## 조건 목록 v2
 
-marcap 일봉(OHLCV·거래대금·시총)만으로 계산 가능한 것만 담는다.
-재무·수급·패턴 분석은 데이터가 없어 제외 (수급은 ADR-0002 미확정).
+marcap 일봉(OHLCV·거래대금·시총)만으로 계산 가능한 것 + TA-Lib 캔들패턴(패턴분석).
+재무 분석은 데이터가 없어 제외(OpenDART 백필 후 추가, BORB-41). 수급은 ADR-0002 미확정.
 """
 
 from __future__ import annotations
@@ -27,6 +29,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pandas as pd
+import talib
+import talib.abstract  # Function(...).lookback — 패턴 워밍업 계산용 (명시 import 필요)
+
+from src.layer1_data.adjust import SPLIT_PRICE_MATCH, SPLIT_SHARE_HI, SPLIT_SHARE_LO
 
 # 이평·신고가 룩백 상한 — 기준일 이전 최대 260 거래일(약 1년). 이걸 넘는 요청은 400.
 # 연도 parquet 2개(당해+전년)만 읽으면 되는 선이기도 하다.
@@ -50,11 +56,21 @@ class HistPanel:
     "신호 계산 시점 < 체결 시점" 불변식(CLAUDE.md)을 코드로 강제하는 지점이다.
     """
 
+    _NO_ADJ = "no-adjust"  # Stocks 없음 → 보정 생략 표식
+
     def __init__(self, hist: pd.DataFrame, base_date: pd.Timestamp) -> None:
         self.base_date = pd.Timestamp(base_date)
         # 기준일 이후 데이터는 어떤 조건도 봐선 안 된다.
         self._hist = hist.loc[hist["Date"] <= self.base_date]
+        # (Date, Code) 중복이 있으면 pivot 의 aggfunc='last' 가 조용히 한 값을 고른다 —
+        # 특히 _adj 누적곱은 하루 오염이 과거 전체를 잘못 스케일링하므로 즉시 실패시킨다.
+        if self._hist.duplicated(["Date", "Code"]).any():
+            raise ValueError("일봉 패널에 (Date, Code) 중복 행이 있습니다 — 데이터 무결성 확인 필요.")
         self._wide_cache: dict[str, pd.DataFrame] = {}
+        self._adj_cache: pd.DataFrame | str | None = None
+
+    def has(self, col: str) -> bool:
+        return col in self._hist.columns
 
     def _wide(self, col: str) -> pd.DataFrame:
         if col not in self._wide_cache:
@@ -63,16 +79,61 @@ class HistPanel:
         return self._wide_cache[col]
 
     @property
+    def _adj(self) -> pd.DataFrame | str:
+        """액면분할/병합 back-adjust 계수 (ADR-0006, layer1 adjust.py 와 같은 판정).
+
+        adj[i] = 1 / Π{ 분할비 f_j : j > i } — 최신일(기준일)은 1, 분할 이전 과거만 축소된다.
+        Stocks 컬럼이 없으면(합성 테스트 등) 보정을 생략한다.
+        """
+        if self._adj_cache is None:
+            if not self.has("Stocks"):
+                self._adj_cache = self._NO_ADJ
+            else:
+                # ffill: 장기 정지·결측으로 행이 빈 종목은 "직전 실제 거래일" 값과 비교해야
+                # 공백 경계에 낀 분할을 놓치지 않는다 (per-code 압축 계산과 동치가 되는 지점).
+                # 상장 전 구간의 선행 NaN 은 ffill 후에도 NaN → 계수 1.0 으로 안전.
+                stocks = self._wide("Stocks").ffill()
+                close = self._wide("Close").ffill()
+                share_ratio = stocks / stocks.shift(1)
+                price_ratio = close.shift(1) / close
+                big = (share_ratio >= SPLIT_SHARE_HI) | (share_ratio <= SPLIT_SHARE_LO)
+                matches = (price_ratio > 0) & ((share_ratio / price_ratio - 1).abs() < SPLIT_PRICE_MATCH)
+                f = share_ratio.where(big & matches, 1.0).fillna(1.0)
+                geq = f.iloc[::-1].cumprod().iloc[::-1]  # Π_{j>=i}
+                self._adj_cache = 1.0 / geq.shift(-1).fillna(1.0)  # Π_{j>i}
+        return self._adj_cache
+
+    def _adjusted(self, col: str, *, divide: bool = False) -> pd.DataFrame:
+        key = f"adj:{col}"
+        if key not in self._wide_cache:
+            w = self._wide(col)
+            adj = self._adj
+            if isinstance(adj, str):  # 보정 생략
+                self._wide_cache[key] = w
+            else:
+                self._wide_cache[key] = w / adj if divide else w * adj
+        return self._wide_cache[key]
+
+    @property
     def close(self) -> pd.DataFrame:
-        return self._wide("Close")
+        return self._adjusted("Close")
 
     @property
     def open(self) -> pd.DataFrame:
-        return self._wide("Open")
+        return self._adjusted("Open")
+
+    @property
+    def high(self) -> pd.DataFrame:
+        return self._adjusted("High")
+
+    @property
+    def low(self) -> pd.DataFrame:
+        return self._adjusted("Low")
 
     @property
     def volume(self) -> pd.DataFrame:
-        return self._wide("Volume")
+        # 분할 전 거래량은 주식수가 적었으니 비교를 위해 늘린다 (adjust.py 와 동일)
+        return self._adjusted("Volume", divide=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -333,6 +394,81 @@ def cond_vol_vs_prev(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     return (prev > 0) & (v.iloc[-1] >= prev * p["min"])
 
 
+# ─────────────────────────────────────────────────────────────
+# 패턴분석 (pattern) — TA-Lib 캔들패턴 (BORB-41 ①)
+# ─────────────────────────────────────────────────────────────
+
+# key → (TA-Lib 함수명, 이름, 설명, 방향: +1 상승 신호만 / -1 하락 신호만 / 0 발생 자체)
+_PATTERNS: dict[str, tuple[str, str, str, int]] = {
+    "pat_hammer": ("CDLHAMMER", "망치형", "하락 뒤 아래꼬리 긴 반전 양봉", 1),
+    "pat_inverted_hammer": ("CDLINVERTEDHAMMER", "역망치형", "하락 뒤 위꼬리 긴 반전 시도", 1),
+    "pat_hanging_man": ("CDLHANGINGMAN", "교수형", "상승 뒤 아래꼬리 긴 하락 경고", -1),
+    "pat_shooting_star": ("CDLSHOOTINGSTAR", "유성형", "상승 뒤 위꼬리 긴 하락 경고", -1),
+    "pat_bull_engulf": ("CDLENGULFING", "상승장악형", "전일 음봉을 감싸는 큰 양봉", 1),
+    "pat_bear_engulf": ("CDLENGULFING", "하락장악형", "전일 양봉을 감싸는 큰 음봉", -1),
+    "pat_morning_star": ("CDLMORNINGSTAR", "샛별형", "하락-교착-상승 3봉 반전", 1),
+    "pat_evening_star": ("CDLEVENINGSTAR", "저녁별형", "상승-교착-하락 3봉 반전", -1),
+    "pat_three_soldiers": ("CDL3WHITESOLDIERS", "적삼병", "연속 3개 장대 양봉", 1),
+    "pat_three_crows": ("CDL3BLACKCROWS", "흑삼병", "연속 3개 장대 음봉", -1),
+    "pat_doji": ("CDLDOJI", "도지", "시가≈종가 교착 캔들", 0),
+}
+
+
+# 패턴별 필요 워밍업 봉 수 — 매직넘버 대신 TA-Lib 공식 lookback API 로 계산한다.
+# (첫 유효 출력 전에 소비되는 입력 봉 수. 예: CDL3BLACKCROWS=13)
+_PATTERN_LOOKBACK: dict[str, int] = {}
+
+
+def _pattern_lookback(talib_name: str) -> int:
+    if talib_name not in _PATTERN_LOOKBACK:
+        _PATTERN_LOOKBACK[talib_name] = int(talib.abstract.Function(talib_name).lookback)
+    return _PATTERN_LOOKBACK[talib_name]
+
+
+def _make_pattern_fn(talib_name: str, direction: int) -> CondFn:
+    """TA-Lib 캔들패턴 → '최근 within 거래일 이내 발생' 조건 함수.
+
+    TA-Lib 는 종목별 1차원 배열을 받으므로 종목 루프를 돈다 — 호출당 C 연산이라
+    전 종목(~2,600)도 수백 ms 수준. 결측일(중간 NaN)은 종목별로 걷어내고 계산한다.
+    이때 결측일이 낀 종목은 "within N거래일"의 기준이 공통 달력이 아니라 그 종목의
+    유효 봉 기준이 된다 — 정지 잦은 종목에서 판정 시점이 미묘하게 다를 수 있는 알려진 한계.
+    """
+    fn = getattr(talib, talib_name)
+
+    def cond(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
+        if not (hist.has("High") and hist.has("Low")):
+            return _none(base)
+        within = p["within"]
+        o, h, low, c = hist.open, hist.high, hist.low, hist.close
+        out: dict[str, bool] = {}
+        for code in c.columns:
+            ohlc = pd.DataFrame(
+                {"o": o[code], "h": h[code], "l": low[code], "c": c[code]}
+            ).dropna()
+            # marcap 은 거래정지일을 O=H=L=0, Close=직전가로 채운다(BORB-32 실측).
+            # dropna 로는 안 걸러지므로 0 이하 가격 행(가짜 캔들)을 명시적으로 제거한다 —
+            # 안 하면 정지 해제 부근에서 장대양봉/장악형 허위 패턴이 잡힌다.
+            ohlc = ohlc[(ohlc > 0).all(axis=1)]
+            if len(ohlc) < 3:  # 최소 3봉은 있어야 패턴이 성립한다
+                out[code] = False
+                continue
+            v = fn(
+                ohlc["o"].to_numpy(float),
+                ohlc["h"].to_numpy(float),
+                ohlc["l"].to_numpy(float),
+                ohlc["c"].to_numpy(float),
+            )[-within:]
+            if direction > 0:
+                out[code] = bool((v > 0).any())
+            elif direction < 0:
+                out[code] = bool((v < 0).any())
+            else:
+                out[code] = bool((v != 0).any())
+        return pd.Series(out)
+
+    return cond
+
+
 def cond_vol_vs_avg(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     """N일평균대비거래량배수: 기준일 거래량 ≥ 직전 days일(당일 제외) 평균 × min배."""
     d = p["days"]
@@ -520,6 +656,19 @@ _ALL = [
         cond_vol_vs_avg,
         lookback=lambda p: p["days"],
     ),
+    # ── 패턴분석 (TA-Lib) ──
+    *[
+        Condition(
+            key,
+            name,
+            f"{desc} — 최근 N거래일 이내 발생",
+            (_int("within", "발생 이내"),),
+            _make_pattern_fn(talib_name, direction),
+            # 패턴별 정확한 워밍업은 TA-Lib 공식 lookback (클로저 캡처는 기본값 인자로)
+            lookback=lambda p, n=talib_name: p["within"] + _pattern_lookback(n),
+        )
+        for key, (talib_name, name, desc, direction) in _PATTERNS.items()
+    ],
 ]
 
 CONDITIONS: dict[str, Condition] = {c.key: c for c in _ALL}
@@ -538,6 +687,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         ["golden_cross", "dead_cross", "ma_breakout", "above_ma", "disparity", "ma_aligned"],
     ),
     ("volume", "거래량분석", ["vol_vs_prev", "vol_vs_avg"]),
+    ("pattern", "패턴분석", list(_PATTERNS)),
 ]
 
 

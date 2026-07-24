@@ -25,7 +25,12 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from src.layer1_data.adjust import apply_split_adjustment
+from src.layer1_data.adjust import (
+    SPLIT_PRICE_MATCH,
+    SPLIT_SHARE_HI,
+    SPLIT_SHARE_LO,
+    apply_split_adjustment,
+)
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer3_strategy import conditions as cond_registry
@@ -138,8 +143,8 @@ def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
     return agg.reset_index(drop=True).rename(columns={"TradeDate": "Date"})
 
 
-# 조건검색은 시총·소속부까지 필요해 캔들 캐시와 컬럼을 분리한다.
-_SCREEN_COLS = ["Date", "Code", "Name", "Market", "Dept", "Close", "Amount", "Marcap"]
+# 조건검색은 시총·소속부까지 필요해 캔들 캐시와 컬럼을 분리한다. Stocks 는 등락률 분할 보정용.
+_SCREEN_COLS = ["Date", "Code", "Name", "Market", "Dept", "Close", "Amount", "Marcap", "Stocks"]
 
 
 @lru_cache(maxsize=4)
@@ -279,16 +284,29 @@ def api_screen(
 
 
 def _change_vs_prev(year: int, base_date: pd.Timestamp) -> dict[str, float]:
-    """기준일 종가의 직전 거래일 대비 등락률(%). 직전 거래일이 같은 해에 없으면 빈 dict."""
+    """기준일 종가의 직전 거래일 대비 등락률(%). 직전 거래일이 같은 해에 없으면 빈 dict.
+
+    액면분할/병합이 낀 날은 전일 종가를 분할비로 보정한다(ADR-0006 과 같은 판정) —
+    안 하면 분할일 등락률이 −98% 처럼 나와 화면(조건검색·시장맵·관심종목)이 전부 왜곡된다.
+    """
     df = _load_year_screen(year)
     prev_dates = df.loc[df["Date"] < base_date, "Date"]
     if prev_dates.empty:
         return {}
     prev_date = prev_dates.max()
-    d0 = df[df["Date"] == base_date].set_index("Code")["Close"]
-    d1 = df[df["Date"] == prev_date].set_index("Code")["Close"]
+    d0 = df[df["Date"] == base_date].set_index("Code")
+    d1 = df[df["Date"] == prev_date].set_index("Code")
     common = d0.index.intersection(d1.index)
-    chg = (d0.loc[common] / d1.loc[common] - 1) * 100
+    c0, c1 = d0.loc[common, "Close"], d1.loc[common, "Close"]
+    share_ratio = d0.loc[common, "Stocks"] / d1.loc[common, "Stocks"]
+    price_ratio = c1 / c0
+    split = (
+        ((share_ratio >= SPLIT_SHARE_HI) | (share_ratio <= SPLIT_SHARE_LO))
+        & (price_ratio > 0)
+        & ((share_ratio / price_ratio - 1).abs() < SPLIT_PRICE_MATCH)
+    )
+    prev_adj = c1.where(~split, c1 / share_ratio)
+    chg = (c0 / prev_adj - 1) * 100
     return {str(c): round(float(v), 2) for c, v in chg.items() if pd.notna(v)}
 
 
@@ -298,7 +316,8 @@ def _change_vs_prev(year: int, base_date: pd.Timestamp) -> dict[str, float]:
 # ─────────────────────────────────────────────────────────────
 
 # 조건 계산에 필요한 일봉 컬럼 (룩백 패널용). 캔들 캐시(_load_year_slim)에서 잘라 쓴다.
-_HIST_COLS = ["Date", "Code", "Open", "Close", "Volume"]
+# High/Low 는 패턴분석(TA-Lib), Stocks 는 수정주가 back-adjust(ADR-0006)용.
+_HIST_COLS = ["Date", "Code", "Open", "High", "Low", "Close", "Volume", "Stocks"]
 
 
 class ConditionSpec(BaseModel):
@@ -443,11 +462,10 @@ def api_heatmap(
     dates = sorted(df["Date"].unique())
     if len(dates) < 2:
         raise HTTPException(status_code=503, detail="등락률 계산에 이틀치 데이터가 필요합니다.")
-    d0 = apply_exclusions(df[df["Date"] == dates[-1]], DEFAULT_POLICY).set_index("Code")
-    d1 = df[df["Date"] == dates[-2]].set_index("Code")
-    common = d0.index.intersection(d1.index)
-    d0 = d0.loc[common]
-    chg = (d0["Close"] / d1.loc[common, "Close"] - 1) * 100
+    base_date = pd.Timestamp(dates[-1])
+    d0 = apply_exclusions(df[df["Date"] == base_date], DEFAULT_POLICY).set_index("Code")
+    # 등락률은 분할 보정 포함 공통 함수로 — screen/quotes 와 같은 정본 (분할일 −98% 왜곡 방지)
+    chg = _change_vs_prev(years[-1], base_date)
     markets = {}
     for market, g in d0.groupby("Market"):
         sel = g.nlargest(top, "Marcap")
@@ -456,7 +474,8 @@ def api_heatmap(
                 "code": str(i),
                 "name": str(r.Name),
                 "marcap": float(r.Marcap),
-                "chg": round(float(chg.loc[i]), 2),
+                # 직전 거래일 데이터가 없는 종목(신규 상장 등)은 보합(0)으로 그린다
+                "chg": chg.get(str(i), 0.0),
             }
             for i, r in sel.iterrows()
         ]

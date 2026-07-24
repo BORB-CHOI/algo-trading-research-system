@@ -90,7 +90,7 @@ def test_categories_payload_matches_contract() -> None:
     payload = categories_payload()
     assert set(payload) == {"categories"}
     cat_keys = [c["key"] for c in payload["categories"]]
-    assert cat_keys == ["range", "price", "technical", "volume"]
+    assert cat_keys == ["range", "price", "technical", "volume", "pattern"]
     seen = []
     for cat in payload["categories"]:
         assert set(cat) == {"key", "name", "conditions"}
@@ -358,7 +358,7 @@ def test_api_conditions_shape() -> None:
     r = client.get("/api/conditions")
     assert r.status_code == 200
     body = r.json()
-    assert [c["key"] for c in body["categories"]] == ["range", "price", "technical", "volume"]
+    assert [c["key"] for c in body["categories"]] == ["range", "price", "technical", "volume", "pattern"]
 
 
 @pytest.mark.slow

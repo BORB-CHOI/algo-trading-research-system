@@ -33,6 +33,7 @@ webapp = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "httpx>=0.27",     # TestClient (api 테스트)
+    "ta-lib>=0.6",     # 조건검색 패턴분석 — 캔들패턴 61종 (BORB-41)
 ]
 
 [build-system]
