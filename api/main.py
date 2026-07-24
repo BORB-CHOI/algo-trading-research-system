@@ -264,6 +264,42 @@ def api_screen(
     }
 
 
+@app.get("/api/heatmap")
+def api_heatmap(
+    top: int = Query(150, ge=10, le=500, description="시장별 시총 상위 N"),
+) -> dict:
+    """finviz 형 시장맵 데이터 (BORB-40). 최신 거래일 vs 직전 거래일 등락률 + 시총.
+
+    업종 분류가 marcap 에 없어 시장(KOSPI/KOSDAQ/…) 단위로 그룹핑한다.
+    업종 중첩은 업종 데이터 소스 확보 후(별도 이슈).
+    """
+    years = available_years()
+    if not years:
+        raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
+    df = _load_year_screen(years[-1])
+    dates = sorted(df["Date"].unique())
+    if len(dates) < 2:
+        raise HTTPException(status_code=503, detail="등락률 계산에 이틀치 데이터가 필요합니다.")
+    d0 = apply_exclusions(df[df["Date"] == dates[-1]], DEFAULT_POLICY).set_index("Code")
+    d1 = df[df["Date"] == dates[-2]].set_index("Code")
+    common = d0.index.intersection(d1.index)
+    d0 = d0.loc[common]
+    chg = (d0["Close"] / d1.loc[common, "Close"] - 1) * 100
+    markets = {}
+    for market, g in d0.groupby("Market"):
+        sel = g.nlargest(top, "Marcap")
+        markets[str(market)] = [
+            {
+                "code": str(i),
+                "name": str(r.Name),
+                "marcap": float(r.Marcap),
+                "chg": round(float(chg.loc[i]), 2),
+            }
+            for i, r in sel.iterrows()
+        ]
+    return {"date": pd.Timestamp(dates[-1]).strftime("%Y-%m-%d"), "markets": markets}
+
+
 @app.get("/api/strategies")
 def api_strategies() -> dict:
     """전략 오버레이 목록 (BORB-39 ④). 전략은 파이썬에 등록된 결정론적 함수뿐이다."""
