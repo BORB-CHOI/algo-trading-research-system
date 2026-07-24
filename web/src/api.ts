@@ -80,6 +80,66 @@ export async function fetchScreen(p: ScreenParams): Promise<ScreenResponse> {
   return getJson(`/api/screen?${params.toString()}`)
 }
 
+// ── 조건검색 [0150] ─────────────────────────────────────────────
+// GET /api/conditions (조건 카탈로그) + POST /api/screen/run (조건 결합 검색).
+// 계약은 백엔드와 합의된 형태 그대로 — 변형 금지.
+
+export type ConditionParamDef = {
+  key: string
+  label: string // "이상" / "이하" / "기간" 등
+  type: 'number' | 'int'
+  unit: '원' | '억' | '%' | '일' | '배' | '주'
+  required: boolean // false 면 생략 가능. 단 조건당 최소 1개 값 필요
+}
+
+export type ConditionDef = {
+  key: string // "price_range" 등
+  name: string // "주가범위"
+  desc: string // "종가가 X원 이상 Y원 이하"
+  params: ConditionParamDef[]
+}
+
+export type ConditionCategory = {
+  key: string // "range" | "price" | "technical" | "volume"
+  name: string // "범위지정" 등
+  conditions: ConditionDef[]
+}
+
+export type ConditionsResponse = {
+  categories: ConditionCategory[]
+}
+
+export async function fetchConditions(): Promise<ConditionsResponse> {
+  return getJson('/api/conditions')
+}
+
+export type ScreenCondition = {
+  key: string
+  params: Record<string, number> // 값은 항상 요청에 담는다(서버 기본값 없음)
+}
+
+export type ScreenRunRequest = {
+  date?: string // 생략 = 최신 거래일
+  logic: 'and' | 'or'
+  conditions: ScreenCondition[]
+  limit: number
+}
+
+// 응답은 기존 ScreenResponse 와 동일 형태({date,total,items}).
+export async function runScreen(req: ScreenRunRequest): Promise<ScreenResponse> {
+  const res = await fetch('/api/screen/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) {
+    // 400(빈 조건/파라미터 부족/모르는 key)·503(데이터 없음) — detail 은 한국어 메시지
+    const body = (await res.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(body.detail ?? `요청 실패 (${res.status})`)
+  }
+  return (await res.json()) as ScreenResponse
+}
+
 export async function fetchStrategies(): Promise<string[]> {
   const { strategies } = await getJson<{ strategies: string[] }>('/api/strategies')
   return strategies

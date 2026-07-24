@@ -18,20 +18,34 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from src.layer1_data.adjust import apply_split_adjustment
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
+from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy.case_overlay import STRATEGIES
 from src.layer3_strategy.screening import ScreeningRule, screen
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
 # Amount(거래대금)는 KLineChart 의 turnover 로. Stocks(상장주식수)는 액면분할 감지용(ADR-0006).
-_CANDLE_COLS = ["Date", "Code", "Name", "Open", "High", "Low", "Close", "Volume", "Amount", "Stocks"]
+_CANDLE_COLS = [
+    "Date",
+    "Code",
+    "Name",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Amount",
+    "Stocks",
+]
 
 app = FastAPI(title="ATS 케이스 검사기 API", version="0.1.0")
 
@@ -39,7 +53,7 @@ app = FastAPI(title="ATS 케이스 검사기 API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],  # POST 는 /api/screen/run (조건검색 실행)
     allow_headers=["*"],
 )
 
@@ -71,9 +85,7 @@ def _load_code_history(code: str, start_year: int, end_year: int, years: list[in
     return df.reset_index(drop=True)
 
 
-def get_candles(
-    code: str, start: str | None, end: str | None, adjust: bool = True
-) -> pd.DataFrame:
+def get_candles(code: str, start: str | None, end: str | None, adjust: bool = True) -> pd.DataFrame:
     """한 종목의 일봉을 구간으로 잘라 날짜순으로 돌려준다.
 
     start/end 는 'YYYY-MM-DD'. 없으면 가장 최근 연도 전체를 기본 구간으로 쓴다.
@@ -278,6 +290,109 @@ def _change_vs_prev(year: int, base_date: pd.Timestamp) -> dict[str, float]:
     common = d0.index.intersection(d1.index)
     chg = (d0.loc[common] / d1.loc[common] - 1) * 100
     return {str(c): round(float(v), 2) for c, v in chg.items() if pd.notna(v)}
+
+
+# ─────────────────────────────────────────────────────────────
+# 조건검색 (키움 [0150] 방식) — GET /api/conditions + POST /api/screen/run
+# 조건 정의·계산의 정본은 layer3 conditions.py 다. 여기는 데이터 로드와 응답 조립만 한다.
+# ─────────────────────────────────────────────────────────────
+
+# 조건 계산에 필요한 일봉 컬럼 (룩백 패널용). 캔들 캐시(_load_year_slim)에서 잘라 쓴다.
+_HIST_COLS = ["Date", "Code", "Open", "Close", "Volume"]
+
+
+class ConditionSpec(BaseModel):
+    key: str
+    params: dict[str, float | int | None] = Field(default_factory=dict)
+
+
+class ScreenRunRequest(BaseModel):
+    date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    logic: Literal["and", "or"] = "and"
+    conditions: list[ConditionSpec] = Field(default_factory=list)
+    limit: int = Field(100, ge=1, le=200)
+
+
+@app.get("/api/conditions")
+def api_conditions() -> dict:
+    """조건검색 조건 목록 — 프런트가 이 메타로 조건식 UI 를 그린다(계약 고정)."""
+    return cond_registry.categories_payload()
+
+
+def _load_history_panel(
+    year: int, years: list[int], base_date: pd.Timestamp, lookback: int, codes: set[str]
+) -> pd.DataFrame:
+    """기준일 이하 최근 (lookback+1) 거래일의 일봉 패널(long 형).
+
+    당해 연도만으로 거래일이 모자라면 전년도까지 로드한다(연도 경계).
+    기준일 이후 행은 여기서 한 번, HistPanel 생성자에서 또 한 번 잘린다(look-ahead 금지).
+    """
+    frames = [_load_year_slim(year)]
+    n_dates = frames[0].loc[frames[0]["Date"] <= base_date, "Date"].nunique()
+    # 연간 거래일은 ~242일 — 룩백 260 이면 전년도 하나로도 모자랄 수 있어 채워질 때까지 거슬러 간다.
+    y = year - 1
+    while n_dates < lookback + 1 and y in years:
+        prev = _load_year_slim(y)
+        frames.append(prev)
+        n_dates += prev["Date"].nunique()
+        y -= 1
+    hist = pd.concat(frames, ignore_index=True)[_HIST_COLS]
+    hist = hist[(hist["Date"] <= base_date) & hist["Code"].isin(codes)]
+    keep = hist["Date"].drop_duplicates().sort_values().iloc[-(lookback + 1) :]
+    return hist[hist["Date"].isin(keep)]
+
+
+@app.post("/api/screen/run")
+def api_screen_run(req: ScreenRunRequest) -> dict:
+    """조건검색 실행 (키움 [0150] 방식). **조회·시각화 전용** — 주문·매매 판단 아님.
+
+    임계값·지표 기간은 전부 요청에서 받는다 — 서버 기본값 금지(CLAUDE.md placeholder 원칙).
+    """
+    try:
+        parsed = cond_registry.parse_conditions([c.model_dump() for c in req.conditions])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    years = available_years()
+    if not years:
+        raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
+    year = min(int(req.date[:4]), years[-1]) if req.date else years[-1]
+    if year not in years:
+        raise HTTPException(status_code=503, detail=f"{year}년 데이터가 없습니다.")
+
+    df = _load_year_screen(year)
+    if req.date:
+        df = df[df["Date"] <= pd.Timestamp(req.date)]
+    if df.empty:
+        raise HTTPException(status_code=503, detail=f"{req.date} 이전 거래일 데이터가 없습니다.")
+    base_date = df["Date"].max()  # 기준일이 휴장일이면 직전 거래일로
+    base = apply_exclusions(df[df["Date"] == base_date], DEFAULT_POLICY).set_index("Code")
+
+    lookback = cond_registry.required_lookback(parsed)
+    hist = _load_history_panel(year, years, base_date, lookback, set(base.index))
+    panel = cond_registry.HistPanel(hist, base_date)
+
+    mask = cond_registry.evaluate(parsed, panel, base, req.logic)
+    hits = base.loc[mask].sort_values("Amount", ascending=False)
+    total = len(hits)
+    hits = hits.head(req.limit)
+    chg = _change_vs_prev(year, base_date)
+    return {
+        "date": base_date.strftime("%Y-%m-%d"),
+        "total": total,
+        "items": [
+            {
+                "code": str(r.Index),
+                "name": str(r.Name),
+                "market": str(r.Market),
+                "close": float(r.Close),
+                "chg": chg.get(str(r.Index)),
+                "amount": float(r.Amount),
+                "marcap": float(r.Marcap),
+            }
+            for r in hits.itertuples()
+        ],
+    }
 
 
 @app.get("/api/quotes")

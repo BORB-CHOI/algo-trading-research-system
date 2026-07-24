@@ -158,7 +158,7 @@ export function HtsApp() {
         <span className="hint-inline">탭을 드래그해 분할·이동, 경계선 드래그로 리사이즈</span>
       </header>
       <div className="dock-area">
-        <DockviewReact className="dockview-theme-abyss" components={components} onReady={onReady} />
+        <DockviewReact className="dockview-theme-light" components={components} onReady={onReady} />
       </div>
     </div>
   )

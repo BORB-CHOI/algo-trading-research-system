@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchQuotes, type Quote } from '../../api'
-import { pickSymbol, type SymbolPick } from '../bus'
+import { notifyWatchlistChanged, onWatchlistChanged, pickSymbol, type SymbolPick } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
 
 // 관심종목(테마) 패널 — 그룹별 종목 리스트 + 시세(/api/quotes). 저장은 localStorage.
@@ -56,9 +56,13 @@ export function WatchlistPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [group, wl])
 
+  // 다른 패널(조건검색 '관심' 버튼 등)이 저장소를 바꾸면 다시 읽는다 — stale 덮어쓰기 방지.
+  useEffect(() => onWatchlistChanged(() => setWl(loadWl())), [])
+
   function save(next: Watchlist) {
     setWl(next)
     localStorage.setItem(WL_KEY, JSON.stringify(next))
+    notifyWatchlistChanged()
   }
 
   function selectGroup(name: string) {

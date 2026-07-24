@@ -216,7 +216,10 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
       if (!strategy) {
         store.set([])
       } else {
-        const { signals } = await fetchSignals(symbolRef.current.ticker, strategy)
+        const ticker = symbolRef.current.ticker
+        const { signals } = await fetchSignals(ticker, strategy)
+        // 응답 대기 중 종목이 바뀌었으면 버린다 — 이전 종목 신호가 새 차트에 그려지는 경합 방지.
+        if (symbolRef.current.ticker !== ticker) return store.size()
         store.set(signals)
       }
       // Pro 는 지표 재계산 API 를 노출하지 않아 setSymbol 로 데이터 재적재를 유도한다.
@@ -233,7 +236,8 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
 
     chartRef.current = new KLineChartPro({
       container: el,
-      theme: 'dark', // HTS 다크 셸과 통일 (ADR-0008)
+      theme: 'light', // 오너 지시: 화이트 계열 (다크 ❌)
+      watermark: '', // 배경 KLineChart 로고 제거 (오너 지시)
       styles: KOREAN_STYLES,
       locale: 'ko-KR',
       drawingBarVisible: true, // 추세선·피보나치 등 그리기 툴바

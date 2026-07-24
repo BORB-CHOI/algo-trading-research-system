@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from src.layer4_execution.costs import DEFAULT_COST, CostModel
+from src.layer4_execution.slippage import SqrtImpactSlippage
 
 # ── §4.1 데이터 3분할 (절대 원칙) ──────────────────────────────
 SPLITS: dict[str, tuple[str, str]] = {
@@ -58,7 +59,8 @@ class Trade:
     entry_price: float
     exit_price: float
     gross_return: float  # 비용 전
-    net_return: float  # 비용 후 (ADR-0004)
+    net_return: float  # 비용·슬리피지 후 (ADR-0004)
+    slippage_rate: float = 0.0  # 이 거래에 적용된 왕복 슬리피지율
 
 
 @dataclass
@@ -92,10 +94,23 @@ def _next_tradable(df: pd.DataFrame, idx: int) -> int | None:
     return None
 
 
+def _adv_asof(df: pd.DataFrame, t: int, window: int) -> float:
+    """신호일(t)까지의 최근 window 일 평균 거래대금(ADV).
+
+    t **이전** 데이터만 쓴다 — 슬리피지 추정에 미래 유동성이 새면 look-ahead 다.
+    무거래일(Amount==0)도 평균에 포함한다(유동성 얕음을 그대로 반영, 보수적).
+    """
+    lo = max(0, t - window + 1)
+    return float(df["Amount"].iloc[lo : t + 1].mean())
+
+
 def run_symbol(
     df: pd.DataFrame,
     position: pd.Series,
     cost: CostModel = DEFAULT_COST,
+    slippage: SqrtImpactSlippage | None = None,
+    order_notional: float | None = None,
+    adv_window: int = 20,
 ) -> BacktestResult:
     """한 종목 백테스트. df 는 수정주가 일봉(날짜 오름차순), position 은 0/1 목표 포지션.
 
@@ -103,10 +118,16 @@ def run_symbol(
     엔진은 그 판단을 t+1 이후 첫 거래 가능일 시가에 체결한다. 따라서 어떤 경우에도
     체결일 > 신호일이 성립한다(look-ahead 구조 차단).
 
+    slippage + order_notional 을 주면 제곱근 충격 슬리피지를 왕복으로 물린다.
+    ADV 는 신호일까지의 최근 adv_window 일 평균(미래 유동성 참조 ❌). ADV≈0 이면
+    사실상 체결 불가(슬리피지 ∞)이므로 그 진입 신호는 버린다.
+
     전량 진입/전량 청산의 단순 모델이다 — 포지션 크기·분할 매매는 전략 확정 후 확장한다.
     """
     if len(df) != len(position):
         raise ValueError("df 와 position 길이가 다르다.")
+    if slippage is not None and order_notional is None:
+        raise ValueError("slippage 를 쓰려면 order_notional(주문금액)이 필요하다.")
     df = df.reset_index(drop=True)
     pos = position.reset_index(drop=True).fillna(0).astype(int)
 
@@ -116,6 +137,11 @@ def run_symbol(
     for t in range(len(df) - 1):
         want = pos.iloc[t]
         if holding is None and want == 1:
+            slip_rate = 0.0
+            if slippage is not None:
+                slip_rate = slippage.round_trip_rate(order_notional or 0.0, _adv_asof(df, t, adv_window))
+                if not slip_rate < float("inf"):  # inf·NaN 모두 여기서 걸린다
+                    continue  # 유동성 없음 — 이 진입 신호는 체결 불가로 버린다
             fill = _next_tradable(df, t + 1)
             if fill is None:
                 break
@@ -124,6 +150,7 @@ def run_symbol(
                 "entry_date": df["Date"].iloc[fill],
                 "entry_price": float(df["Open"].iloc[fill]),
                 "entry_idx": fill,
+                "slippage_rate": slip_rate,
             }
         elif holding is not None and want == 0 and t >= holding["entry_idx"]:
             fill = _next_tradable(df, t + 1)
@@ -132,6 +159,7 @@ def run_symbol(
             entry = holding["entry_price"]
             exit_price = float(df["Open"].iloc[fill])
             gross = exit_price / entry - 1
+            slip = holding["slippage_rate"]
             result.trades.append(
                 Trade(
                     code=str(df["Code"].iloc[0]),
@@ -141,7 +169,9 @@ def run_symbol(
                     entry_price=entry,
                     exit_price=exit_price,
                     gross_return=gross,
-                    net_return=cost.net_return(gross),  # ADR-0004 왕복 정액률
+                    # ADR-0004: 왕복 정액률 + (옵션) 제곱근 충격 슬리피지
+                    net_return=cost.net_return(gross) - slip,
+                    slippage_rate=slip,
                 )
             )
             holding = None

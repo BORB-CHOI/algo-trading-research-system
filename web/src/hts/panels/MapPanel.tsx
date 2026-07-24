@@ -6,18 +6,23 @@ import { pickSymbol } from '../bus'
 // finviz 관례: 타일 크기 = 시총, 색 = 등락률. 한국식 상승 빨강/하락 파랑.
 type HeatItem = { code: string; name: string; marcap: number; chg: number }
 
-// 등락률 → 타일 색: 0% 근처 중립 회색(#3a4150)에서 ±3% 로 갈수록
-// 진한 빨강(#f04452 = --hts-up)/파랑(#3485fa = --hts-down)으로 부드럽게 보간.
+// 등락률 → 타일 색: 0% 근처 중립 연회색(#c8ceda)에서 ±3% 로 갈수록
+// 진한 빨강(#e01e1e = --hts-up)/파랑(#1668d0 = --hts-down)으로 부드럽게 보간. 화이트 셸 기준.
 // (ECharts 캔버스는 CSS var() 를 못 읽으므로 토큰 값을 리터럴로 둔다)
-const NEUTRAL = [58, 65, 80] as const // #3a4150 중립
-const UP_MAX = [240, 68, 82] as const // #f04452 (--hts-up)
-const DOWN_MAX = [52, 133, 250] as const // #3485fa (--hts-down)
+const NEUTRAL = [200, 206, 218] as const // #c8ceda 중립 (라이트)
+const UP_MAX = [224, 30, 30] as const // #e01e1e (--hts-up)
+const DOWN_MAX = [22, 104, 208] as const // #1668d0 (--hts-down)
 
 function tileColor(chg: number): string {
   const t = Math.min(Math.abs(chg), 3) / 3
   const [r, g, b] = chg >= 0 ? UP_MAX : DOWN_MAX
   const mix = (a: number, c: number) => Math.round(a + (c - a) * t)
   return `rgb(${mix(NEUTRAL[0], r)},${mix(NEUTRAL[1], g)},${mix(NEUTRAL[2], b)})`
+}
+
+// 중립(연회색) 근처 타일은 흰 글자가 안 보인다 — 등락이 약하면 어두운 글자로.
+function tileTextColor(chg: number): string {
+  return Math.abs(chg) < 1 ? '#1f2430' : '#ffffff'
 }
 
 // finviz 식 범례 구간 (-3% ~ +3%)
@@ -33,7 +38,7 @@ export function MapPanel() {
   useEffect(() => {
     const el = elRef.current
     if (!el) return
-    const chart = echarts.init(el, 'dark')
+    const chart = echarts.init(el) // 라이트 셸 — 다크 테마 사용 ❌ (오너 지시)
     setError('')
     fetch(`/api/heatmap?top=${topN}`)
       .then(async (r) => {
@@ -63,31 +68,31 @@ export function MapPanel() {
               left: 4,
               right: 4,
               bottom: 26, // breadcrumb 자리
-              // breadcrumb(탐색 경로) 유지 — HTS 다크 톤으로만 손질
+              // breadcrumb(탐색 경로) — 라이트 톤
               breadcrumb: {
                 show: true,
                 left: 'center',
                 bottom: 0,
                 height: 20,
                 itemStyle: {
-                  color: '#171b21', // --hts-elev
-                  borderColor: '#262c36', // --hts-border
-                  textStyle: { color: '#8b93a3', fontSize: 11 }, // --hts-text-2
+                  color: '#eef0f3', // --hts-elev
+                  borderColor: '#d8dce3', // --hts-border
+                  textStyle: { color: '#5b6472', fontSize: 11 }, // --hts-text-2
                 },
               },
-              // 시장(KOSPI/KOSDAQ) 헤더 — finviz 섹터 헤더처럼 어두운 반투명 띠
+              // 시장(KOSPI/KOSDAQ) 헤더 — finviz 섹터 헤더의 라이트 버전 (밝은 반투명 띠)
               upperLabel: {
                 show: true,
                 height: 22,
-                backgroundColor: 'rgba(23,27,33,0.78)', // --hts-elev 반투명
-                color: '#d5dae3', // --hts-text
+                backgroundColor: 'rgba(238,240,243,0.9)', // --hts-elev 반투명
+                color: '#1f2430', // --hts-text
                 fontSize: 11,
                 fontWeight: 600,
                 overflow: 'truncate',
               },
-              itemStyle: { borderColor: '#0d0f12', borderWidth: 1, gapWidth: 1 }, // --hts-bg 경계
-              // 타일 라벨: 종목명 줄임 + 등락률, 10~11px
-              label: { fontSize: 10, lineHeight: 13, overflow: 'truncate', color: '#fff' },
+              itemStyle: { borderColor: '#f4f5f7', borderWidth: 1, gapWidth: 1 }, // --hts-bg 경계
+              // 타일 라벨: 종목명 줄임 + 등락률. 글자색은 타일 진하기에 따라 개별 지정.
+              label: { fontSize: 10, lineHeight: 13, overflow: 'truncate' },
               data: Object.entries(markets).map(([market, items]) => ({
                 name: market,
                 children: items.map((s) => ({
@@ -96,7 +101,10 @@ export function MapPanel() {
                   chg: s.chg,
                   code: s.code,
                   market,
-                  label: { formatter: `${s.name}\n${s.chg > 0 ? '+' : ''}${s.chg}%` },
+                  label: {
+                    formatter: `${s.name}\n${s.chg > 0 ? '+' : ''}${s.chg}%`,
+                    color: tileTextColor(s.chg),
+                  },
                   itemStyle: { color: tileColor(s.chg) },
                 })),
               })),
@@ -163,7 +171,7 @@ export function MapPanel() {
             key={v}
             style={{
               background: tileColor(v),
-              color: '#fff',
+              color: tileTextColor(v),
               fontSize: 11,
               height: 20,
               lineHeight: '20px',

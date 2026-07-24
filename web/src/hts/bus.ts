@@ -28,6 +28,20 @@ export function onSymbolPick(fn: (s: SymbolPick) => void): () => void {
   return () => window.removeEventListener(EVENT, handler)
 }
 
+// 관심종목 localStorage 변경 전파 — 다른 패널(조건검색 등)이 그룹에 종목을 추가했을 때
+// 이미 마운트된 WatchlistPanel 이 stale 상태로 덮어쓰지 않게 재로드를 알린다.
+const WATCHLIST_EVENT = 'hts:watchlist-changed'
+
+export function notifyWatchlistChanged(): void {
+  window.dispatchEvent(new CustomEvent(WATCHLIST_EVENT))
+}
+
+export function onWatchlistChanged(fn: () => void): () => void {
+  const handler = () => fn()
+  window.addEventListener(WATCHLIST_EVENT, handler)
+  return () => window.removeEventListener(WATCHLIST_EVENT, handler)
+}
+
 // 전략 오버레이 선택 전파 (빈 문자열 = 오버레이 제거)
 const STRATEGY_EVENT = 'hts:strategy'
 

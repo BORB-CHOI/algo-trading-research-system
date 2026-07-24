@@ -1,26 +1,26 @@
-/* HTS 셸 — 고밀도 다크 HTS 톤(키움 참고). 창관리 스타일은 dockview 테마(abyss) 오버라이드가 담당.
+/* HTS 셸 — 고밀도 화이트 HTS 톤(오너 지시: 라이트 계열, 다크 ❌). 창관리는 dockview 테마 오버라이드가 담당.
    패널은 아래 :root 토큰과 공용 클래스(.panel-body .toolbar .form-row .grid .num .up .down .flat .hint .badge)만 쓴다. */
 
 :root {
-  --hts-bg: #0d0f12;        /* 앱 배경 */
-  --hts-panel: #14171c;     /* 패널 배경 */
-  --hts-elev: #171b21;      /* 헤더/툴바 */
-  --hts-border: #262c36;
-  --hts-hover: #1b2129;
-  --hts-active: #20304a;
-  --hts-text: #d5dae3;
-  --hts-text-2: #8b93a3;
-  --hts-text-3: #5a6272;
-  --hts-up: #f04452;        /* 상승 = 빨강 (한국식) */
-  --hts-down: #3485fa;      /* 하락 = 파랑 (한국식) */
+  --hts-bg: #f4f5f7;        /* 앱 배경 */
+  --hts-panel: #ffffff;     /* 패널 배경 */
+  --hts-elev: #eef0f3;      /* 헤더/툴바 */
+  --hts-border: #d8dce3;
+  --hts-hover: #f0f4fa;
+  --hts-active: #e3edff;
+  --hts-text: #1f2430;
+  --hts-text-2: #5b6472;
+  --hts-text-3: #9aa2b1;
+  --hts-up: #e01e1e;        /* 상승 = 빨강 (한국식, 차트 캔들색과 동일) */
+  --hts-down: #1668d0;      /* 하락 = 파랑 (한국식, 차트 캔들색과 동일) */
   --hts-accent: #2f6fed;
   --hts-accent-hov: #4980f0;
   /* 내부 파생값 (패널은 참조 금지) */
-  --hts-row-line: #1c212a;
-  --hts-scrollbar: #2a313d;
-  --hts-scrollbar-hov: #3a4353;
-  --hts-btn-hov: #20262f;
-  --hts-btn-hov-border: #333b48;
+  --hts-row-line: #e9edf2;
+  --hts-scrollbar: #c9cfd9;
+  --hts-scrollbar-hov: #aeb6c2;
+  --hts-btn-hov: #e7ebf1;
+  --hts-btn-hov-border: #c4cbd6;
   --hts-accent-down: #2a63d4; /* 액센트 눌림 */
   --hts-accent-rgb: 47, 111, 237; /* --hts-accent 의 RGB (반투명 파생용) */
 }
@@ -268,7 +268,7 @@ body {
 .grid button:hover { color: var(--hts-text); background: var(--hts-hover); }
 
 /* ── dockview 테마 오버라이드 (변수 우선) ─────────────────────── */
-.dockview-theme-abyss {
+.dockview-theme-light {
   /* 탭바 28px·12px, 토큰 색으로 통일 */
   --dv-tabs-and-actions-container-height: 28px;
   --dv-tabs-and-actions-container-font-size: 12px;
@@ -300,8 +300,8 @@ body {
 }
 
 /* 활성 탭 — 상단 2px 액센트 라인 (변수로는 불가, 셀렉터 오버라이드) */
-.dockview-theme-abyss .dv-tab.dv-active-tab { position: relative; }
-.dockview-theme-abyss .dv-tab.dv-active-tab::after {
+.dockview-theme-light .dv-tab.dv-active-tab { position: relative; }
+.dockview-theme-light .dv-tab.dv-active-tab::after {
   content: '';
   position: absolute;
   left: 0;
@@ -312,6 +312,6 @@ body {
   z-index: 999;
 }
 /* 비활성 그룹의 활성 탭은 액센트를 흐리게 */
-.dockview-theme-abyss .dv-groupview.dv-inactive-group > .dv-tabs-and-actions-container .dv-tab.dv-active-tab::after {
+.dockview-theme-light .dv-groupview.dv-inactive-group > .dv-tabs-and-actions-container .dv-tab.dv-active-tab::after {
   background: rgba(var(--hts-accent-rgb), 0.35);
 }
