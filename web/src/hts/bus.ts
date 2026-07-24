@@ -14,3 +14,16 @@ export function onSymbolPick(fn: (s: SymbolPick) => void): () => void {
   window.addEventListener(EVENT, handler)
   return () => window.removeEventListener(EVENT, handler)
 }
+
+// 전략 오버레이 선택 전파 (빈 문자열 = 오버레이 제거)
+const STRATEGY_EVENT = 'hts:strategy'
+
+export function pickStrategy(name: string): void {
+  window.dispatchEvent(new CustomEvent(STRATEGY_EVENT, { detail: name }))
+}
+
+export function onStrategyPick(fn: (name: string) => void): () => void {
+  const handler = (e: Event) => fn((e as CustomEvent<string>).detail)
+  window.addEventListener(STRATEGY_EVENT, handler)
+  return () => window.removeEventListener(STRATEGY_EVENT, handler)
+}

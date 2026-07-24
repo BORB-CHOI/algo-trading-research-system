@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import { ProChart, type ProChartHandle } from '../ProChart'
-import { fetchScreen, type ScreenResponse } from '../api'
-import { onSymbolPick, pickSymbol, type SymbolPick } from './bus'
+import { fetchScreen, fetchStrategies, type ScreenResponse } from '../api'
+import { onStrategyPick, onSymbolPick, pickStrategy, pickSymbol, type SymbolPick } from './bus'
 
 const EOK = 1e8
 
@@ -15,13 +15,47 @@ function fmtEok(won: number): string {
 export function ChartPanel() {
   const ref = useRef<ProChartHandle>(null)
   useEffect(() => onSymbolPick((s) => ref.current?.showSymbol(s.code, s.name, s.market)), [])
+  useEffect(() => onStrategyPick((name) => void ref.current?.applyStrategy(name || null)), [])
   return <ProChart ref={ref} />
+}
+
+// ── 전략 오버레이 패널 — 신호 계산은 전부 파이썬(layer3) ────────
+export function StrategyPanel() {
+  const [strategies, setStrategies] = useState<string[]>([])
+  const [strategy, setStrategy] = useState('')
+
+  useEffect(() => {
+    fetchStrategies().then(setStrategies).catch(() => setStrategies([]))
+  }, [])
+
+  function apply(name: string) {
+    setStrategy(name)
+    pickStrategy(name) // 모든 차트 패널에 전파
+  }
+
+  return (
+    <div className="panel-body">
+      <select value={strategy} onChange={(e) => apply(e.target.value)}>
+        <option value="">(오버레이 없음)</option>
+        {strategies.map((s) => (
+          <option key={s} value={s}>
+            {s}
+          </option>
+        ))}
+      </select>
+      <p className="hint">
+        신호(▲매수/▼매도)는 파이썬이 계산한 시각화다. 예시 전략은 확정 전략이 아니다.
+      </p>
+    </div>
+  )
 }
 
 // ── 조건검색 패널 ─────────────────────────────────────────────
 export function ScreenPanel() {
+  const [date, setDate] = useState('')
   const [minAmount, setMinAmount] = useState('')
   const [minMarcap, setMinMarcap] = useState('')
+  const [maxMarcap, setMaxMarcap] = useState('')
   const [result, setResult] = useState<ScreenResponse | null>(null)
   const [msg, setMsg] = useState('')
 
@@ -29,9 +63,14 @@ export function ScreenPanel() {
     setMsg('조회 중…')
     try {
       const num = (s: string) => (s.trim() ? Number(s) * EOK : undefined)
-      const r = await fetchScreen({ minAmount: num(minAmount), minMarcap: num(minMarcap) })
+      const r = await fetchScreen({
+        date: date || undefined,
+        minAmount: num(minAmount),
+        minMarcap: num(minMarcap),
+        maxMarcap: num(maxMarcap),
+      })
       setResult(r)
-      setMsg(`${r.date} 기준 ${r.total}종목`)
+      setMsg(`${r.date} 기준 ${r.total}종목 (거래대금순 상위 ${r.items.length})`)
     } catch (e) {
       setMsg(e instanceof Error ? e.message : '조회 실패')
     }
@@ -40,8 +79,12 @@ export function ScreenPanel() {
   return (
     <div className="panel-body">
       <div className="form-row">
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} title="기준일 (빈칸 = 최신 거래일)" />
+      </div>
+      <div className="form-row">
         <input placeholder="거래대금≥(억)" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} />
         <input placeholder="시총≥(억)" value={minMarcap} onChange={(e) => setMinMarcap(e.target.value)} />
+        <input placeholder="시총≤(억)" value={maxMarcap} onChange={(e) => setMaxMarcap(e.target.value)} />
         <button onClick={run}>검색</button>
       </div>
       <p className="hint">{msg}</p>
