@@ -21,3 +21,4 @@
 | [0004](0004-transaction-costs.md) | 거래비용·슬리피지 모델 (§6.4 정액률 다단계) | 수락 (정액률만 / 슬리피지 곡선 미해결) |
 | [0005](0005-case-inspector-webapp.md) | 케이스 검사기 웹 도구 (Vite+React / FastAPI) | 수락 (1단계 차트 완료) |
 | [0006](0006-split-adjustment.md) | 수정주가 보정 (액면분할 back-adjust) | 수락 (분할만 / 배당 미보정) |
+| [0007](0007-backtest-skeleton.md) | 백테스트 엔진 골격 (얇은 자체 엔진) | 수락 (골격만 / 체결 시점 미확정) |
