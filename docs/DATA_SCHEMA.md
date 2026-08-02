@@ -89,6 +89,43 @@ marcap의 날짜별 스냅샷에서 파생. 별도 테이블로 둘지, 패널�
 `Date, Code, 외국인_순매수, 기관_순매수, 개인_순매수, (기관 세부 분류)`.
 파생 신호: 외인 5일 누적 순매수 / 시총 (§4.3 Tier 1).
 
+## 4. 재무 (OpenDART) — **백필 대기 (BORB-41)**
+
+> **상태: 스크립트 준비 완료, 실행 대기.** `scripts/backfill_dart.py` — `DART_API_KEY`
+> 발급(https://opendart.fss.or.kr) 후 실행. 아래 스키마는 **안(案)** — 백필 후 실측으로 정정한다
+> (§1 marcap 때도 초안과 실측이 여러 곳 달랐다).
+
+- **소스**: OpenDART "단일회사 전체 재무제표"(`fnlttSinglAcntAll`), OpenDartReader `finstate_all()`.
+  연결(CFS) 우선, 연결 미작성 법인은 별도(OFS) 폴백 — `fs_div` 컬럼으로 구분 보존.
+- **저장**: `data/derived/dart/{종목코드}/{연도}Q{분기}.parquet` (분기당 1파일, 커밋 안 함 — 저장 규약 참조).
+  분기↔보고서 코드: Q1=11013(1분기), Q2=11012(반기), Q3=11014(3분기), Q4=11011(사업보고서).
+
+### 스키마 (안)
+
+| 컬럼 | 의미 | 비고 |
+|------|------|------|
+| rcept_no | 접수번호(14자리) | 원본 |
+| **rcept_dt** | **접수일자(YYYYMMDD)** | `rcept_no` 앞 8자리에서 파생 — **as-of 키** |
+| account_id / account_nm | 계정과목 ID(XBRL 표준계정) / 명 | 예: `ifrs-full_Revenue` / 매출액 |
+| account_detail | 계정 상세 | 자본변동표 등에서 사용 |
+| sj_div / sj_nm | 재무제표 구분/명 | BS/IS/CIS/CF/SCE |
+| thstrm_nm / thstrm_amount | 당기 명칭 / **당기 금액(원)** | 문자열로 올 수 있음 — 실측 후 타입 확정 |
+| thstrm_add_amount | 당기 누적 금액 | 분기 보고서에서 사용 |
+| frmtrm_nm / frmtrm_amount | 전기 명칭 / 금액 | |
+| currency | 통화 | 대부분 KRW |
+| stock_code / corp_code | 종목코드(6) / DART 고유번호(8) | 스크립트가 부여 (marcap `Code` 와 조인 키 = stock_code) |
+| bsns_year / quarter / fs_div | 사업연도 / 분기 / CFS·OFS | 스크립트가 부여 |
+
+### as-of 원칙 (look-ahead 금지 — 방법론 가드레일)
+
+재무제표의 **대상 기간과 공시일은 다르다.** 12월 결산 법인의 사업보고서(Q4)는 통상 이듬해
+3월에야 접수된다. 백테스트에서 재무 데이터는 반드시 **`rcept_dt`(접수일) 이후에만** 신호 계산에
+쓸 수 있다 — 대상 기간 종료일(예: 12-31) 기준으로 쓰면 아직 공시되지 않은 숫자를 미리 보는
+것이다. as-of 조인 키가 `rcept_dt` 인 이유. ("신호 계산 시점 < 체결 시점" 불변식의 재무판.)
+
+**남은 결정(백필 후):** 정정공시(기재정정)는 새 `rcept_no` 로 다시 접수된다 — 최초 공시본을
+쓸지(엄격한 as-of), 최종 정정본을 쓸지 정책 필요. 금액 컬럼 타입·결측 실측 확정도 백필 후.
+
 ## 저장 규약
 
 - 원본은 커밋하지 않는다 (`data/` `.gitignore`). marcap은 clone, 나머지는 로컬 적재.

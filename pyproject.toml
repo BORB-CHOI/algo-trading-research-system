@@ -28,6 +28,10 @@ dev = [
 oracle = [
     "backtesting>=0.3",
 ]
+# OpenDART 재무 백필 (BORB-41, scripts/backfill_dart.py). DART_API_KEY 수령 후 설치 — 미검증 상태로 미설치.
+opendart = [
+    "opendartreader",
+]
 # 케이스 검사기 웹 도구 백엔드 (ADR-0005). 데이터를 프런트로 내주기만 한다 — 매매 판단 ❌.
 webapp = [
     "fastapi>=0.115",
