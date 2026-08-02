@@ -12,6 +12,8 @@ kis_credentials.*
 # 데이터 파일 (대용량, 외부 재현 가능)
 # marcap clone, 적재 데이터 전부 (ADR-0002)
 data/
+# 파생 데이터 — scripts/build_adjusted.py 산출물 (수정주가 일봉, 재생성 가능)
+data/derived/
 *.db
 *.sqlite
 *.sqlite3

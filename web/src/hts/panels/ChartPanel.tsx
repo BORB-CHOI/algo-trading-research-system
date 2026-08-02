@@ -15,7 +15,8 @@ export function ChartPanel({ panelApi }: { panelApi?: DockviewPanelApi }) {
       }),
     [panelApi],
   )
-  useEffect(() => onStrategyPick((name) => void ref.current?.applyStrategy(name || null)), [])
+  // 전략 payload({key, params, signals, overlay} | null=해제)를 그대로 차트에 넘긴다.
+  useEffect(() => onStrategyPick((p) => void ref.current?.applyStrategy(p)), [])
 
   // 마운트(추가·레이아웃 복원) 시 현재 선택 상태를 이어받는다.
   // 복원된 탭 제목("차트 · X")과 실제 로드 종목이 어긋나는 것도 여기서 맞춘다.

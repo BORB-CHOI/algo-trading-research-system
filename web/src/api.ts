@@ -140,17 +140,98 @@ export async function runScreen(req: ScreenRunRequest): Promise<ScreenResponse> 
   return (await res.json()) as ScreenResponse
 }
 
-export async function fetchStrategies(): Promise<string[]> {
-  const { strategies } = await getJson<{ strategies: string[] }>('/api/strategies')
+// ── 전략 카탈로그 (ADR-0009) ────────────────────────────────────
+// 전략도 조건검색과 같은 카탈로그(이름·설명·파라미터 스키마)로 노출한다.
+// 모든 정량 값은 사용자가 입력해 요청에 담는다 — 서버에 전략 숫자 하드코딩 없음.
+// param 스키마는 조건검색(ConditionParamDef)과 동일 형식 — 같은 폼 코드를 재사용한다.
+
+export type StrategyDef = {
+  key: string // "ma_cross" | "fib_retrace" …
+  name: string // "이평 교차 (예시)" 등 표시명
+  desc: string // 한 줄 설명
+  signals: boolean // true → POST /api/signals 로 ▲▼ 신호를 받는다
+  overlay: boolean // true → POST /api/overlay 로 수평선 오버레이를 받는다
+  params: ConditionParamDef[]
+}
+
+export async function fetchStrategies(): Promise<StrategyDef[]> {
+  const { strategies } = await getJson<{ strategies: StrategyDef[] }>('/api/strategies')
   return strategies
 }
 
-export async function fetchSignals(
-  code: string,
-  strategy: string,
-): Promise<{ signals: Signal[] }> {
-  const params = new URLSearchParams({ code, strategy })
-  return getJson(`/api/signals?${params.toString()}`)
+// POST 공용 헬퍼 — 실패 시 서버 detail(한국어)을 그대로 에러 메시지로 올린다.
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const b = (await res.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(b.detail ?? `요청 실패 (${res.status})`)
+  }
+  return (await res.json()) as T
+}
+
+// POST /api/signals — 파라미터를 숨기지 않기 위해 항상 명시 전달한다(GET 버전은 제거됨).
+export type SignalsRequest = {
+  code: string
+  strategy: string
+  params: Record<string, number> // 정량 값은 전부 여기 — 서버 기본값 없음
+  start?: string
+  end?: string
+}
+
+export type SignalsResponse = {
+  code: string
+  strategy: string
+  signals: Signal[]
+}
+
+export async function postSignals(req: SignalsRequest): Promise<SignalsResponse> {
+  return postJson('/api/signals', req)
+}
+
+// POST /api/overlay — 피보나치 되돌림 등 수평선 오버레이 계산 결과.
+// 계산은 전부 파이썬 — 프런트는 받은 선·마커를 그리기만 한다(시각 전용, 매매 판단 아님).
+export type OverlayLine = {
+  price: number
+  label: string // "38.2%" / "50,000 라운드" / "베이스" 등 우측 라벨
+  kind: 'fib' | 'round' | 'anchor'
+}
+
+export type OverlayTouch = {
+  time: string // 'YYYY-MM-DD'
+  price: number
+  label: string // "38.2% 근접" 등
+}
+
+export type OverlayAnchors = {
+  base_start: string // 베이스(평평한 구간) 시작일
+  base_end: string // 베이스 끝일
+  swing_high: string // 신고가 날짜
+  base_price: number
+  high_price: number
+}
+
+export type OverlayRequest = {
+  code: string
+  strategy: string // "fib_retrace"
+  params: Record<string, number>
+  end?: string
+}
+
+export type OverlayResponse = {
+  code: string
+  strategy: string
+  anchors: OverlayAnchors
+  lines: OverlayLine[]
+  touches: OverlayTouch[]
+}
+
+// 400(파라미터 부족/베이스 못 찾음)·404(종목 없음)는 detail 한국어 메시지로 throw 된다.
+export async function postOverlay(req: OverlayRequest): Promise<OverlayResponse> {
+  return postJson('/api/overlay', req)
 }
 
 export async function fetchCandles(

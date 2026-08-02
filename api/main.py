@@ -34,7 +34,12 @@ from src.layer1_data.adjust import (
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer3_strategy import conditions as cond_registry
-from src.layer3_strategy.case_overlay import STRATEGIES
+from src.layer3_strategy.case_overlay import (
+    STRATEGIES,
+    Strategy,
+    parse_params,
+    strategies_payload,
+)
 from src.layer3_strategy.screening import ScreeningRule, screen
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
@@ -482,32 +487,104 @@ def api_heatmap(
     return {"date": pd.Timestamp(dates[-1]).strftime("%Y-%m-%d"), "markets": markets}
 
 
+# ─────────────────────────────────────────────────────────────
+# 전략 카탈로그·신호·오버레이 (ADR-0009) — GET /api/strategies + POST /api/signals·/api/overlay
+# 전략 정의·계산의 정본은 layer3 case_overlay.py(레지스트리)·fibonacci.py 다.
+# 모든 정량 값은 요청 params 로 받는다 — 서버 기본값·하드코딩 금지(ADR-0009).
+# 기존 GET /api/signals 는 제거 — 파라미터를 숨기지 않기 위해 항상 명시 전달(POST).
+# ─────────────────────────────────────────────────────────────
+
+
+class SignalsRequest(BaseModel):
+    code: str
+    strategy: str
+    params: dict[str, float | int | None] = Field(default_factory=dict)
+    start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class OverlayRequest(BaseModel):
+    code: str
+    strategy: str
+    params: dict[str, float | int | None] = Field(default_factory=dict)
+    end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _get_strategy(key: str, *, need: str) -> Strategy:
+    """레지스트리 조회 + 기능 지원 확인. 없으면 404, 미지원 기능이면 400."""
+    strat = STRATEGIES.get(key)
+    if strat is None:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 전략: {key}")
+    if need == "signals" and not strat.signals:
+        raise HTTPException(
+            status_code=400, detail=f"'{strat.name}' 전략은 신호(signals)를 지원하지 않습니다."
+        )
+    if need == "overlay" and not strat.overlay:
+        raise HTTPException(
+            status_code=400, detail=f"'{strat.name}' 전략은 오버레이를 지원하지 않습니다."
+        )
+    return strat
+
+
+def _parse_params_or_400(strat: Strategy, given: dict) -> dict:
+    try:
+        return parse_params(strat, given)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @app.get("/api/strategies")
 def api_strategies() -> dict:
-    """전략 오버레이 목록 (BORB-39 ④). 전략은 파이썬에 등록된 결정론적 함수뿐이다."""
-    return {"strategies": sorted(STRATEGIES)}
+    """전략 카탈로그 — param 스키마 형식은 조건검색(/api/conditions)과 동일(계약, ADR-0009).
+
+    프런트가 같은 폼 코드로 전략 파라미터 UI 를 그린다. 전략은 결정론적 함수뿐이다.
+    """
+    return strategies_payload()
 
 
-@app.get("/api/signals")
-def api_signals(
-    code: str = Query(..., description="종목코드 6자리"),
-    strategy: str = Query(..., description="STRATEGIES 에 등록된 전략 이름"),
-    start: str | None = Query(None),
-    end: str | None = Query(None),
-) -> dict:
-    """전략 신호를 차트에 얹기 위한 조회. **시각화 전용** — 주문·검증 아님."""
-    fn = STRATEGIES.get(strategy)
-    if fn is None:
-        raise HTTPException(status_code=404, detail=f"등록되지 않은 전략: {strategy}")
-    df = get_candles(code, start, end, adjust=True)
+@app.post("/api/signals")
+def api_signals(req: SignalsRequest) -> dict:
+    """전략 신호를 차트에 얹기 위한 조회. **시각화 전용** — 주문·검증 아님.
+
+    모든 정량 파라미터(이평 기간 등)는 요청 params 로 받는다(ADR-0009).
+    """
+    strat = _get_strategy(req.strategy, need="signals")
+    params = _parse_params_or_400(strat, dict(req.params))
+    df = get_candles(req.code, req.start, req.end, adjust=True)
     if df.empty:
-        raise HTTPException(status_code=404, detail=f"'{code}' 구간 데이터가 없습니다.")
-    signals = fn(df)
+        raise HTTPException(
+            status_code=404, detail=f"'{req.code.strip().zfill(6)}' 구간 데이터가 없습니다."
+        )
+    signals = strat.signal_fn(df, params)
     return {
-        "code": code.strip().zfill(6),
-        "strategy": strategy,
+        "code": req.code.strip().zfill(6),
+        "strategy": strat.key,
         "signals": [
             {"time": r.Date.strftime("%Y-%m-%d"), "side": r.side, "price": float(r.price)}
             for r in signals.itertuples()
         ],
     }
+
+
+@app.post("/api/overlay")
+def api_overlay(req: OverlayRequest) -> dict:
+    """전략 오버레이(피보나치 되돌림 등) 계산. **시각화 전용** — 주문·검증 아님.
+
+    end 기준 lookback 거래일만 계산에 쓴다. 로드 구간은 거래일 수를 여유 있게 덮도록
+    달력일 ×2 + 14일로 잡는다(거래일 ≈ 달력일의 2/3 — 주말·휴장 감안, 넉넉한 상한).
+    """
+    strat = _get_strategy(req.strategy, need="overlay")
+    params = _parse_params_or_400(strat, dict(req.params))
+    lookback = strat.lookback(params) if strat.lookback is not None else 1
+    end_ts = pd.Timestamp(req.end) if req.end else pd.Timestamp.now().normalize()
+    start = (end_ts - pd.Timedelta(days=lookback * 2 + 14)).strftime("%Y-%m-%d")
+    df = get_candles(req.code, start, req.end, adjust=True)
+    if df.empty:
+        raise HTTPException(
+            status_code=404, detail=f"'{req.code.strip().zfill(6)}' 구간 데이터가 없습니다."
+        )
+    try:
+        result = strat.overlay_fn(df, params)  # 베이스 못 찾음 등 → ValueError(한국어)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"code": req.code.strip().zfill(6), "strategy": strat.key, **result}

@@ -8,7 +8,13 @@ import {
 } from '@klinecharts/pro'
 import '@klinecharts/pro/dist/klinecharts-pro.css'
 import { registerKoreanLocale } from './locales'
-import { fetchSignals, type Signal } from './api'
+import {
+  postOverlay,
+  postSignals,
+  type OverlayLine,
+  type OverlayTouch,
+  type Signal,
+} from './api'
 
 // 한국식: 상승 = 빨강, 하락 = 파랑. 형광 말고 차분한 톤.
 const RED = '#e01e1e'
@@ -82,6 +88,100 @@ function createSignalIndicator(): SignalStore {
     },
     clear: () => byTime.clear(),
     size: () => byTime.size,
+  }
+}
+
+// ── 전략 오버레이 지표 — 차트 인스턴스별 (신호 지표와 같은 per-instance 패턴) ──
+// 피보나치 레벨·라운드 피겨·베이스/신고가 수평선은 전부 파이썬(/api/overlay)이 계산한다.
+// 여기는 받은 선·터치 마커를 그리기만 한다 — 시각 전용, 매매 판단 아님.
+// 라이트 테마 대비색: fib 주황 실선 / round 회색 점선 / anchor 파랑 점선.
+const OVERLAY_COLORS: Record<OverlayLine['kind'], string> = {
+  fib: '#d97706', // 피보나치 레벨 — 실선
+  round: '#6b7280', // 라운드 피겨(호가 눈금) — 점선
+  anchor: '#2f6fed', // 베이스/신고가 기준선 — 점선
+}
+const TOUCH_COLOR = '#d97706' // 레벨 근접(◆) 마커
+
+type OverlayStore = {
+  indicatorName: string
+  set: (lines: OverlayLine[], touches: OverlayTouch[]) => void
+  clear: () => void
+}
+
+let overlaySeq = 0
+
+function createOverlayIndicator(): OverlayStore {
+  let lines: OverlayLine[] = []
+  const touchesByTime = new Map<number, OverlayTouch[]>()
+  const name = `OVERLAY_${++overlaySeq}`
+  registerIndicator({
+    name,
+    shortName: '전략오버레이',
+    figures: [],
+    calc: (dataList) => dataList.map(() => ({})),
+    draw: ({ ctx, kLineDataList, visibleRange, bounding, xAxis, yAxis }) => {
+      if (lines.length === 0 && touchesByTime.size === 0) return true
+      ctx.save()
+      ctx.font = '11px sans-serif'
+      ctx.lineWidth = 1
+
+      // ① 수평선 + 우측 라벨 — 현재 y축 범위 밖 레벨은 건너뛴다.
+      for (const ln of lines) {
+        const y = Math.round(yAxis.convertToPixel(ln.price)) + 0.5 // +0.5 = 1px 라인 선명하게
+        if (y < 0 || y > bounding.height) continue
+        const color = OVERLAY_COLORS[ln.kind]
+        ctx.strokeStyle = color
+        ctx.setLineDash(ln.kind === 'fib' ? [] : [4, 3]) // fib 실선, round/anchor 점선
+        ctx.beginPath()
+        ctx.moveTo(0, y)
+        ctx.lineTo(bounding.width, y)
+        ctx.stroke()
+        // 우측 라벨 — 캔들과 겹쳐도 읽히게 반투명 흰 바탕(라이트 테마) 위에 그린다.
+        ctx.setLineDash([])
+        const pad = 3
+        const w = ctx.measureText(ln.label).width
+        const x = bounding.width - w - pad * 2 - 2
+        ctx.fillStyle = 'rgba(255,255,255,0.85)'
+        ctx.fillRect(x, y - 15, w + pad * 2, 14)
+        ctx.fillStyle = color
+        ctx.textAlign = 'left'
+        ctx.fillText(ln.label, x + pad, y - 4)
+      }
+
+      // ② 레벨 근접 터치 마커 ◆ — 해당 날짜 봉의 터치 가격 위치에 찍는다.
+      ctx.fillStyle = TOUCH_COLOR
+      ctx.textAlign = 'center'
+      for (let i = visibleRange.from; i < visibleRange.to; i++) {
+        const bar = kLineDataList[i]
+        if (!bar) continue
+        const touches = touchesByTime.get(bar.timestamp)
+        if (!touches) continue
+        const x = xAxis.convertToPixel(i)
+        for (const t of touches) {
+          ctx.fillText('◆', x, yAxis.convertToPixel(t.price) + 4)
+        }
+      }
+
+      ctx.restore()
+      return true
+    },
+  })
+  return {
+    indicatorName: name,
+    set(nextLines, nextTouches) {
+      lines = nextLines
+      touchesByTime.clear()
+      for (const t of nextTouches) {
+        const ts = new Date(`${t.time}T00:00:00`).getTime()
+        const arr = touchesByTime.get(ts)
+        if (arr) arr.push(t)
+        else touchesByTime.set(ts, [t])
+      }
+    },
+    clear() {
+      lines = []
+      touchesByTime.clear()
+    },
   }
 }
 
@@ -172,19 +272,33 @@ const KOREAN_STYLES = {
   },
 }
 
+// 전략 적용 payload — bus.StrategyPick 과 같은 형태(구조적 타이핑).
+// ProChart 는 hts 셸에 의존하지 않도록 자체 선언한다. 파라미터 값은 항상 여기 담겨
+// 서버 요청으로만 나간다(ADR-0009 — 프런트·서버 어디에도 전략 숫자 하드코딩 없음).
+export type StrategyPayload = {
+  key: string
+  params: Record<string, number>
+  signals: boolean // POST /api/signals → ▲▼ 마커
+  overlay: boolean // POST /api/overlay → 수평선 오버레이
+}
+
 export type ProChartHandle = {
-  /** 조건검색 결과 클릭 → 차트 종목 전환 */
+  /** 조건검색 결과 클릭 → 차트 종목 전환 (적용중 전략은 새 종목으로 재조회) */
   showSymbol: (code: string, name: string, market: string) => void
-  /** 전략 오버레이 적용(null = 제거). 신호는 파이썬이 계산한다. */
-  applyStrategy: (strategy: string | null) => Promise<number>
+  /** 전략 적용(null = 해제). 신호·오버레이 계산은 전부 파이썬 — 시각 전용, 매매 판단 아님. */
+  applyStrategy: (payload: StrategyPayload | null) => Promise<void>
 }
 
 export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref) {
   const elRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<KLineChartPro | null>(null)
-  // 이 차트 전용 신호 저장소·지표 (인스턴스당 1회 생성)
+  // 이 차트 전용 신호·오버레이 저장소·지표 (인스턴스당 1회 생성)
   const signalsRef = useRef<SignalStore | null>(null)
   if (!signalsRef.current) signalsRef.current = createSignalIndicator()
+  const overlayRef = useRef<OverlayStore | null>(null)
+  if (!overlayRef.current) overlayRef.current = createOverlayIndicator()
+  // 현재 적용중 전략 payload — 종목 전환 시 이 값으로 재조회한다.
+  const strategyRef = useRef<StrategyPayload | null>(null)
   const symbolRef = useRef<SymbolInfo>({
     ticker: '005930',
     name: '삼성전자',
@@ -195,6 +309,38 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
     volumePrecision: 0,
     priceCurrency: 'krw',
   })
+
+  // 전략 데이터 재조회 — 적용/해제/종목 전환 공용.
+  // 응답 대기 중 종목·전략이 바뀌었으면 버린다(늦게 온 이전 응답이 새 차트에 그려지는 경합 방지).
+  async function refreshStrategy(): Promise<void> {
+    const payload = strategyRef.current
+    const ticker = symbolRef.current.ticker
+    const sig = signalsRef.current!
+    const ov = overlayRef.current!
+    sig.set([])
+    ov.clear()
+    if (payload) {
+      const stale = () => symbolRef.current.ticker !== ticker || strategyRef.current !== payload
+      try {
+        if (payload.signals) {
+          const res = await postSignals({ code: ticker, strategy: payload.key, params: payload.params })
+          if (stale()) return
+          sig.set(res.signals)
+        }
+        if (payload.overlay) {
+          const res = await postOverlay({ code: ticker, strategy: payload.key, params: payload.params })
+          if (stale()) return
+          ov.set(res.lines, res.touches)
+        }
+      } catch (e) {
+        // 400(베이스 못 찾음 등)·404(종목 없음) — 이 종목엔 그릴 게 없다. 콘솔로만 남긴다.
+        if (stale()) return
+        console.warn('[전략 조회 실패]', e instanceof Error ? e.message : e)
+      }
+    }
+    // Pro 는 지표 재계산 API 를 노출하지 않아 setSymbol 로 데이터 재적재를 유도한다.
+    chartRef.current?.setSymbol(symbolRef.current)
+  }
 
   useImperativeHandle(ref, () => ({
     showSymbol(code, name, market) {
@@ -208,23 +354,16 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
         volumePrecision: 0,
         priceCurrency: 'krw',
       }
-      signalsRef.current?.clear() // 종목이 바뀌면 이전 종목 신호는 무효
+      // 종목이 바뀌면 이전 종목의 신호·오버레이는 무효 — 즉시 지우고 차트를 전환한다.
+      signalsRef.current?.set([])
+      overlayRef.current?.clear()
       chartRef.current?.setSymbol(symbolRef.current)
+      // 적용중 전략이 있으면 새 종목 기준으로 재조회(경합 가드는 refreshStrategy 내부).
+      if (strategyRef.current) void refreshStrategy()
     },
-    async applyStrategy(strategy) {
-      const store = signalsRef.current!
-      if (!strategy) {
-        store.set([])
-      } else {
-        const ticker = symbolRef.current.ticker
-        const { signals } = await fetchSignals(ticker, strategy)
-        // 응답 대기 중 종목이 바뀌었으면 버린다 — 이전 종목 신호가 새 차트에 그려지는 경합 방지.
-        if (symbolRef.current.ticker !== ticker) return store.size()
-        store.set(signals)
-      }
-      // Pro 는 지표 재계산 API 를 노출하지 않아 setSymbol 로 데이터 재적재를 유도한다.
-      chartRef.current?.setSymbol(symbolRef.current)
-      return store.size()
+    async applyStrategy(payload) {
+      strategyRef.current = payload
+      await refreshStrategy()
     },
   }))
 
@@ -244,8 +383,8 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
       symbol: symbolRef.current,
       period: DAY,
       periods: [DAY, WEEK, MONTH],
-      // 이평선 + 이 차트 전용 전략 신호 마커(신호 없으면 안 그림)
-      mainIndicators: ['MA', signalsRef.current!.indicatorName],
+      // 이평선 + 이 차트 전용 전략 신호 마커·오버레이 수평선(데이터 없으면 안 그림)
+      mainIndicators: ['MA', signalsRef.current!.indicatorName, overlayRef.current!.indicatorName],
       subIndicators: ['VOL'], // 거래량 창
       datafeed: new ApiDatafeed(),
     })

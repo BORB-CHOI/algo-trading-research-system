@@ -7,13 +7,13 @@ const EVENT = 'hts:symbol'
 
 // 마지막 선택값 — 나중에 추가/복원된 패널이 현재 상태를 이어받게 한다(replay).
 let lastSymbol: SymbolPick | null = null
-let lastStrategy = ''
+let lastStrategy: StrategyPick | null = null
 
 export function currentSymbol(): SymbolPick | null {
   return lastSymbol
 }
 
-export function currentStrategy(): string {
+export function currentStrategy(): StrategyPick | null {
   return lastStrategy
 }
 
@@ -42,16 +42,24 @@ export function onWatchlistChanged(fn: () => void): () => void {
   return () => window.removeEventListener(WATCHLIST_EVENT, handler)
 }
 
-// 전략 오버레이 선택 전파 (빈 문자열 = 오버레이 제거)
-const STRATEGY_EVENT = 'hts:strategy'
-
-export function pickStrategy(name: string): void {
-  lastStrategy = name
-  window.dispatchEvent(new CustomEvent(STRATEGY_EVENT, { detail: name }))
+// 전략 적용 전파 (null = 해제) — 파라미터 값까지 통째로 payload 로 전달한다.
+// 정량 값은 항상 이 payload 에 담겨 서버 요청으로만 나간다(ADR-0009 — 하드코딩 금지).
+export type StrategyPick = {
+  key: string // 전략 key ("ma_cross" | "fib_retrace" …)
+  params: Record<string, number> // 사용자가 입력한 파라미터 — 서버 기본값 없음
+  signals: boolean // POST /api/signals 사용 여부 (▲▼ 마커)
+  overlay: boolean // POST /api/overlay 사용 여부 (수평선 오버레이)
 }
 
-export function onStrategyPick(fn: (name: string) => void): () => void {
-  const handler = (e: Event) => fn((e as CustomEvent<string>).detail)
+const STRATEGY_EVENT = 'hts:strategy'
+
+export function pickStrategy(p: StrategyPick | null): void {
+  lastStrategy = p
+  window.dispatchEvent(new CustomEvent(STRATEGY_EVENT, { detail: p }))
+}
+
+export function onStrategyPick(fn: (p: StrategyPick | null) => void): () => void {
+  const handler = (e: Event) => fn((e as CustomEvent<StrategyPick | null>).detail)
   window.addEventListener(STRATEGY_EVENT, handler)
   return () => window.removeEventListener(STRATEGY_EVENT, handler)
 }
