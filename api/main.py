@@ -33,6 +33,8 @@ from src.layer1_data.adjust import (
 )
 from src.layer1_data.dart import load_financials
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
+from src.layer1_data.market import market_snapshot
+from src.layer1_data.news import market_news, stock_news
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy.case_overlay import (
@@ -532,6 +534,21 @@ def _parse_params_or_400(strat: Strategy, given: dict) -> dict:
         return parse_params(strat, given)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.get("/api/market")
+def api_market(force: bool = Query(False, description="캐시 무시")) -> dict:
+    """지수·환율·원자재·야간선물 스냅샷 (BORB-43). 표시 전용."""
+    return {"groups": market_snapshot(force=force)}
+
+
+@app.get("/api/news")
+def api_news(
+    code: str | None = Query(None, description="종목코드 6자리. 없으면 증시 전체"),
+    limit: int = Query(20, ge=1, le=50),
+) -> dict:
+    items = stock_news(code, limit) if code else market_news(limit)
+    return {"code": code, "items": items}
 
 
 @app.get("/api/financials")

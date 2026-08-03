@@ -10,17 +10,17 @@ import {
   ChartPanel,
   FinancialsPanel,
   FinvizPanel,
+  HomePanel,
   MapPanel,
   NewsPanel,
-  ScreenPanel,
   StrategyPanel,
   WatchlistPanel,
 } from './panels/index'
 
 // dockview 에 등록하는 패널 종류. 창관리(탭·분할·플로팅·팝아웃)는 전부 dockview 몫.
 const components: Record<string, (p: IDockviewPanelProps) => ReactElement> = {
+  home: () => <HomePanel />,
   chart: (p) => <ChartPanel panelApi={p.api} />,
-  screen: () => <ScreenPanel />,
   strategy: () => <StrategyPanel />,
   financials: () => <FinancialsPanel />,
   map: () => <MapPanel />,
@@ -30,8 +30,8 @@ const components: Record<string, (p: IDockviewPanelProps) => ReactElement> = {
 }
 
 const TITLES: Record<string, string> = {
+  home: '홈',
   chart: '차트',
-  screen: '조건검색',
   strategy: '전략',
   financials: '재무',
   map: '시장맵',
@@ -81,36 +81,50 @@ export function HtsApp() {
   }
 
   function defaultLayout(api: DockviewApi) {
-    // 기본 레이아웃: 좌측 조건검색+관심종목+전략(탭), 중앙 차트, 하단 시장맵
-    const chart = api.addPanel({ id: 'chart-0', component: 'chart', title: TITLES.chart })
-    const screen = api.addPanel({
-      id: 'screen-0',
-      component: 'screen',
-      title: TITLES.screen,
-      position: { referencePanel: chart, direction: 'left' },
-      initialWidth: 300,
-    })
+    // 메인 = 홈(시장 개요). 좌측 관심그룹·전략, 우측 뉴스·재무, 하단 시장맵.
+    const home = api.addPanel({ id: 'home-0', component: 'home', title: TITLES.home })
     api.addPanel({
+      id: 'chart-0',
+      component: 'chart',
+      title: TITLES.chart,
+      position: { referenceGroup: home.group },
+    })
+    const watchlist = api.addPanel({
       id: 'watchlist-0',
       component: 'watchlist',
       title: TITLES.watchlist,
-      position: { referenceGroup: screen.group },
+      position: { referencePanel: home, direction: 'left' },
+      initialWidth: 300,
     })
     api.addPanel({
       id: 'strategy-0',
       component: 'strategy',
       title: TITLES.strategy,
-      position: { referenceGroup: screen.group },
+      position: { referenceGroup: watchlist.group },
+    })
+    const news = api.addPanel({
+      id: 'news-0',
+      component: 'news',
+      title: TITLES.news,
+      position: { referencePanel: home, direction: 'right' },
+      initialWidth: 320,
+    })
+    api.addPanel({
+      id: 'financials-0',
+      component: 'financials',
+      title: TITLES.financials,
+      position: { referenceGroup: news.group },
     })
     api.addPanel({
       id: 'map-0',
       component: 'map',
       title: TITLES.map,
-      position: { referencePanel: chart, direction: 'below' },
-      initialHeight: 280,
+      position: { referencePanel: home, direction: 'below' },
+      initialHeight: 260,
     })
-    screen.api.setActive()
-    chart.api.setActive()
+    watchlist.api.setActive()
+    news.api.setActive()
+    home.api.setActive()
   }
 
   function onReady(e: DockviewReadyEvent) {

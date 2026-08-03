@@ -266,3 +266,28 @@ export type FinancialRow = {
 export async function fetchFinancials(code: string): Promise<{ code: string; rows: FinancialRow[] }> {
   return getJson(`/api/financials?code=${encodeURIComponent(code)}`)
 }
+
+export type MarketItem = {
+  key: string
+  name: string
+  unit: string
+  price: number | null
+  chg: number | null
+  asof: string | null
+}
+
+export type MarketGroup = { group: string; items: MarketItem[] }
+
+export async function fetchMarket(): Promise<MarketGroup[]> {
+  const { groups } = await getJson<{ groups: MarketGroup[] }>('/api/market')
+  return groups
+}
+
+export type NewsItem = { title: string; source: string; url: string; datetime: string }
+
+export async function fetchNews(code?: string, limit = 20): Promise<NewsItem[]> {
+  const p = new URLSearchParams({ limit: String(limit) })
+  if (code) p.set('code', code)
+  const { items } = await getJson<{ items: NewsItem[] }>(`/api/news?${p.toString()}`)
+  return items
+}

@@ -39,6 +39,8 @@ webapp = [
     "uvicorn[standard]>=0.30",
     "httpx>=0.27",     # TestClient (api 테스트)
     "ta-lib>=0.6",     # 조건검색 패턴분석 — 캔들패턴 61종 (BORB-41)
+    "yfinance>=0.2",   # 지수·환율·원자재·야간선물 (BORB-43)
+    "requests>=2.31",  # 뉴스 RSS·종목뉴스 (BORB-43)
 ]
 
 [build-system]
