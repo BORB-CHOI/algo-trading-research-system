@@ -4,8 +4,8 @@ import {
   type DockviewApi,
   type DockviewReadyEvent,
   type IDockviewPanelProps,
-} from 'dockview-react'
-import 'dockview-react/dist/styles/dockview.css'
+} from 'dockview'
+import 'dockview/dist/styles/dockview.css'
 import {
   ChartPanel,
   FinvizPanel,

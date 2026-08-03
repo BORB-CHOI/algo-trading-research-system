@@ -25,6 +25,24 @@ auto-trading-system/
 └── tests/
 ```
 
+## 실행 (케이스 검사기 웹 도구, ADR-0005)
+
+터미널 두 개를 리포 루트에서 띄운다.
+
+```bash
+make api   # 백엔드 — FastAPI :8000
+make web   # 프런트 — Vite :5173
+```
+
+- 백엔드를 빼먹으면 화면은 뜨지만 차트가 빈다. 프런트는 parquet 을 직접 못 읽어서
+  `/api/*` 를 FastAPI 로 proxy 하기 때문(`web/vite.config.ts`).
+- 가상환경을 활성화하지 않아도 된다. Makefile 이 `.venv/bin/` 을 직접 부른다.
+  경로가 다르면 `make api VENV=~/myenv`.
+- 풀어 쓰면 `uvicorn api.main:app --reload --port 8000` / `cd web && npm run dev`.
+- 이 서버는 **데이터를 보여주기만** 한다. BUY/SELL·포지션·주문은 여기 없다(CLAUDE.md).
+
+나머지 명령은 `make help`.
+
 ## 시작 전 확인 사항
 
 코드 작성 들어가기 전 결정해야 할 것:
