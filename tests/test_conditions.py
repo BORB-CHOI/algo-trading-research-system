@@ -376,7 +376,8 @@ def test_api_run_golden_cross_plus_amount() -> None:
     r = client.post("/api/screen/run", json=body)
     assert r.status_code == 200
     j = r.json()
-    assert set(j) == {"date", "total", "items"}
+    assert set(j) == {"date", "total", "conditions", "avg_chg", "items"}
+    assert j["conditions"] == 2
     assert len(j["items"]) <= 20
     amounts = [it["amount"] for it in j["items"]]
     assert amounts == sorted(amounts, reverse=True)  # 거래대금 내림차순
@@ -403,11 +404,24 @@ def test_api_run_past_date_uses_prev_trading_day() -> None:
 
 @pytest.mark.slow
 @needs_data
-def test_api_run_errors_are_korean_400() -> None:
-    r = client.post("/api/screen/run", json={"conditions": []})
-    assert r.status_code == 400
-    assert "조건" in r.json()["detail"]
+def test_api_run_empty_conditions_is_whole_universe() -> None:
+    """조건 0개 = 전체 종목. 전략에서 종목선정을 비우면 유니버스 전체가 대상이다."""
+    r = client.post("/api/screen/run", json={"conditions": [], "limit": 5})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["conditions"] == 0
+    assert j["total"] > 1000  # 제외정책만 적용한 유니버스
+    assert len(j["items"]) == 5
 
+    # 조건을 하나라도 걸면 전체보다 줄어든다
+    narrowed = client.post(
+        "/api/screen/run",
+        json={"conditions": [{"key": "amount_range", "params": {"min": 100}}], "limit": 5},
+    ).json()
+    assert narrowed["total"] < j["total"]
+
+
+def test_api_run_errors_are_korean_400() -> None:
     r = client.post(
         "/api/screen/run", json={"conditions": [{"key": "no_such", "params": {"min": 1}}]}
     )

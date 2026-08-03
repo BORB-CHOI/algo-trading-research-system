@@ -28,24 +28,66 @@ export type ScreenItem = {
   marcap: number // 시총(원)
 }
 
-export type Quote = ScreenItem
+// spark = 미니차트용 최근 종가, volume = 최신 거래일 거래량(주)
+export type Quote = ScreenItem & { spark?: number[]; volume?: number }
 
 export type QuotesResponse = {
   date: string | null
   quotes: Quote[]
 }
 
-export async function fetchQuotes(codes: string[]): Promise<QuotesResponse> {
+export async function fetchQuotes(codes: string[], spark = false): Promise<QuotesResponse> {
   if (codes.length === 0) return { date: null, quotes: [] }
   const params = new URLSearchParams({ codes: codes.join(',') })
+  if (spark) params.set('spark', 'true')
   const res = await fetch(`/api/quotes?${params.toString()}`)
   if (!res.ok) return { date: null, quotes: [] }
   return (await res.json()) as QuotesResponse
 }
 
+export type SymbolKind = 'common' | 'preferred' | 'spac' | 'reit'
+
+export type Symbol = {
+  code: string
+  name: string
+  market: string
+  kind?: SymbolKind
+  kindLabel?: string
+}
+
+export type SymbolFilter = { market?: string; kind?: SymbolKind | '' }
+
+export type SymbolSearchResult = { total: number; symbols: Symbol[] }
+
+export async function searchSymbols(
+  q: string,
+  filter: SymbolFilter = {},
+  limit = 30,
+): Promise<SymbolSearchResult> {
+  const p = new URLSearchParams({ q, limit: String(limit) })
+  if (filter.market) p.set('market', filter.market)
+  if (filter.kind) p.set('kind', filter.kind)
+  const r = await getJson<{
+    total: number
+    symbols: { ticker: string; name: string; market: string; kind?: SymbolKind; kindLabel?: string }[]
+  }>(`/api/symbols?${p.toString()}`)
+  return {
+    total: r.total,
+    symbols: r.symbols.map((s) => ({
+      code: s.ticker,
+      name: s.name,
+      market: s.market,
+      kind: s.kind,
+      kindLabel: s.kindLabel,
+    })),
+  }
+}
+
 export type ScreenResponse = {
   date: string // 실제 기준 거래일 (휴장일이면 직전 거래일)
   total: number
+  conditions?: number // 적용된 조건 수 (0 = 전체 종목)
+  avg_chg?: number | null // 검색된 종목의 당일 평균 등락률(%)
   items: ScreenItem[]
 }
 
@@ -274,6 +316,7 @@ export type MarketItem = {
   price: number | null
   chg: number | null
   asof: string | null
+  spark: number[]
 }
 
 export type MarketGroup = { group: string; items: MarketItem[] }
@@ -281,6 +324,44 @@ export type MarketGroup = { group: string; items: MarketItem[] }
 export async function fetchMarket(): Promise<MarketGroup[]> {
   const { groups } = await getJson<{ groups: MarketGroup[] }>('/api/market')
   return groups
+}
+
+// 코스피·코스닥 보드 — 장중 5분봉 + 투자자별 순매수(억원). 표시 전용.
+export type IndexFlow = {
+  date: string | null
+  foreign: number | null
+  personal: number | null
+  institution: number | null
+  unit: string
+}
+
+export type IndexBoard = {
+  key: string
+  code: string
+  name: string
+  price: number | null
+  prev_close: number | null
+  chg: number | null
+  diff: number | null
+  intraday: { t: string; v: number }[]
+  flow: IndexFlow | null
+}
+
+export async function fetchIndexBoards(): Promise<IndexBoard[]> {
+  const { boards } = await getJson<{ boards: IndexBoard[] }>('/api/index-boards')
+  return boards
+}
+
+export type RankKind = 'gainers' | 'losers' | 'amount' | 'volume' | 'marcap'
+
+export type RankItem = Quote
+
+export type RankResponse = { date: string; kind: RankKind; label: string; items: RankItem[] }
+
+export async function fetchRanking(kind: RankKind, limit = 5, market?: string): Promise<RankResponse> {
+  const p = new URLSearchParams({ kind, limit: String(limit) })
+  if (market) p.set('market', market)
+  return getJson(`/api/ranking?${p.toString()}`)
 }
 
 export type NewsItem = { title: string; source: string; url: string; datetime: string }

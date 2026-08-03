@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -33,9 +34,10 @@ from src.layer1_data.adjust import (
 )
 from src.layer1_data.dart import load_financials
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
-from src.layer1_data.market import market_snapshot
-from src.layer1_data.news import market_news, stock_news
 from src.layer1_data.marcap_loader import available_years, load_years
+from src.layer1_data.market import index_boards, market_snapshot
+from src.layer1_data.news import market_news, stock_news
+from src.layer1_data.recent import merge_with_marcap, recent_meta
 from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy.case_overlay import (
     STRATEGIES,
@@ -77,8 +79,11 @@ _RESAMPLE_RULES = {"week": "W-FRI", "month": "ME"}
 
 @lru_cache(maxsize=8)
 def _load_year_slim(year: int) -> pd.DataFrame:
-    """연도별 일봉을 슬림 컬럼으로 캐시. 같은 해 재조회는 즉시 반환된다."""
-    return load_years(year, year)[_CANDLE_COLS].copy()
+    """연도별 일봉을 슬림 컬럼으로 캐시. 최신 연도에는 marcap 이후 보충분을 덧붙인다."""
+    df = load_years(year, year)[_CANDLE_COLS].copy()
+    if year == (available_years() or [None])[-1]:
+        df = merge_with_marcap(df)
+    return df
 
 
 def _load_code_history(code: str, start_year: int, end_year: int, years: list[int]) -> pd.DataFrame:
@@ -152,12 +157,15 @@ def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
 
 
 # 조건검색은 시총·소속부까지 필요해 캔들 캐시와 컬럼을 분리한다. Stocks 는 등락률 분할 보정용.
-_SCREEN_COLS = ["Date", "Code", "Name", "Market", "Dept", "Close", "Amount", "Marcap", "Stocks"]
+_SCREEN_COLS = ["Date", "Code", "Name", "Market", "Dept", "Close", "Volume", "Amount", "Marcap", "Stocks"]
 
 
 @lru_cache(maxsize=4)
 def _load_year_screen(year: int) -> pd.DataFrame:
-    return load_years(year, year)[_SCREEN_COLS].copy()
+    df = load_years(year, year)[_SCREEN_COLS].copy()
+    if year == (available_years() or [None])[-1]:
+        df = merge_with_marcap(df)
+    return df
 
 
 @lru_cache(maxsize=1)
@@ -174,24 +182,84 @@ def _symbol_master() -> pd.DataFrame:
 @app.get("/api/health")
 def health() -> dict:
     years = available_years()
-    return {"ok": True, "years": years}
+    meta = recent_meta()
+    return {
+        "ok": True,
+        "years": years,
+        "marcap_last": meta.get("marcap_last"),
+        "recent_dates": meta.get("dates", []),
+    }
+
+
+@lru_cache(maxsize=1)
+def _latest_marcap() -> dict[str, float]:
+    """검색 결과 정렬용 — 최신 거래일 종목별 시총."""
+    years = available_years()
+    if not years:
+        return {}
+    df = _load_year_screen(years[-1])
+    day = df[df["Date"] == df["Date"].max()]
+    return {str(c): float(v) for c, v in zip(day["Code"], day["Marcap"], strict=True)}
+
+
+# 종목 유형 — marcap 에 유형 컬럼이 없어 이름·소속부에서 갈라낸다.
+# (ETF/ETN 은 marcap 에 아예 없다 — 실측 0건)
+_KIND_RULES: dict[str, str] = {
+    "preferred": "우선주",
+    "spac": "스팩",
+    "reit": "리츠",
+    "common": "보통주",
+}
+
+
+def _kind_of(name: str) -> str:
+    if "스팩" in name:
+        return "spac"
+    if "리츠" in name:
+        return "reit"
+    if re.fullmatch(r".+우[0-9BC]?", name):
+        return "preferred"
+    return "common"
 
 
 @app.get("/api/symbols")
-def api_symbols(q: str = Query("", description="코드 접두 또는 이름 부분검색")) -> dict:
-    """Pro 심볼 검색용. 코드 앞자리 또는 이름 일부로 최대 30개."""
+def api_symbols(
+    q: str = Query("", description="코드 접두 또는 이름 부분검색"),
+    market: str = Query("", description="KOSPI | KOSDAQ | KONEX. 빈값=전체"),
+    kind: str = Query("", description=" | ".join(_KIND_RULES) + ". 빈값=전체"),
+    limit: int = Query(30, ge=1, le=100),
+) -> dict:
+    """종목 검색. 이름 앞에서 맞을수록, 시총이 클수록 위로 — '삼성' 치면 삼성전자가 1등이라야 한다."""
     m = _symbol_master()
     query = q.strip()
-    if query:
-        by_code = m["Code"].str.startswith(query)
-        by_name = m["Name"].str.contains(query, case=False, na=False, regex=False)
-        m = m[by_code | by_name]
-    m = m.head(30)
+    if not query:
+        return {"symbols": [], "total": 0}
+
+    by_code = m["Code"].str.startswith(query)
+    pos = m["Name"].str.lower().str.find(query.lower())
+    hit = m[by_code | (pos >= 0)].copy()
+
+    if market:
+        hit = hit[hit["Market"].astype(str).str.upper().str.startswith(market.upper())]
+    hit["_kind"] = hit["Name"].astype(str).map(_kind_of)
+    if kind:
+        if kind not in _KIND_RULES:
+            raise HTTPException(status_code=400, detail=f"kind 는 {', '.join(_KIND_RULES)} 중 하나여야 합니다.")
+        hit = hit[hit["_kind"] == kind]
+    if hit.empty:
+        return {"symbols": [], "total": 0}
+
+    hit["_pos"] = hit["Name"].str.lower().str.find(query.lower())
+    hit.loc[by_code.reindex(hit.index, fill_value=False), "_pos"] = -1  # 코드 일치가 최우선
+    hit["_marcap"] = hit["Code"].map(_latest_marcap()).fillna(0.0)
+    total = len(hit)
+    hit = hit.sort_values(["_pos", "_marcap"], ascending=[True, False]).head(limit)
     return {
+        "total": total,
         "symbols": [
-            {"ticker": code, "name": name, "market": market}
-            for code, name, market in zip(m["Code"], m["Name"], m["Market"], strict=True)
-        ]
+            {"ticker": c, "name": n, "market": mk, "kind": k, "kindLabel": _KIND_RULES[k]}
+            for c, n, mk, k in zip(hit["Code"], hit["Name"], hit["Market"], hit["_kind"], strict=True)
+        ],
     }
 
 
@@ -375,10 +443,13 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
 
     임계값·지표 기간은 전부 요청에서 받는다 — 서버 기본값 금지(CLAUDE.md placeholder 원칙).
     """
-    try:
-        parsed = cond_registry.parse_conditions([c.model_dump() for c in req.conditions])
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    # 조건이 비면 "전체 종목"이다 — 제외정책만 적용한 유니버스를 그대로 돌려준다.
+    parsed: cond_registry.Parsed = []
+    if req.conditions:
+        try:
+            parsed = cond_registry.parse_conditions([c.model_dump() for c in req.conditions])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     years = available_years()
     if not years:
@@ -395,18 +466,26 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
     base_date = df["Date"].max()  # 기준일이 휴장일이면 직전 거래일로
     base = apply_exclusions(df[df["Date"] == base_date], DEFAULT_POLICY).set_index("Code")
 
-    lookback = cond_registry.required_lookback(parsed)
-    hist = _load_history_panel(year, years, base_date, lookback, set(base.index))
-    panel = cond_registry.HistPanel(hist, base_date)
+    if parsed:
+        lookback = cond_registry.required_lookback(parsed)
+        hist = _load_history_panel(year, years, base_date, lookback, set(base.index))
+        panel = cond_registry.HistPanel(hist, base_date)
+        mask = cond_registry.evaluate(parsed, panel, base, req.logic)
+        hits = base.loc[mask]
+    else:
+        hits = base
 
-    mask = cond_registry.evaluate(parsed, panel, base, req.logic)
-    hits = base.loc[mask].sort_values("Amount", ascending=False)
+    hits = hits.sort_values("Amount", ascending=False)
     total = len(hits)
-    hits = hits.head(req.limit)
     chg = _change_vs_prev(year, base_date)
+    hit_chgs = [c for c in (chg.get(str(i)) for i in hits.index) if c is not None]
+    hits = hits.head(req.limit)
     return {
         "date": base_date.strftime("%Y-%m-%d"),
         "total": total,
+        "conditions": len(parsed),
+        # 검색된 종목들의 당일 평균 등락률 — 검색식이 오늘 얼마나 먹혔는지 한 줄 요약
+        "avg_chg": (sum(hit_chgs) / len(hit_chgs)) if hit_chgs else None,
         "items": [
             {
                 "code": str(r.Index),
@@ -422,9 +501,37 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
     }
 
 
+_SPARK_N = 30
+
+
+def _spark_map(year: int, codes: set[str], years: list[int]) -> dict[str, list[float]]:
+    """미니차트용 최근 종가 배열. 표시 전용이라 분할 보정은 하지 않는다."""
+    frames = []
+    have = 0
+    for y in range(year, years[0] - 1, -1):
+        if y not in years:
+            continue
+        df = _load_year_screen(y)
+        sub = df[df["Code"].isin(codes)]
+        if sub.empty:
+            continue
+        frames.append(sub)
+        have += sub["Date"].nunique()
+        if have >= _SPARK_N:
+            break
+    if not frames:
+        return {}
+    all_ = pd.concat(frames, ignore_index=True).sort_values("Date")
+    return {
+        str(code): [float(v) for v in g["Close"].tail(_SPARK_N)]
+        for code, g in all_.groupby("Code")
+    }
+
+
 @app.get("/api/quotes")
 def api_quotes(
     codes: str = Query(..., description="쉼표로 구분한 종목코드 목록 (예: 005930,000660)"),
+    spark: bool = Query(False, description="미니차트용 최근 종가 배열 포함"),
 ) -> dict:
     """관심종목 패널용 시세 스냅샷 — 최신 거래일 종가·등락률·거래대금·시총."""
     wanted = [c.strip().zfill(6) for c in codes.split(",") if c.strip()][:100]
@@ -435,22 +542,25 @@ def api_quotes(
     base_date = df["Date"].max()
     chg = _change_vs_prev(years[-1], base_date)
     d0 = df[df["Date"] == base_date].set_index("Code")
+    sparks = _spark_map(years[-1], set(wanted), years) if spark else {}
     quotes = []
     for code in wanted:
         if code not in d0.index:
             continue
         r = d0.loc[code]
-        quotes.append(
-            {
-                "code": code,
-                "name": str(r["Name"]),
-                "market": str(r["Market"]),
-                "close": float(r["Close"]),
-                "chg": chg.get(code),
-                "amount": float(r["Amount"]),
-                "marcap": float(r["Marcap"]),
-            }
-        )
+        q = {
+            "code": code,
+            "name": str(r["Name"]),
+            "market": str(r["Market"]),
+            "close": float(r["Close"]),
+            "chg": chg.get(code),
+            "volume": float(r["Volume"]),
+            "amount": float(r["Amount"]),
+            "marcap": float(r["Marcap"]),
+        }
+        if spark:
+            q["spark"] = sparks.get(code, [])
+        quotes.append(q)
     return {"date": base_date.strftime("%Y-%m-%d"), "quotes": quotes}
 
 
@@ -540,6 +650,63 @@ def _parse_params_or_400(strat: Strategy, given: dict) -> dict:
 def api_market(force: bool = Query(False, description="캐시 무시")) -> dict:
     """지수·환율·원자재·야간선물 스냅샷 (BORB-43). 표시 전용."""
     return {"groups": market_snapshot(force=force)}
+
+
+@app.get("/api/index-boards")
+def api_index_boards(force: bool = Query(False, description="캐시 무시")) -> dict:
+    """코스피·코스닥 장중 흐름 + 투자자별 순매수. 표시 전용."""
+    return {"boards": index_boards(force=force)}
+
+
+_RANK_KINDS = {
+    "gainers": ("상승률", "chg", False),
+    "losers": ("하락률", "chg", True),
+    "amount": ("거래대금", "amount", False),
+    "volume": ("거래량", "volume", False),
+    "marcap": ("시가총액", "marcap", False),
+}
+
+
+@app.get("/api/ranking")
+def api_ranking(
+    kind: str = Query("gainers", description=" | ".join(_RANK_KINDS)),
+    limit: int = Query(10, ge=1, le=50),
+    market: str | None = Query(None, description="KOSPI | KOSDAQ. 없으면 전체"),
+    min_amount: float = Query(1e8, ge=0, description="거래대금 하한(원) — 껍데기 종목 제외"),
+) -> dict:
+    """최신 거래일 기준 순위 (marcap 일봉). 실시간이 아니라 종가 기준이다."""
+    if kind not in _RANK_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind 는 {', '.join(_RANK_KINDS)} 중 하나여야 합니다.")
+    years = available_years()
+    if not years:
+        raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
+
+    df = _load_year_screen(years[-1])
+    base_date = df["Date"].max()
+    day = df[df["Date"] == base_date]
+    if market:
+        day = day[day["Market"].astype(str).str.upper() == market.upper()]
+    day = day[day["Amount"] >= min_amount]
+
+    label, field, asc = _RANK_KINDS[kind]
+    chg = _change_vs_prev(years[-1], base_date)
+    rows = [
+        {
+            "code": str(r.Code),
+            "name": str(r.Name),
+            "market": str(r.Market),
+            "close": float(r.Close),
+            "chg": chg.get(str(r.Code)),
+            "volume": float(r.Volume),
+            "amount": float(r.Amount),
+            "marcap": float(r.Marcap),
+        }
+        for r in day.itertuples()
+    ]
+    if field == "chg":
+        rows = [r for r in rows if r["chg"] is not None]
+    rows.sort(key=lambda r: r[field], reverse=not asc)
+    return {"date": base_date.strftime("%Y-%m-%d"), "kind": kind, "label": label, "items": rows[:limit]}
 
 
 @app.get("/api/news")

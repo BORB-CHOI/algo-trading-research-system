@@ -9,11 +9,13 @@ export type ScreenLogic = 'and' | 'or'
 export type TargetKind = 'fib' | 'round' | 'manual'
 export type PriceType = 'market' | 'limit'
 export type QtyType = 'shares' | 'amount'
+export type CreditType = 'cash' | 'credit'
 
 export type SavedCondition = { key: string; params: Record<string, number> }
 
 export type Strategy = {
-  screen: { logic: ScreenLogic; conditions: SavedCondition[] }
+  /** name = ① 에서 만든 조건검색식 이름. 없으면 전체 종목이 대상. */
+  screen: { name?: string; logic: ScreenLogic; conditions: SavedCondition[] }
   entry: {
     key: string
     params: Record<string, number>
@@ -21,7 +23,14 @@ export type Strategy = {
     near: number
     manualPrice?: number
   }
-  order: { priceType: PriceType; qtyType: QtyType; qty: number; validDays: number }
+  order: {
+    priceType: PriceType
+    qtyType: QtyType
+    qty: number
+    validDays: number
+    credit: CreditType
+    tick: number // 감시 조건 도달가격의 ±N틱에 주문
+  }
 }
 
 export type Strategies = Record<string, Strategy>
@@ -58,6 +67,7 @@ export function deleteStrategy(all: Strategies, name: string): Strategies {
 // ── 폼 드래프트 (입력 중에는 전부 문자열 — 빈칸과 0 을 구분하기 위해) ──
 
 export type StrategyDraft = {
+  screenName: string
   logic: ScreenLogic
   conditions: SavedCondition[]
   entryKey: string
@@ -69,10 +79,13 @@ export type StrategyDraft = {
   qtyType: QtyType
   qty: string
   validDays: string
+  credit: CreditType
+  tick: string
 }
 
 export function emptyDraft(): StrategyDraft {
   return {
+    screenName: '',
     logic: 'and',
     conditions: [],
     entryKey: '',
@@ -84,6 +97,8 @@ export function emptyDraft(): StrategyDraft {
     qtyType: 'shares',
     qty: '',
     validDays: '',
+    credit: 'cash',
+    tick: '0',
   }
 }
 
@@ -91,6 +106,7 @@ export function toDraft(s: Strategy): StrategyDraft {
   const entryParams: Record<string, string> = {}
   for (const [k, v] of Object.entries(s.entry.params ?? {})) entryParams[k] = String(v)
   return {
+    screenName: s.screen.name ?? '',
     logic: s.screen.logic,
     conditions: (s.screen.conditions ?? []).map((c) => ({ key: c.key, params: { ...c.params } })),
     entryKey: s.entry.key ?? '',
@@ -102,6 +118,8 @@ export function toDraft(s: Strategy): StrategyDraft {
     qtyType: s.order.qtyType,
     qty: s.order.qty == null ? '' : String(s.order.qty),
     validDays: s.order.validDays == null ? '' : String(s.order.validDays),
+    credit: s.order.credit ?? 'cash',
+    tick: String(s.order.tick ?? 0),
   }
 }
 
@@ -139,8 +157,8 @@ export function parseParams(
 
 /** 드래프트 → 저장 형식. 미입력·형식 오류는 한국어 메시지로 돌려준다. */
 export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): ParseResult<Strategy> {
-  if (d.conditions.length === 0) return { ok: false, error: '① 종목 선정 조건을 1개 이상 추가하세요.' }
-  if (!d.entryKey) return { ok: false, error: '② 매수 기준 전략을 선택하세요.' }
+  // 조건이 없으면 전체 종목이 대상이다 — 막지 않고 그대로 저장한다(화면에서 명시).
+  if (!d.entryKey) return { ok: false, error: '진입 기법을 선택하세요.' }
 
   const params = parseParams(entryDefs, d.entryParams)
   if (!params.ok) return params
@@ -160,11 +178,20 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
 
   const validDays = toNum('감시 유효기간', d.validDays, true)
   if (!validDays.ok) return validDays
+  if (validDays.value > 30) return { ok: false, error: '감시 유효기간은 최대 30일입니다.' }
+
+  const tickRaw = d.tick.trim()
+  const tick = tickRaw === '' ? 0 : Number(tickRaw)
+  if (!Number.isInteger(tick)) return { ok: false, error: '[틱] 정수를 입력하세요.' }
 
   return {
     ok: true,
     value: {
-      screen: { logic: d.logic, conditions: d.conditions },
+      screen: {
+        ...(d.screenName ? { name: d.screenName } : {}),
+        logic: d.logic,
+        conditions: d.conditions,
+      },
       entry: {
         key: d.entryKey,
         params: params.value,
@@ -177,6 +204,8 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
         qtyType: d.qtyType,
         qty: qty.value,
         validDays: validDays.value,
+        credit: d.credit,
+        tick,
       },
     },
   }

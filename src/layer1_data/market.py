@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 
+import requests
 import yfinance as yf
 
 CACHE_TTL_SEC = 60
@@ -37,9 +38,12 @@ GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
 _cache: dict[str, object] = {"at": 0.0, "data": None}
 
 
+SPARK_N = 30  # 카드 미니차트에 그릴 최근 종가 개수
+
+
 def _snapshot() -> list[dict]:
     tickers = [t for _, items in GROUPS for t, _, _ in items]
-    df = yf.download(tickers, period="5d", interval="1d", progress=False, auto_adjust=False)
+    df = yf.download(tickers, period="3mo", interval="1d", progress=False, auto_adjust=False)
     close = df["Close"]
     out = []
     for group, items in GROUPS:
@@ -47,16 +51,18 @@ def _snapshot() -> list[dict]:
         for ticker, name, unit in items:
             price = chg = None
             asof = None
+            spark: list[float] = []
             try:
                 s = close[ticker].dropna()
                 if len(s) >= 2:
                     price = float(s.iloc[-1])
                     chg = float((s.iloc[-1] / s.iloc[-2] - 1) * 100)
                     asof = str(s.index[-1].date())
+                    spark = [float(v) for v in s.iloc[-SPARK_N:]]
             except (KeyError, IndexError):
                 pass
             rows.append({"key": ticker, "name": name, "unit": unit,
-                         "price": price, "chg": chg, "asof": asof})
+                         "price": price, "chg": chg, "asof": asof, "spark": spark})
         out.append({"group": group, "items": rows})
     return out
 
@@ -67,4 +73,101 @@ def market_snapshot(force: bool = False) -> list[dict]:
         return _cache["data"]  # type: ignore[return-value]
     data = _snapshot()
     _cache.update(at=now, data=data)
+    return data
+
+
+# ── 지수 보드 — 장중 흐름 + 투자자별 순매수 (홈 화면 상단) ──────────────
+# 장중 5분봉은 yfinance, 투자자별 순매수는 네이버 지수 trend.
+# 순매수 단위는 네이버가 명시하지 않아 거래대금과 대조해 확정했다:
+#   코스피 거래대금 21.0조 / 외국인 -25,547 → 억원이면 -2.55조(12%)로 타당, 백만원이면 -255억(0.1%)로 비현실적.
+# 화면 표시 전용이다 — 백테스트 신호로 쓰지 않는다.
+
+INDEX_BOARDS = [("^KS11", "KOSPI", "코스피"), ("^KQ11", "KOSDAQ", "코스닥")]
+FLOW_UNIT = "억원"
+_NAVER = "https://m.stock.naver.com/api/index"
+_NAVER_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
+
+_board_cache: dict[str, object] = {"at": 0.0, "data": None}
+
+
+def _to_num(v: object) -> float | None:
+    s = str(v or "").replace(",", "").replace("+", "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _flow(code: str) -> dict | None:
+    try:
+        r = requests.get(f"{_NAVER}/{code}/trend", headers=_NAVER_HEADERS, timeout=5)
+        d = r.json()
+    except (requests.RequestException, ValueError):
+        return None
+    out = {
+        "date": d.get("bizdate"),
+        "foreign": _to_num(d.get("foreignValue")),
+        "personal": _to_num(d.get("personalValue")),
+        "institution": _to_num(d.get("institutionalValue")),
+        "unit": FLOW_UNIT,
+    }
+    return out if any(out[k] is not None for k in ("foreign", "personal", "institution")) else None
+
+
+def _intraday(ticker: str) -> list[dict]:
+    try:
+        df = yf.download(ticker, period="1d", interval="5m", progress=False, auto_adjust=False)
+    except Exception:  # noqa: BLE001 — 장중 데이터가 없어도 보드는 떠야 한다
+        return []
+    if df is None or df.empty or "Close" not in df:
+        return []
+    s = df["Close"]
+    if hasattr(s, "columns"):  # 단일 티커인데도 MultiIndex 로 오는 경우
+        s = s.iloc[:, 0]
+    s = s.dropna()
+    return [{"t": ts.strftime("%H:%M"), "v": float(v)} for ts, v in s.items()]
+
+
+def _boards() -> list[dict]:
+    try:
+        df = yf.download([t for t, _, _ in INDEX_BOARDS], period="5d", interval="1d",
+                         progress=False, auto_adjust=False)
+        daily = {t: df["Close"][t].dropna() for t, _, _ in INDEX_BOARDS}
+    except Exception:  # noqa: BLE001 — 전일종가를 못 구해도 장중 포인트는 그린다
+        daily = {}
+
+    out = []
+    for ticker, ncode, name in INDEX_BOARDS:
+        s = daily.get(ticker)
+        price = prev = chg = None
+        if s is not None and len(s) >= 2:
+            price, prev = float(s.iloc[-1]), float(s.iloc[-2])
+            chg = (price / prev - 1) * 100
+        points = _intraday(ticker)
+        if points:
+            price = points[-1]["v"]
+            if prev:
+                chg = (price / prev - 1) * 100
+        out.append({
+            "key": ticker,
+            "code": ncode,
+            "name": name,
+            "price": price,
+            "prev_close": prev,
+            "chg": chg,
+            "diff": None if (price is None or prev is None) else price - prev,
+            "intraday": points,
+            "flow": _flow(ncode),
+        })
+    return out
+
+
+def index_boards(force: bool = False) -> list[dict]:
+    now = time.time()
+    if not force and _board_cache["data"] is not None and now - float(_board_cache["at"]) < CACHE_TTL_SEC:
+        return _board_cache["data"]  # type: ignore[return-value]
+    data = _boards()
+    _board_cache.update(at=now, data=data)
     return data

@@ -52,7 +52,7 @@ export function FinancialsPanel() {
           DART 연간
         </span>
       </div>
-      <div className="panel-body">
+      <div className="panel-body plain">
         {!symbol && <p className="hint">종목을 선택하면 연간 재무가 표시됩니다.</p>}
         {msg && <p className="hint">{msg}</p>}
         {rows.length > 0 && (

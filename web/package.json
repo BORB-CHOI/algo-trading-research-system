@@ -14,7 +14,9 @@
     "dockview": "^7.0.4",
     "dockview-react": "^7.0.4",
     "echarts": "^6.1.0",
+    "embla-carousel-react": "^8.6.0",
     "klinecharts": "^9.8.12",
+    "motion": "^12.43.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
@@ -24,6 +26,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "oxlint": "^1.71.0",
+    "playwright": "^1.62.1",
     "typescript": "~6.0.2",
     "vite": "^8.1.1"
   }

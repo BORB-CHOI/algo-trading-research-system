@@ -21,7 +21,7 @@ const cardTitleStyle: CSSProperties = {
 
 export function FinvizPanel() {
   return (
-    <div className="panel-body">
+    <div className="panel-body plain">
       <div style={cardStyle}>
         <div style={cardTitleStyle}>finviz 원본 맵</div>
         <p className="hint">

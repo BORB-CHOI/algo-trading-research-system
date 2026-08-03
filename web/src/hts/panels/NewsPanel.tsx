@@ -66,7 +66,7 @@ export function NewsPanel() {
           ⟳
         </button>
       </div>
-      <div className="panel-body">
+      <div className="panel-body plain">
         {!symbol && <p className="hint">종목을 선택하면 그 종목 뉴스로 좁혀 봅니다.</p>}
         {msg && <p className="hint">{msg}</p>}
         {items.length > 0 && (

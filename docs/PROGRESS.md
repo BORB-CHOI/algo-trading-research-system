@@ -10,6 +10,8 @@
 - 수정주가 보정 — 액면분할/병합 back-adjust, 정본 layer1/adjust.py (ADR-0006, 9faf15e→d17271b 이관)
 - 잔여 점검 3건 종료: ETF/ETN 없음·코드 재사용 없음·거래정지 Amount==0⇔Volume==0 (BORB-32, 4a5fdac)
 - 수정주가 일봉 사전 계산 — scripts/build_adjusted.py 생성 · derived.py 읽기 창구 (보정 정본은 adjust.py 그대로)
+- marcap 갱신 지연분 보충 — 네이버 종목시세로 최신 거래일까지 (BORB-44, ADR-0002 개정)
+  - marcap 이 정본. 거래대금 근사·point-in-time 아님·Dept 없음 → **표시 전용, 백테스트 ❌**
 
 ## Layer 2 — 신호 (LLM)
 
@@ -37,6 +39,10 @@
 - FastAPI + Vite/React + KLineChart Pro 차트, 수정주가·주/월봉·ko-KR (ADR-0005, 53e772a→0261ddb)
 - HTS 멀티뷰 셸 — dockview 도킹(탭·플로팅·팝아웃), ECharts 시장맵, 관심종목 (ADR-0008, c1fad55)
 - 화이트 테마 + 키움식 조건검색 UI + 워터마크 제거 (355d593)
+- 소프트 UI 전면 적용 — KIS 앱 톤 토큰·2행 헤더(통합검색+지수 티커)·스파크라인·시세포착 감시 목록 (ADR-0008 개정)
+- 검색바 CSS 특이도 충돌 수정 + 한 글자마다 실시간 검색(시총순 정렬) + 우측 종목 드로어 (ADR-0008 개정 2)
+- 홈 지수 보드 — 코스피/코스닥 장중 5분봉 + 투자자별 순매수(네이버 지수 trend, 억원) + 순위 5종 (ADR-0008 개정 2)
+- 전략 3단계 분리 — ① 조건검색식 CRUD ② 매매전략 ③ 감시. 조건 0개 = 전체 종목 (ADR-0009 개정 2)
 
 ## 결정/폐기
 

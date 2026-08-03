@@ -1,14 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchQuotes, type Quote } from '../../api'
-import { notifyWatchlistChanged, onWatchlistChanged, pickSymbol, type SymbolPick } from '../bus'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
+import useEmblaCarousel from 'embla-carousel-react'
+import { fetchQuotes, type Quote, type Symbol } from '../../api'
+import { notifyWatchlistChanged, onSymbolPick, onWatchlistChanged, pickSymbol, type SymbolPick } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
+import { Sparkline } from '../Sparkline'
+import { SearchModal } from '../components/SearchModal'
 
-// 관심그룹 선택 + 그룹별 종목 시세(/api/quotes). 저장은 localStorage(형식 고정 — 조건검색이 같은 걸 쓴다).
+// 관심종목 — 그룹을 하나씩 갈아 끼우는 대신 [전체] 에서 모든 그룹을 접었다 폈다 하며 본다.
+// 상단 탭은 좌우로 슬라이드해 넘긴다(embla). 저장 형식은 고정 — 다른 패널이 같은 걸 읽는다.
+
 type Watchlist = Record<string, SymbolPick[]>
 
 const WL_KEY = 'hts-watchlist'
-const MAX_HITS = 8
-const DEFAULT_GROUP = '관심종목1'
+const COLLAPSE_KEY = 'hts-watchlist-collapsed'
+const ALL = '__all__'
+const RECENT = '__recent__'
+const BEST = '__best__'
+const RECENT_KEY = 'hts-recent-symbols'
+const RECENT_MAX = 20
 
 function loadWl(): Watchlist {
   try {
@@ -18,29 +28,136 @@ function loadWl(): Watchlist {
   }
 }
 
+function loadRecent(): SymbolPick[] {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]') as SymbolPick[]
+  } catch {
+    return []
+  }
+}
+
+function loadCollapsed(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(COLLAPSE_KEY) ?? '[]') as string[]
+  } catch {
+    return []
+  }
+}
+
+/** 종목 행 — 이미지처럼 [종목명 / 시장·코드] + [현재가] + [등락·등락률] + 미니차트 */
+function Row(props: { it: SymbolPick; q: Quote | undefined; onDelete?: () => void }) {
+  const { it, q } = props
+  const diff = q && q.chg != null ? (q.close * q.chg) / (100 + q.chg) : null
+  const cls = chgClass(q?.chg)
+  return (
+    <motion.div
+      className="wl-row"
+      layout
+      initial={{ opacity: 0, y: 3 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, height: 0 }}
+      transition={{ duration: 0.16 }}
+      onClick={() => pickSymbol(it)}
+    >
+      <span className="nm">
+        {it.name}
+        <small>
+          <em className={it.market === 'KOSPI' ? 'kospi' : 'kosdaq'}>{it.market || '—'}</em>
+          {it.code}
+        </small>
+      </span>
+      <span className="spark">
+        <Sparkline data={q?.spark} width={54} height={20} tone={cls as 'up' | 'down' | 'flat'} />
+      </span>
+      <span className={`px num ${cls}`}>{q ? fmtPrice(q.close) : '-'}</span>
+      <span className={`chg num ${cls}`}>
+        <b>{fmtChg(q?.chg)}</b>
+        <small>{diff != null ? `${diff > 0 ? '▲' : '▼'} ${fmtPrice(Math.abs(diff))}` : '-'}</small>
+      </span>
+      <span className="amt num">{q ? fmtEok(q.amount) : '-'}</span>
+      {props.onDelete && (
+        <button
+          className="ghost del"
+          title="빼기"
+          onClick={(e) => {
+            e.stopPropagation()
+            props.onDelete?.()
+          }}
+        >
+          ✕
+        </button>
+      )}
+    </motion.div>
+  )
+}
+
 export function WatchlistPanel() {
   const [wl, setWl] = useState<Watchlist>(loadWl)
-  const [group, setGroup] = useState(() => Object.keys(loadWl())[0] ?? DEFAULT_GROUP)
-  const [q, setQ] = useState('')
-  const [hits, setHits] = useState<SymbolPick[]>([])
+  const [recent, setRecent] = useState<SymbolPick[]>(loadRecent)
+  const [best, setBest] = useState<SymbolPick[]>([])
+  const [tab, setTab] = useState<string>(ALL)
+  const [collapsed, setCollapsed] = useState<string[]>(loadCollapsed)
   const [quotes, setQuotes] = useState<Map<string, Quote>>(new Map())
   const [quoteDate, setQuoteDate] = useState<string | null>(null)
-  const [adding, setAdding] = useState(false)
-  const [newName, setNewName] = useState('')
-  const [renaming, setRenaming] = useState(false)
-  const [renameTo, setRenameTo] = useState('')
-  const [confirmDel, setConfirmDel] = useState(false)
   const [error, setError] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [addTo, setAddTo] = useState<string>('')
+  const [editing, setEditing] = useState(false)
+  const [newName, setNewName] = useState('')
   const quoteReq = useRef(0)
 
-  const items = wl[group] ?? []
-  const groupNames = Object.keys(wl)
-  if (!groupNames.includes(group)) groupNames.unshift(group)
+  const groups = Object.keys(wl)
+  const [emblaRef] = useEmblaCarousel({ dragFree: true, containScroll: 'trimSnaps' })
+
+  // 최근조회 — 어디서 종목을 고르든 쌓인다
+  useEffect(
+    () =>
+      onSymbolPick((s) => {
+        setRecent((prev) => {
+          const next = [s, ...prev.filter((p) => p.code !== s.code)].slice(0, RECENT_MAX)
+          localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+          return next
+        })
+      }),
+    [],
+  )
+
+  useEffect(() => onWatchlistChanged(() => setWl(loadWl())), [])
+
+  // 실시간 Best — 거래대금 상위 (marcap 최신 거래일 기준)
+  useEffect(() => {
+    let alive = true
+    fetch('/api/ranking?kind=amount&limit=15')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((d: { items: { code: string; name: string; market: string }[] }) => {
+        if (alive) setBest(d.items.map((i) => ({ code: i.code, name: i.name, market: i.market })))
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // 화면에 보이는 모든 종목의 시세를 한 번에 받는다 (그룹별로 나눠 부르지 않는다)
+  const visible = useMemo(() => {
+    const seen = new Map<string, SymbolPick>()
+    const push = (list: SymbolPick[]) => list.forEach((i) => seen.set(i.code, i))
+    if (tab === ALL) groups.forEach((g) => push(wl[g] ?? []))
+    else if (tab === RECENT) push(recent)
+    else if (tab === BEST) push(best)
+    else push(wl[tab] ?? [])
+    return [...seen.values()]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wl, tab, recent, best])
 
   const refreshQuotes = useCallback(async (codes: string[]) => {
     const req = ++quoteReq.current
+    if (codes.length === 0) {
+      setQuotes(new Map())
+      return
+    }
     try {
-      const { date, quotes } = await fetchQuotes(codes)
+      const { date, quotes } = await fetchQuotes(codes, true)
       if (req !== quoteReq.current) return
       setQuoteDate(date)
       setQuotes(new Map(quotes.map((it) => [it.code, it])))
@@ -51,11 +168,8 @@ export function WatchlistPanel() {
   }, [])
 
   useEffect(() => {
-    void refreshQuotes(items.map((i) => i.code))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [group, wl])
-
-  useEffect(() => onWatchlistChanged(() => setWl(loadWl())), [])
+    void refreshQuotes(visible.map((i) => i.code))
+  }, [visible, refreshQuotes])
 
   function save(next: Watchlist) {
     setWl(next)
@@ -63,238 +177,214 @@ export function WatchlistPanel() {
     notifyWatchlistChanged()
   }
 
-  function selectGroup(name: string) {
-    setGroup(name)
-    setConfirmDel(false)
-    setRenaming(false)
-  }
-
-  function resetEdits() {
-    setAdding(false)
-    setNewName('')
-    setRenaming(false)
-    setRenameTo('')
-    setConfirmDel(false)
+  function toggleGroup(g: string) {
+    setCollapsed((prev) => {
+      const next = prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next))
+      return next
+    })
   }
 
   function addGroup() {
     const name = newName.trim()
-    if (!name) return
-    if (!wl[name]) save({ ...wl, [name]: [] })
-    selectGroup(name)
-    setAdding(false)
+    if (!name || wl[name]) return
+    save({ ...wl, [name]: [] })
     setNewName('')
+    setTab(name)
   }
 
-  // 이름 변경 — 키 순서를 그대로 유지한 채 키만 바꾼다.
-  function renameGroup() {
-    const name = renameTo.trim()
-    if (!name || name === group) return resetEdits()
-    if (wl[name]) {
-      setError('같은 이름의 그룹이 이미 있습니다.')
-      return
-    }
-    const next: Watchlist = {}
-    for (const [k, v] of Object.entries(wl)) next[k === group ? name : k] = v
-    if (!(name in next)) next[name] = items
-    save(next)
-    selectGroup(name)
-    setRenameTo('')
+  function addSymbol(group: string, s: Symbol) {
+    const pick: SymbolPick = { code: s.code, name: s.name, market: s.market }
+    const items = wl[group] ?? []
+    if (items.some((i) => i.code === s.code)) return
+    save({ ...wl, [group]: [...items, pick] })
   }
 
-  function deleteGroup() {
-    const next = { ...wl }
-    delete next[group]
-    save(next)
-    selectGroup(Object.keys(next)[0] ?? DEFAULT_GROUP)
-  }
+  const tabs = [
+    { key: ALL, label: '전체', n: groups.reduce((a, g) => a + (wl[g]?.length ?? 0), 0) },
+    { key: RECENT, label: '최근조회', n: recent.length },
+    { key: BEST, label: '실시간Best', n: best.length },
+    ...groups.map((g) => ({ key: g, label: g, n: (wl[g] ?? []).length })),
+  ]
 
-  async function search() {
-    try {
-      const res = await fetch(`/api/symbols?q=${encodeURIComponent(q)}`)
-      if (!res.ok) throw new Error(`검색 실패 (${res.status})`)
-      const { symbols } = (await res.json()) as { symbols: { ticker: string; name: string; market: string }[] }
-      setHits(symbols.map((s) => ({ code: s.ticker, name: s.name, market: s.market })))
-      setError('')
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '종목 검색 실패')
-    }
+  function openAdd(group: string) {
+    setAddTo(group)
+    setSearchOpen(true)
   }
 
   return (
     <div className="panel-col">
+      <div className="wl-tabs" ref={emblaRef}>
+        <div className="track">
+          {tabs.map((t) => (
+            <button key={t.key} className={`tab ${tab === t.key ? 'on' : ''}`} onClick={() => setTab(t.key)}>
+              {t.label}
+              <span className="n">{t.n}</span>
+            </button>
+          ))}
+          <button className="tab add" title="그룹 추가" onClick={() => setEditing((v) => !v)}>
+            ＋
+          </button>
+        </div>
+      </div>
+
       <div className="toolbar">
-        <span className="panel-title" style={{ margin: 0 }}>
-          관심그룹 선택
-        </span>
-        <span className="badge">{groupNames.length}개 그룹</span>
-        <button style={{ marginLeft: 'auto' }} onClick={() => void refreshQuotes(items.map((i) => i.code))} title="시세 갱신">
+        <span className="badge on">{visible.length}종목</span>
+        {quoteDate && <span className="badge">{quoteDate}</span>}
+        <button style={{ marginLeft: 'auto' }} onClick={() => openAdd(tab === ALL ? (groups[0] ?? '') : tab)}>
+          종목추가 ＋
+        </button>
+        <button className="ghost icon" onClick={() => void refreshQuotes(visible.map((i) => i.code))} title="시세 갱신">
           ⟳
         </button>
       </div>
-      <div className="panel-body">
-        <div
-          style={{
-            maxHeight: 190,
-            overflowY: 'auto',
-            border: '1px solid var(--hts-border)',
-            borderRadius: 4,
-            marginBottom: 6,
-          }}
-        >
-          <table className="grid">
-            <tbody>
-              {groupNames.map((g) => {
-                const n = (wl[g] ?? []).length
-                const on = g === group
-                return (
-                  <tr key={g} className={on ? 'selected' : undefined}>
-                    <td
-                      onClick={() => selectGroup(g)}
-                      style={{
-                        cursor: 'pointer',
-                        color: n > 0 ? 'var(--hts-accent)' : 'var(--hts-text-2)',
-                        fontWeight: on ? 700 : 400,
-                      }}
-                    >
-                      {on ? '▶ ' : ''}
-                      {g}
-                      <span className="flat" style={{ marginLeft: 4, fontWeight: 400 }}>
-                        ({n})
-                      </span>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
 
-        {adding ? (
-          <div className="form-row">
+      <AnimatePresence>
+        {editing && (
+          <motion.div
+            className="form-row"
+            style={{ padding: '8px 10px', margin: 0, overflow: 'hidden' }}
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18 }}
+          >
             <input
               autoFocus
-              placeholder="새 그룹명"
+              placeholder="새 그룹명 (예: 로봇, AI, 반도체)"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => (e.key === 'Enter' ? addGroup() : e.key === 'Escape' ? resetEdits() : undefined)}
+              onKeyDown={(e) => e.key === 'Enter' && addGroup()}
             />
-            <button onClick={addGroup}>추가</button>
-            <button onClick={resetEdits}>취소</button>
-          </div>
-        ) : renaming ? (
-          <div className="form-row">
-            <input
-              autoFocus
-              placeholder={`[${group}] 새 이름`}
-              value={renameTo}
-              onChange={(e) => setRenameTo(e.target.value)}
-              onKeyDown={(e) => (e.key === 'Enter' ? renameGroup() : e.key === 'Escape' ? resetEdits() : undefined)}
-            />
-            <button onClick={renameGroup}>변경</button>
-            <button onClick={resetEdits}>취소</button>
-          </div>
-        ) : confirmDel ? (
-          <div className="form-row">
-            <span className="hint" style={{ flex: 1 }}>
-              [{group}] 그룹({items.length}종목)을 삭제할까요?
-            </span>
-            <button onClick={deleteGroup}>정말 삭제</button>
-            <button onClick={resetEdits}>취소</button>
-          </div>
-        ) : (
-          <div className="form-row">
-            <button onClick={() => setAdding(true)} title="새 그룹 만들기">
-              +그룹
+            <button className="cta" onClick={addGroup}>
+              추가
             </button>
-            <button
-              onClick={() => {
-                setRenameTo(group)
-                setRenaming(true)
-              }}
-              title="현재 그룹 이름 변경"
-            >
-              이름변경
+            <button className="ghost" onClick={() => setEditing(false)}>
+              닫기
             </button>
-            <button onClick={() => setConfirmDel(true)} title="현재 그룹 삭제">
-              그룹삭제
-            </button>
-          </div>
+          </motion.div>
         )}
+      </AnimatePresence>
 
-        <div className="form-row">
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="종목 검색" onKeyDown={(e) => e.key === 'Enter' && search()} />
-          <button onClick={search}>검색</button>
-        </div>
-        {error && <p className="hint">{error}</p>}
-        {hits.length > 0 && (
-          <table className="grid">
-            <tbody>
-              {hits.slice(0, MAX_HITS).map((h) => (
-                <tr key={h.code}>
-                  <td onClick={() => pickSymbol(h)} style={{ cursor: 'pointer' }}>
-                    {h.name}
-                  </td>
-                  <td className="flat">{h.code}</td>
-                  <td className="num">
-                    <button onClick={() => save({ ...wl, [group]: [...items.filter((i) => i.code !== h.code), h] })}>
-                      +담기
+      <div className="panel-body plain">
+        {error && <p className="hint warn">{error}</p>}
+
+        {tab === ALL ? (
+          groups.length === 0 ? (
+            <p className="hint">그룹이 없습니다. 위 ＋ 로 그룹을 만들고 종목을 담아 보세요.</p>
+          ) : (
+            groups.map((g) => {
+              const items = wl[g] ?? []
+              const open = !collapsed.includes(g)
+              return (
+                <section className="wl-group" key={g}>
+                  <header onClick={() => toggleGroup(g)}>
+                    <motion.span className="caret" animate={{ rotate: open ? 90 : 0 }} transition={{ duration: 0.16 }}>
+                      ▶
+                    </motion.span>
+                    <b>{g}</b>
+                    <span className="n">{items.length}</span>
+                    <span className="grow" />
+                    <button
+                      className="ghost"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        openAdd(g)
+                      }}
+                    >
+                      ＋
                     </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        {hits.length > MAX_HITS && (
-          <p className="hint">
-            검색 결과 {hits.length}건 중 {MAX_HITS}건만 표시합니다.
-          </p>
-        )}
-
-        <p className="hint">
-          [{group}] {items.length}종목{quoteDate ? ` · ${quoteDate} 기준` : ''}
-        </p>
-        {items.length === 0 ? (
-          <p className="hint">그룹이 비어 있습니다. 위에서 종목을 검색해 담아 보세요.</p>
-        ) : (
-          <table className="grid">
-            <thead>
-              <tr>
-                <th>종목명</th>
-                <th className="num">현재가</th>
-                <th className="num">등락률</th>
-                <th className="num">거래대금</th>
-                <th className="num" />
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((it) => {
-                const qt = quotes.get(it.code)
-                return (
-                  <tr key={it.code}>
-                    <td onClick={() => pickSymbol(it)} style={{ cursor: 'pointer' }}>
-                      {it.name}
-                    </td>
-                    <td className={`num ${chgClass(qt?.chg)}`}>{qt ? fmtPrice(qt.close) : '-'}</td>
-                    <td className={`num ${chgClass(qt?.chg)}`}>{fmtChg(qt?.chg)}</td>
-                    <td className="num">{qt ? fmtEok(qt.amount) : '-'}</td>
-                    <td className="num">
-                      <button
-                        title="삭제"
-                        className="row-del"
-                        onClick={() => save({ ...wl, [group]: items.filter((i) => i.code !== it.code) })}
+                    <button
+                      className="ghost"
+                      title="그룹 삭제"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        const next = { ...wl }
+                        delete next[g]
+                        save(next)
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </header>
+                  <AnimatePresence initial={false}>
+                    {open && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.18, ease: [0.22, 0.61, 0.36, 1] }}
+                        style={{ overflow: 'hidden' }}
                       >
-                        ×
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+                        {items.length === 0 ? (
+                          <p className="hint" style={{ padding: '6px 10px' }}>
+                            비어 있습니다.
+                          </p>
+                        ) : (
+                          items.map((it) => (
+                            <Row
+                              key={it.code}
+                              it={it}
+                              q={quotes.get(it.code)}
+                              onDelete={() => save({ ...wl, [g]: items.filter((x) => x.code !== it.code) })}
+                            />
+                          ))
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </section>
+              )
+            })
+          )
+        ) : (
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={tab}
+              initial={{ opacity: 0, x: 12 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -12 }}
+              transition={{ duration: 0.18 }}
+            >
+              {visible.length === 0 ? (
+                <p className="hint">표시할 종목이 없습니다.</p>
+              ) : (
+                visible.map((it) => (
+                  <Row
+                    key={it.code}
+                    it={it}
+                    q={quotes.get(it.code)}
+                    onDelete={
+                      tab === RECENT || tab === BEST
+                        ? undefined
+                        : () => save({ ...wl, [tab]: (wl[tab] ?? []).filter((x) => x.code !== it.code) })
+                    }
+                  />
+                ))
+              )}
+            </motion.div>
+          </AnimatePresence>
         )}
       </div>
+
+      <SearchModal
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onPick={(s) => pickSymbol({ code: s.code, name: s.name, market: s.market })}
+        trailing={(s) =>
+          addTo ? (
+            <button
+              className="add"
+              onClick={(e) => {
+                e.stopPropagation()
+                addSymbol(addTo, s)
+              }}
+            >
+              담기
+            </button>
+          ) : null
+        }
+      />
     </div>
   )
 }

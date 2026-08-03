@@ -78,6 +78,24 @@ marcap 은 6자리 코드 체계 도입(2000-05-29) 이전 코드를 **숫자로
 - 데이터 갱신 지연 — 마지막 거래일이 실제보다 1~2 영업일 늦다. 백테스트엔 무관, 실시간 운용엔 부적합.
 - 액면분할/병합 back-adjust 는 **구현 완료**(ADR-0006, `api/main.py`). 배당은 미보정.
 
+### 1.1 marcap 이후 보충분 — `data/derived/recent/` (BORB-44, ADR-0002 개정)
+
+marcap 저장소 갱신 지연분만 네이버 종목시세로 채운 파생 데이터. **화면 표시 전용 — 백테스트 ❌**
+(근거·제약은 ADR-0002 개정 참조).
+
+| 파일 | 내용 |
+|---|---|
+| `{YYYY-MM-DD}.parquet` | 그 날짜 전종목. 컬럼 = `Date, Code, Name, Market, Open, High, Low, Close, Volume, Amount, Marcap, Stocks` — §1 의 부분집합 |
+| `meta.json` | `marcap_last`(보충 기준일) · `dates`(보충한 날짜) · `amount_is_approx: true` · `source: "naver"` |
+
+- **없는 컬럼**: `Changes / ChangeCode / ChangesRatio / Dept / MarketId / Rank`.
+  `Dept` 가 없으니 이 구간에는 **관리종목·투자주의환기종목 제외가 걸리지 않는다**(`is_watchlisted()` 가
+  Dept 없으면 판정 포기). 스팩·리츠·우선주·KONEX 는 이름·코드·시장 규칙이라 그대로 걸린다.
+- `Amount` = `(고+저+종)/3 × 거래량` **근사**(당일분만 통합시세의 정확한 대금).
+  `Marcap` = 종가 × marcap 최신일 `Stocks`(보충 구간의 증자·감자는 반영 안 됨).
+- 대상 종목 = marcap 최신일 스냅샷 고정 → 그 뒤 신규상장 누락 / 상폐 잔존. **point-in-time 아님.**
+- 커밋하지 않는다(`data/` .gitignore). 재생성 = `uv run python scripts/update_recent.py`.
+
 ## 2. 종목 마스터 (point-in-time)
 
 marcap의 날짜별 스냅샷에서 파생. 별도 테이블로 둘지, 패널에서 그때그때 뽑을지는 구현 시 결정.
