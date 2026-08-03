@@ -389,7 +389,23 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
       datafeed: new ApiDatafeed(),
     })
 
+    // 패널(dockview) 크기가 바뀌어도 차트가 따라오지 않는 문제 해결.
+    // KLineChart Pro 는 **window resize 만** 듣고 컨테이너 크기 변화는 감지하지 않는다
+    // (Pro 소스 확인: addEventListener("resize", …), resize() 공개 API 없음).
+    // 그래서 컨테이너를 직접 관찰해 Pro 자신의 리사이즈 경로(window resize)를 깨운다.
+    let pending = 0
+    const ro = new ResizeObserver(() => {
+      if (pending) return // 드래그 중 연속 호출은 한 프레임에 하나로 합친다
+      pending = requestAnimationFrame(() => {
+        pending = 0
+        window.dispatchEvent(new Event('resize'))
+      })
+    })
+    ro.observe(el)
+
     return () => {
+      ro.disconnect()
+      if (pending) cancelAnimationFrame(pending)
       // Pro 는 dispose 를 노출하지 않지만, 내부 klinecharts 는 전역 인스턴스 맵에
       // 등록돼 있어 dispose() 없이는 패널을 닫을 때마다 차트가 잔류한다(메모리 누수).
       // init 이 컨테이너에 남긴 k-line-chart-id 속성으로 찾아 직접 해제한다.

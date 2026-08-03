@@ -293,6 +293,8 @@ body {
   --dv-drag-over-background-color: rgba(var(--hts-accent-rgb), 0.18);
   --dv-drag-over-border-color: var(--hts-accent);
   --dv-floating-border: 1px solid var(--hts-border);
+  --dv-floating-titlebar-background-color: var(--hts-elev);
+  --dv-floating-titlebar-height: 26px;
   --dv-context-menu-background-color: var(--hts-elev);
   --dv-context-menu-color: var(--hts-text);
 }

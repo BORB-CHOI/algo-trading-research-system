@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import type { DockviewPanelApi } from 'dockview'
+import type { DockviewPanelApi } from 'dockview-react'
 import { ProChart, type ProChartHandle } from '../../ProChart'
 import { currentStrategy, currentSymbol, onStrategyPick, onSymbolPick } from '../bus'
 
