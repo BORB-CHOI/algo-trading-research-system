@@ -85,12 +85,13 @@ marcap 저장소 갱신 지연분만 네이버 종목시세로 채운 파생 데
 
 | 파일 | 내용 |
 |---|---|
-| `{YYYY-MM-DD}.parquet` | 그 날짜 전종목. 컬럼 = `Date, Code, Name, Market, Open, High, Low, Close, Volume, Amount, Marcap, Stocks` — §1 의 부분집합 |
+| `{YYYY-MM-DD}.parquet` | 그 날짜 전종목. 컬럼 = `Date, Code, Name, Market, Dept, Open, High, Low, Close, Volume, Amount, Marcap, Stocks` — §1 의 부분집합 |
 | `meta.json` | `marcap_last`(보충 기준일) · `dates`(보충한 날짜) · `amount_is_approx: true` · `source: "naver"` |
 
-- **없는 컬럼**: `Changes / ChangeCode / ChangesRatio / Dept / MarketId / Rank`.
-  `Dept` 가 없으니 이 구간에는 **관리종목·투자주의환기종목 제외가 걸리지 않는다**(`is_watchlisted()` 가
-  Dept 없으면 판정 포기). 스팩·리츠·우선주·KONEX 는 이름·코드·시장 규칙이라 그대로 걸린다.
+- **없는 컬럼**: `Changes / ChangeCode / ChangesRatio / MarketId / Rank`.
+- **`Dept` 는 marcap 마지막 관측값을 물려받은 값이다** — 네이버가 소속부를 주지 않는다.
+  보충 구간 중 신규 지정·해제된 관리종목은 놓친다. 빼면 제외가 통째로 풀리므로(`is_watchlisted()` 는
+  Dept 전용 판정) 옛 parquet 에 Dept 가 없어도 `merge_with_marcap()` 이 채운다.
 - `Amount` = `(고+저+종)/3 × 거래량` **근사**(당일분만 통합시세의 정확한 대금).
   `Marcap` = 종가 × marcap 최신일 `Stocks`(보충 구간의 증자·감자는 반영 안 됨).
 - 대상 종목 = marcap 최신일 스냅샷 고정 → 그 뒤 신규상장 누락 / 상폐 잔존. **point-in-time 아님.**

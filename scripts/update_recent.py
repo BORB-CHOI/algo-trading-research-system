@@ -26,7 +26,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
 BASE = "https://m.stock.naver.com/api/stock"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "data" / "derived" / "recent"
-COLS = ["Date", "Code", "Name", "Market", "Open", "High", "Low", "Close",
+COLS = ["Date", "Code", "Name", "Market", "Dept", "Open", "High", "Low", "Close",
         "Volume", "Amount", "Marcap", "Stocks"]
 
 log = logging.getLogger("update_recent")
@@ -78,11 +78,15 @@ def _parse_hangeul_won(s: str) -> float | None:
 
 
 def universe(last_marcap_date: pd.Timestamp) -> pd.DataFrame:
-    """marcap 최신일 스냅샷 — 종목명·시장·상장주식수를 여기서 물려받는다."""
+    """marcap 최신일 스냅샷 — 종목명·시장·소속부·상장주식수를 여기서 물려받는다.
+
+    Dept 를 빼면 보충 구간에서 관리종목 제외가 풀린다(그 판정은 Dept 전용).
+    """
     years = available_years()
     df = load_years(years[-1], years[-1])
     snap = df[df["Date"] == last_marcap_date]
-    return snap[["Code", "Name", "Market", "Stocks"]].drop_duplicates("Code").set_index("Code")
+    cols = ["Code", "Name", "Market", "Dept", "Stocks"]
+    return snap[cols].drop_duplicates("Code").set_index("Code")
 
 
 def main() -> int:
@@ -124,6 +128,7 @@ def main() -> int:
                 rows.append({
                     "Date": d, "Code": code,
                     "Name": uni.loc[code, "Name"], "Market": uni.loc[code, "Market"],
+                    "Dept": uni.loc[code, "Dept"],
                     "Open": o or c, "High": h or c, "Low": lo or c, "Close": c,
                     "Volume": v, "Amount": typical * v,
                     "Marcap": c * stocks, "Stocks": stocks,
