@@ -250,3 +250,19 @@ export async function fetchCandles(
   }
   return (await res.json()) as CandlesResponse
 }
+
+export type FinancialRow = {
+  year: number
+  disclosed: string | null
+  fs_div: string | null
+  매출액: number | null
+  영업이익: number | null
+  당기순이익: number | null
+  자산총계: number | null
+  부채총계: number | null
+  자본총계: number | null
+}
+
+export async function fetchFinancials(code: string): Promise<{ code: string; rows: FinancialRow[] }> {
+  return getJson(`/api/financials?code=${encodeURIComponent(code)}`)
+}

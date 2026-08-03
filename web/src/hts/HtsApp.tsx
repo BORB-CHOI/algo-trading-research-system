@@ -8,6 +8,7 @@ import {
 import 'dockview-react/dist/styles/dockview.css'
 import {
   ChartPanel,
+  FinancialsPanel,
   FinvizPanel,
   MapPanel,
   NewsPanel,
@@ -21,6 +22,7 @@ const components: Record<string, (p: IDockviewPanelProps) => ReactElement> = {
   chart: (p) => <ChartPanel panelApi={p.api} />,
   screen: () => <ScreenPanel />,
   strategy: () => <StrategyPanel />,
+  financials: () => <FinancialsPanel />,
   map: () => <MapPanel />,
   watchlist: () => <WatchlistPanel />,
   news: () => <NewsPanel />,
@@ -31,6 +33,7 @@ const TITLES: Record<string, string> = {
   chart: '차트',
   screen: '조건검색',
   strategy: '전략',
+  financials: '재무',
   map: '시장맵',
   watchlist: '관심종목',
   news: '뉴스',

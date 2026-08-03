@@ -39,6 +39,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=None, help="앞에서 N개 종목만")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR, help="저장 루트")
     p.add_argument("--overwrite", action="store_true", help="기존 parquet 도 다시 받는다")
+    p.add_argument("--quarters", type=str, default="1,2,3,4", help="받을 분기 (연간만이면 4)")
     return p.parse_args(argv)
 
 
@@ -142,15 +143,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit is not None:
         corps = corps[: args.limit]
 
+    quarters = [int(q) for q in args.quarters.split(",") if q.strip()]
     years = range(args.start_year, args.end_year + 1)
-    total = len(corps) * len(years) * 4
-    log.info("백필 시작: %d개 종목 × %d~%d × 4분기 = 최대 %d건",
-             len(corps), args.start_year, args.end_year, total)
+    total = len(corps) * len(years) * len(quarters)
+    log.info("백필 시작: %d개 종목 × %d~%d × %d개분기 = 최대 %d건",
+             len(corps), args.start_year, args.end_year, len(quarters), total)
 
     counts = {"saved": 0, "skipped": 0, "empty": 0, "failed": 0}
     for i, (stock_code, corp_code, corp_name) in enumerate(corps, start=1):
         for year in years:
-            for quarter in (1, 2, 3, 4):
+            for quarter in quarters:
                 counts[backfill_one(dart, stock_code, corp_code, corp_name, year, quarter,
                                     args.out, args.sleep, args.overwrite)] += 1
         log.info("[%d/%d] %s 완료 — 저장 %d 건너뜀 %d 없음 %d 실패 %d",

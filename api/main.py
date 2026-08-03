@@ -31,6 +31,7 @@ from src.layer1_data.adjust import (
     SPLIT_SHARE_LO,
     apply_split_adjustment,
 )
+from src.layer1_data.dart import load_financials
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer3_strategy import conditions as cond_registry
@@ -531,6 +532,13 @@ def _parse_params_or_400(strat: Strategy, given: dict) -> dict:
         return parse_params(strat, given)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.get("/api/financials")
+def api_financials(code: str = Query(..., description="종목코드 6자리")) -> dict:
+    """DART 연간 재무 (BORB-41 ②). 백필 안 된 종목은 rows 빈 배열."""
+    rows = load_financials(code)
+    return {"code": code.strip().zfill(6), "rows": rows}
 
 
 @app.get("/api/strategies")
