@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 
-// 뉴스(자리)·Finviz(새창 폴백) 패널 — 카드형 레이아웃.
+// Finviz 새창 폴백 패널.
 
 const cardStyle: CSSProperties = {
   background: 'var(--hts-elev)',
@@ -17,23 +17,6 @@ const cardTitleStyle: CSSProperties = {
   fontWeight: 600,
   color: 'var(--hts-text)',
   marginBottom: 6,
-}
-
-export function NewsPanel() {
-  return (
-    <div className="panel-body">
-      <div style={cardStyle}>
-        <div style={cardTitleStyle}>
-          뉴스
-          <span className="badge">Phase 2 에서 소스 연결 예정</span>
-        </div>
-        <p className="hint">
-          뉴스 데이터 소스는 미정이다 (지침: 뉴스·공시는 Backtest Phase 2 때 추가).
-          소스가 정해지면 이 패널에 연결한다.
-        </p>
-      </div>
-    </div>
-  )
 }
 
 export function FinvizPanel() {
