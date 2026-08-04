@@ -34,26 +34,15 @@ import {
   type SavedCondition,
   type Strategies,
   type StrategyDraft,
-  type TargetKind,
 } from './strategyStore'
-import {
-  fmtPeriod,
-  loadWatches,
-  newId,
-  periodFrom,
-  saveWatches,
-  type WatchOrder,
-  type WatchSide,
-} from './watchStore'
 
-// 전략 화면은 3단계다.
+// 전략 화면은 2단계다.
 //  ① 종목선정 — 조건검색식을 여러 개 만들고 고친다 (저장소: hts-screens)
-//  ② 매매전략 — 그중 하나를 골라 진입기법·목표가·주문조건을 붙인다 (저장소: hts-strategies)
-//  ③ 감시    — ②를 특정 종목에 걸어둔 시세포착 감시 목록 (저장소: hts-watchorders)
+//  ② 매매전략 — 그중 하나를 골라 진입기법·주문조건을 붙인다 (저장소: hts-strategies)
+// 시세포착 감시는 제거했다 (ADR-0008 개정 4) — 목표가는 진입 기법이 계산할 몫이다.
 // 정량 값은 전부 이 화면에서 입력한다 (ADR-0009 — 전략 숫자 하드코딩 금지).
 
 const LIMIT = 100
-const DAY_PRESETS = [1, 7, 15, 30]
 
 const PLACEHOLDER: Record<string, string> = {
   short: '5',
@@ -68,13 +57,7 @@ const PLACEHOLDER: Record<string, string> = {
   near: '1.5',
 }
 
-const TARGET_LABEL: Record<TargetKind, string> = {
-  fib: '피보나치 레벨',
-  round: '라운드 피겨',
-  manual: '직접 입력',
-}
-
-type Step = 'screen' | 'strategy' | 'watch'
+type Step = 'screen' | 'strategy'
 
 function rowLabel(i: number): string {
   return i < 26 ? String.fromCharCode(65 + i) : String(i + 1)
@@ -251,9 +234,17 @@ export function StrategyPanel() {
   const [screenMsg, setScreenMsg] = useState('')
   const [namingScreen, setNamingScreen] = useState(false)
   const [screenNameDraft, setScreenNameDraft] = useState('')
+  const [justAdded, setJustAdded] = useState<number | null>(null)
 
   const condDef = condMap.get(condKey)
   const catConds = condCats.find((c) => c.key === catKey)?.conditions ?? []
+
+  // 조건마다 입력칸 개수가 달라 고를 때마다 아래가 위아래로 튀었다.
+  // 가장 많은 조건 기준으로 자리를 미리 잡아 요동을 없앤다.
+  const maxParams = useMemo(() => {
+    const counts = condCats.flatMap((c) => c.conditions.map((x) => x.params.length))
+    return counts.length ? Math.max(...counts) : 2
+  }, [condCats])
 
   function pickCondition(key: string) {
     const def = condMap.get(key)
@@ -276,10 +267,20 @@ export function StrategyPanel() {
       setScreenErr(r.error)
       return
     }
-    setConds((cs) => [...cs, { key: condDef.key, params: r.value }])
+    setConds((cs) => {
+      setJustAdded(cs.length) // 추가된 줄을 잠깐 강조 — 눌렀는지 아닌지 모르는 걸 막는다
+      return [...cs, { key: condDef.key, params: r.value }]
+    })
     setCondDraft({})
     setScreenErr('')
   }
+
+  // 강조는 잠깐만. 남겨두면 "선택된 줄"로 오해된다.
+  useEffect(() => {
+    if (justAdded == null) return
+    const t = window.setTimeout(() => setJustAdded(null), 1100)
+    return () => window.clearTimeout(t)
+  }, [justAdded])
 
   function loadScreen(name: string) {
     setScreenName(name)
@@ -431,57 +432,6 @@ export function StrategyPanel() {
     pickStrategy(pick)
   }
 
-  // ── ③ 감시 ──
-  const [watches, setWatches] = useState<WatchOrder[]>(loadWatches)
-  const [tab, setTab] = useState<WatchSide | 'log'>('buy')
-  const [watchMsg, setWatchMsg] = useState('')
-
-  function putWatches(next: WatchOrder[]) {
-    setWatches(saveWatches(next))
-  }
-
-  function addWatch(side: WatchSide) {
-    if (!sym) {
-      setWatchMsg('감시를 걸 종목을 먼저 고르세요.')
-      return
-    }
-    const target = Number(draft.manualPrice)
-    if (!Number.isFinite(target) || target <= 0) {
-      setWatchMsg('② 매매전략의 목표가를 먼저 입력하세요.')
-      return
-    }
-    const qty = Number(draft.qty)
-    if (!Number.isFinite(qty) || qty <= 0) {
-      setWatchMsg('② 매매전략의 주문수량을 먼저 입력하세요.')
-      return
-    }
-    const { from, to } = periodFrom(Number(draft.validDays) || 7)
-    putWatches([
-      {
-        id: newId(),
-        side,
-        code: sym.code,
-        name: sym.name,
-        target,
-        qty,
-        qtyType: draft.qtyType,
-        priceType: draft.priceType,
-        tick: Number(draft.tick) || 0,
-        credit: draft.credit,
-        from,
-        to,
-        state: 'run',
-        ...(name ? { strategy: name } : {}),
-      },
-      ...watches,
-    ])
-    setTab(side)
-    setStep('watch')
-    setWatchMsg(`[${sym.name}] ${side === 'buy' ? '매수' : '매도'} 감시 등록 — 주문은 나가지 않습니다.`)
-  }
-
-  const shownWatches = watches.filter((w) => tab !== 'log' && w.side === tab)
-
   return (
     <div className="panel-col">
       <div className="steps">
@@ -489,7 +439,6 @@ export function StrategyPanel() {
           [
             ['screen', '① 종목선정', `검색식 ${Object.keys(screens).length}`],
             ['strategy', '② 매매전략', `전략 ${Object.keys(saved).length}`],
-            ['watch', '③ 감시', `${watches.length}건`],
           ] as const
         ).map(([k, label, badge]) => (
           <button key={k} className={step === k ? 'on' : ''} onClick={() => setStep(k)}>
@@ -508,137 +457,154 @@ export function StrategyPanel() {
 
         {/* ─────────────── ① 종목선정 ─────────────── */}
         {step === 'screen' && (
-          <>
-            <Card
-              title="조건검색식"
-              sub="여러 개 만들어 두고 ②에서 골라 쓴다"
-              right={
-                <select value={screenName} onChange={(e) => loadScreen(e.target.value)} title="저장된 검색식">
-                  <option value="">검색식 선택…</option>
-                  {Object.keys(screens).map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              }
-            >
-              <div className="chips" style={{ marginBottom: 10 }}>
-                {QUICK_CONDITIONS.filter((q) => condMap.has(q.key)).map((q) => (
-                  <button
-                    key={q.key}
-                    className={`chip ${condKey === q.key ? 'on' : ''}`}
-                    title={q.hint ?? condMap.get(q.key)?.desc}
-                    onClick={() => pickCondition(q.key)}
-                  >
-                    {q.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="form-row">
-                <select
-                  style={{ flex: 1 }}
-                  value={catKey}
-                  onChange={(e) => {
-                    setCatKey(e.target.value)
-                    setCondKey('')
-                    setCondDraft({})
-                  }}
-                >
-                  <option value="">카테고리…</option>
-                  {condCats.map((c) => (
-                    <option key={c.key} value={c.key}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  style={{ flex: 1 }}
-                  value={condKey}
-                  onChange={(e) => {
-                    setCondKey(e.target.value)
-                    setCondDraft({})
-                    setScreenErr('')
-                  }}
-                >
-                  <option value="">조건…</option>
-                  {catConds.map((c) => (
-                    <option key={c.key} value={c.key}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {condDef && (
-                <>
-                  <p className="hint">
-                    {condDef.desc}
-                    {condKey === 'new_high' && ' · 52주 ≈ 250거래일 (최대 260)'}
-                  </p>
-                  <ParamInputs
-                    defs={condDef.params}
-                    values={condDraft}
-                    onChange={(k, v) => setCondDraft({ ...condDraft, [k]: v })}
-                    onEnter={addCond}
-                  />
-                  <div className="form-row" style={{ marginTop: 8 }}>
-                    <button className="primary" style={{ flex: 1 }} onClick={addCond}>
-                      조건 추가
+          <div className="split">
+            {/* ── 왼쪽: 조건을 만드는 작업대 ── */}
+            <div className="split-a">
+              <Card title="조건 만들기" sub="고르고 값을 채운 뒤 추가">
+                <div className="chips" style={{ marginBottom: 10 }}>
+                  {QUICK_CONDITIONS.filter((q) => condMap.has(q.key)).map((q) => (
+                    <button
+                      key={q.key}
+                      className={`chip ${condKey === q.key ? 'on' : ''}`}
+                      title={q.hint ?? condMap.get(q.key)?.desc}
+                      onClick={() => pickCondition(q.key)}
+                    >
+                      {q.label}
                     </button>
-                  </div>
-                </>
-              )}
-              {screenErr && <p className="hint warn">{screenErr}</p>}
+                  ))}
+                </div>
 
-              {conds.length > 0 ? (
-                <table className="grid">
-                  <tbody>
-                    {conds.map((c, i) => (
-                      <tr key={`${c.key}-${i}`}>
-                        <td className="flat" style={{ width: 22 }}>
-                          {rowLabel(i)}
-                        </td>
-                        <td>{summarizeCond(c, condMap.get(c.key))}</td>
-                        <td className="num" style={{ width: 40 }}>
-                          <button
-                            className="row-del"
-                            title="조건 삭제"
-                            onClick={() => setConds((cs) => cs.filter((_, idx) => idx !== i))}
-                          >
-                            ×
-                          </button>
-                        </td>
-                      </tr>
+                <div className="form-row">
+                  <select
+                    value={catKey}
+                    onChange={(e) => {
+                      setCatKey(e.target.value)
+                      setCondKey('')
+                      setCondDraft({})
+                    }}
+                  >
+                    <option value="">카테고리…</option>
+                    {condCats.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        {c.name}
+                      </option>
                     ))}
-                  </tbody>
-                </table>
-              ) : (
-                <p className="hint">조건이 없습니다 — 이대로 검색하면 <b>전체 종목</b>이 됩니다.</p>
-              )}
+                  </select>
+                  <select
+                    value={condKey}
+                    onChange={(e) => {
+                      setCondKey(e.target.value)
+                      setCondDraft({})
+                      setScreenErr('')
+                    }}
+                  >
+                    <option value="">조건…</option>
+                    {catConds.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-              <div className="form-row" style={{ marginTop: 10 }}>
-                <select value={logic} onChange={(e) => setLogic(e.target.value as 'and' | 'or')}>
-                  <option value="and">전체 AND</option>
-                  <option value="or">전체 OR</option>
-                </select>
-                <input
-                  type="date"
-                  style={{ flex: 'none', width: 140 }}
-                  value={date}
-                  onChange={(e) => setDate(e.target.value)}
-                  title="기준일 (빈칸 = 최신 거래일)"
-                />
-                <button className="primary" style={{ flex: 1 }} disabled={running} onClick={() => void run(conds, logic)}>
-                  {running ? '조회 중…' : '검색'}
-                </button>
-              </div>
-              {screenMsg && <p className="hint">{screenMsg}</p>}
-            </Card>
+                {/* 자리를 미리 잡아둔다 — 조건을 바꿔도 아래가 안 움직인다 */}
+                <div className="paramzone" style={{ '--rows': maxParams } as React.CSSProperties}>
+                  {condDef ? (
+                    <>
+                      <p className="hint">
+                        {condDef.desc}
+                        {condKey === 'new_high' && ' · 52주 ≈ 250거래일 (최대 260)'}
+                      </p>
+                      <ParamInputs
+                        defs={condDef.params}
+                        values={condDraft}
+                        onChange={(k, v) => setCondDraft({ ...condDraft, [k]: v })}
+                        onEnter={addCond}
+                      />
+                    </>
+                  ) : (
+                    <p className="hint">위에서 조건을 고르면 입력할 값이 나옵니다.</p>
+                  )}
+                </div>
 
-            {result && (
-              <Card title="검색 결과" flush sub={result.date}>
+                <div className="form-row" style={{ marginTop: 8 }}>
+                  <button className="primary" disabled={!condDef} onClick={addCond}>
+                    검색식에 추가
+                  </button>
+                </div>
+                {/* 항상 한 줄을 차지한다 — 에러가 뜰 때만 생기면 화면이 튄다 */}
+                <p className={`msgline ${screenErr ? 'warn' : ''}`}>{screenErr || ' '}</p>
+              </Card>
+            </div>
+
+            {/* ── 오른쪽: 만들어진 검색식과 그 결과 ── */}
+            <div className="split-b">
+              <Card
+                title="검색식"
+                sub={screenName || '이름 없음 · 저장 안 됨'}
+                right={
+                  <>
+                    <span className={`badge ${conds.length ? 'on' : ''}`}>조건 {conds.length}</span>
+                    <select value={screenName} onChange={(e) => loadScreen(e.target.value)} title="저장된 검색식">
+                      <option value="">불러오기…</option>
+                      {Object.keys(screens).map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                }
+              >
+                {conds.length > 0 ? (
+                  <ol className="condlist">
+                    {conds.map((c, i) => (
+                      <li key={`${c.key}-${i}`} className={justAdded === i ? 'flash' : undefined}>
+                        <span className="ix">{rowLabel(i)}</span>
+                        <span className="tx">{summarizeCond(c, condMap.get(c.key))}</span>
+                        <button
+                          className="del"
+                          title="조건 삭제"
+                          onClick={() => setConds((cs) => cs.filter((_, idx) => idx !== i))}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="empty-slot">
+                    아직 조건이 없습니다.
+                    <br />
+                    이대로 검색하면 <b>전체 종목</b>이 나옵니다.
+                  </p>
+                )}
+
+                <div className="form-row" style={{ marginTop: 10 }}>
+                  <select
+                    style={{ flex: 'none', width: 108 }}
+                    value={logic}
+                    onChange={(e) => setLogic(e.target.value as 'and' | 'or')}
+                  >
+                    <option value="and">전체 AND</option>
+                    <option value="or">전체 OR</option>
+                  </select>
+                  <input
+                    type="date"
+                    style={{ flex: 'none', width: 148 }}
+                    value={date}
+                    onChange={(e) => setDate(e.target.value)}
+                    title="기준일 (빈칸 = 최신 거래일)"
+                  />
+                  <button className="primary" disabled={running} onClick={() => void run(conds, logic)}>
+                    {running ? '조회 중…' : '검색'}
+                  </button>
+                </div>
+                <p className="msgline">{screenMsg || ' '}</p>
+              </Card>
+
+              {result && (
+                <Card title="검색 결과" flush sub={result.date}>
                 <div className="sumcard">
                   <b>{screenName || '이름 없는 검색식'}</b>
                   <div className="pills">
@@ -689,10 +655,11 @@ export function StrategyPanel() {
                     </tbody>
                   </table>
                 )}
-              </Card>
-            )}
-            {runMsg && <p className="hint warn">{runMsg}</p>}
-          </>
+                </Card>
+              )}
+              {runMsg && <p className="hint warn">{runMsg}</p>}
+            </div>
+          </div>
         )}
 
         {/* ─────────────── ② 매매전략 ─────────────── */}
@@ -801,59 +768,6 @@ export function StrategyPanel() {
               {entryErr && <p className="hint warn">{entryErr}</p>}
             </Card>
 
-            <Card title="시세포착" sub="목표가 감시조건">
-              <div className="kv">
-                <span className="k">목표가</span>
-                <span className="v">
-                  <input
-                    className="amt"
-                    placeholder="192100"
-                    value={draft.manualPrice}
-                    onChange={(e) => set('manualPrice', e.target.value)}
-                  />
-                  <span className="unit">원</span>
-                </span>
-              </div>
-              <div className="kv">
-                <span className="k">목표가 기준</span>
-                <span className="v">
-                  <select
-                    style={{ flex: 1 }}
-                    value={draft.target}
-                    onChange={(e) => set('target', e.target.value as TargetKind)}
-                  >
-                    {(Object.keys(TARGET_LABEL) as TargetKind[]).map((t) => (
-                      <option key={t} value={t}>
-                        {TARGET_LABEL[t]}
-                      </option>
-                    ))}
-                  </select>
-                </span>
-              </div>
-              <div className="kv">
-                <span className="k">근접 허용</span>
-                <span className="v">
-                  <input
-                    className="amt"
-                    placeholder={PLACEHOLDER.near}
-                    value={draft.near}
-                    onChange={(e) => set('near', e.target.value)}
-                  />
-                  <span className="unit">%</span>
-                </span>
-              </div>
-              <p className="hint">※ 목표가가 현재가보다 높으면 추격매수로 실행됩니다. 판단·계산은 전부 서버가 합니다.</p>
-              <div className="form-row" style={{ marginTop: 8 }}>
-                <button style={{ flex: 1 }} onClick={() => addWatch('buy')}>
-                  이 종목 매수감시 등록
-                </button>
-                <button style={{ flex: 1 }} onClick={() => addWatch('sell')}>
-                  매도감시
-                </button>
-              </div>
-              {watchMsg && <p className="hint">{watchMsg}</p>}
-            </Card>
-
             <Card title="매수 주문조건">
               <div className="kv">
                 <span className="k">주문 구분</span>
@@ -892,13 +806,6 @@ export function StrategyPanel() {
                 </span>
               </div>
               <div className="kv">
-                <span className="k">도달가격의</span>
-                <span className="v">
-                  <input className="amt" value={draft.tick} onChange={(e) => set('tick', e.target.value)} />
-                  <span className="unit">틱</span>
-                </span>
-              </div>
-              <div className="kv">
                 <span className="k">주문수량</span>
                 <span className="v">
                   <select
@@ -913,133 +820,13 @@ export function StrategyPanel() {
                   <span className="unit">{draft.qtyType === 'shares' ? '주' : '원'}</span>
                 </span>
               </div>
-              <div className="kv">
-                <span className="k">설정기간</span>
-                <span className="v">
-                  <span className="badge">{fmtPeriod(periodFrom(Number(draft.validDays) || 0))}</span>
-                </span>
-              </div>
-              <div className="chips" style={{ marginTop: 4 }}>
-                {DAY_PRESETS.map((d) => (
-                  <button
-                    key={d}
-                    className={`chip ${draft.validDays === String(d) ? 'on' : ''}`}
-                    onClick={() => set('validDays', String(d))}
-                  >
-                    {d}일
-                  </button>
-                ))}
-                <input
-                  className="amt"
-                  style={{ width: 72 }}
-                  placeholder="직접"
-                  value={draft.validDays}
-                  onChange={(e) => set('validDays', e.target.value)}
-                />
-              </div>
-              <p className="hint">최대 30일. 주문은 나가지 않습니다 — 전략 정의 저장용.</p>
+              <p className="hint">주문은 나가지 않습니다 — 전략 정의 저장용.</p>
             </Card>
 
             {msg && <p className="hint">{msg}</p>}
           </>
         )}
 
-        {/* ─────────────── ③ 감시 ─────────────── */}
-        {step === 'watch' && (
-          <section className="card">
-            <div className="hd">
-              시세포착 감시
-              <span className="sub">목표가 도달 시 실행할 감시</span>
-              <span className="right">
-                <span className="badge on">{shownWatches.length}건</span>
-              </span>
-            </div>
-            <div className="tabs">
-              <button className={tab === 'buy' ? 'on' : ''} onClick={() => setTab('buy')}>
-                매수감시
-              </button>
-              <button className={tab === 'sell' ? 'on' : ''} onClick={() => setTab('sell')}>
-                매도감시
-              </button>
-              <button className={tab === 'log' ? 'on' : ''} onClick={() => setTab('log')}>
-                주문내역
-              </button>
-            </div>
-            <div className="bd flush">
-              {tab === 'log' ? (
-                <p className="hint" style={{ padding: '14px 16px' }}>
-                  주문내역은 KIS 모의투자 연동(단계 5) 후 표시됩니다. 지금은 감시 정의만 저장합니다.
-                </p>
-              ) : shownWatches.length === 0 ? (
-                <p className="hint" style={{ padding: '14px 16px' }}>
-                  등록된 감시가 없습니다. ② 매매전략에서 목표가·수량을 채운 뒤 등록하세요.
-                </p>
-              ) : (
-                shownWatches.map((w) => (
-                  <div
-                    key={w.id}
-                    className={`listrow ${w.side}`}
-                    onClick={() => pickSymbol({ code: w.code, name: w.name, market: '' })}
-                  >
-                    <div className="r1">
-                      <span className="nm">{w.name}</span>
-                      <span className="badge">{w.code}</span>
-                      {w.strategy && <span className="badge on">{w.strategy}</span>}
-                      <span className="grow" />
-                      <button
-                        className="ghost"
-                        title="감시 삭제"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          putWatches(watches.filter((x) => x.id !== w.id))
-                        }}
-                      >
-                        ×
-                      </button>
-                    </div>
-                    <div className="r2">
-                      <span>{w.credit === 'cash' ? '현금' : '신용'}</span>
-                      <b style={{ color: 'var(--hts-text)' }}>
-                        {w.qty.toLocaleString()}
-                        {w.qtyType === 'shares' ? '주' : '원'}
-                      </b>
-                      <span className="grow" />
-                      <span>{fmtPeriod(w)}</span>
-                    </div>
-                    <div className="r3">
-                      <span className="badge">가격기준</span>
-                      <span>목표가</span>
-                      <b style={{ color: 'var(--hts-text)' }}>{fmtPrice(w.target)}원</b>
-                      <span className="grow" />
-                      <span>{w.priceType === 'market' ? '시장가' : '지정가'}</span>
-                      <span>{w.tick}틱</span>
-                    </div>
-                    <div className="r3">
-                      <button
-                        className={`ghost state ${w.state === 'run' ? 'run' : 'hold'}`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          putWatches(
-                            watches.map((x) =>
-                              x.id === w.id ? { ...x, state: x.state === 'run' ? 'hold' : 'run' } : x,
-                            ),
-                          )
-                        }}
-                      >
-                        {w.state === 'run' ? '▶ 감시' : '❚❚ 중지'}
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-              {watchMsg && (
-                <p className="hint" style={{ padding: '4px 16px 0' }}>
-                  {watchMsg}
-                </p>
-              )}
-            </div>
-          </section>
-        )}
       </div>
 
       {/* 단계별 하단 액션 */}

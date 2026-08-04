@@ -280,7 +280,16 @@ body {
 .hts input.amt { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 
 /* ── 패널 골격 ────────────────────────────────────────────────── */
-.panel-col { position: relative; display: flex; flex-direction: column; height: 100%; background: var(--hts-panel); }
+/* 컨테이너 쿼리 기준점. .panel-body 에도 걸려 있지만 단계 탭·하단 액션바는 그 밖에 있어
+   여기에도 걸어야 폭 분기가 닿는다 (dockview 패널 폭은 뷰포트 폭과 무관하다). */
+.panel-col {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--hts-panel);
+  container-type: inline-size;
+}
 .panel-col .panel-body { flex: 1; min-height: 0; height: auto; }
 
 .panel-body {
@@ -314,7 +323,9 @@ body {
 }
 
 .form-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
-.form-row input { flex: 1; min-width: 0; }
+/* select 는 가장 긴 option 만큼의 최소 폭을 갖는다. min-width:0 이 없으면 flex 아이템이
+   그 아래로 안 줄어들어 좁은 패널에서 행이 삐져나가고 가로 스크롤바가 생긴다. */
+.form-row input, .form-row select { flex: 1; min-width: 0; }
 
 .hint { color: var(--hts-text-2); font-size: 12px; margin: 6px 0; }
 .hint.warn { color: #d97706; }
@@ -333,6 +344,101 @@ body {
   font-variant-numeric: tabular-nums;
 }
 .badge.on { background: var(--hts-accent-soft); color: var(--hts-accent-down); }
+
+/* ── 조건 만들기 / 검색식 (ADR-0008 개정 4) ──────────────────────
+   입력 영역과 만들어진 결과물을 시각적으로 가른다. 한 카드에 붙여두면
+   "조건을 추가한 건지 만 건지" 알 수 없다 — 오너 지적. */
+.split { display: grid; gap: 8px; align-items: start; }
+
+/* 조건마다 입력칸 수가 달라 고를 때마다 아래가 튀었다.
+   가장 많은 조건(--rows) 기준으로 높이를 미리 잡아 요동을 없앤다. */
+.paramzone {
+  min-height: calc(var(--rows, 3) * 38px + 24px);
+  border-top: 1px solid var(--hts-line);
+  padding-top: 4px;
+}
+/* 조건을 안 골랐을 때 — 빈 자리 위쪽에 한 줄만 떠 있으면 잘린 화면처럼 보인다 */
+.paramzone:has(> .hint:only-child) {
+  display: grid;
+  place-items: center;
+  text-align: center;
+}
+/* 설명문이 한 줄이냐 두 줄이냐로도 아래가 8px 씩 움직인다 — 두 줄로 고정한다 */
+.paramzone > .hint {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  min-height: 34px;
+  margin: 6px 0 2px;
+}
+
+/* 조건이 뜰 자리·메시지가 뜰 자리를 항상 비워둔다 (나타났다 사라지면 화면이 튄다) */
+.msgline {
+  min-height: 17px;
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--hts-text-2);
+  white-space: pre-wrap;
+}
+.msgline.warn { color: var(--hts-down); }
+
+/* 등록된 조건 목록 — 검색 결과 표(.grid)와 다른 표현을 준다.
+   같은 .grid 를 쓰면 "내가 만든 조건"과 "검색으로 나온 종목"이 동급으로 보인다. */
+.condlist { list-style: none; margin: 0; padding: 0; }
+.condlist li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 6px 9px 10px;
+  border-radius: var(--r-ctl);
+  background: var(--hts-elev);
+  font-size: 12.5px;
+}
+.condlist li + li { margin-top: 5px; }
+.condlist li.flash { animation: cond-in 1.1s ease-out; }
+@keyframes cond-in {
+  0% { background: var(--hts-accent-soft); transform: translateX(-4px); }
+  100% { background: var(--hts-elev); transform: none; }
+}
+.condlist .ix {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--hts-accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.condlist .tx { flex: 1; min-width: 0; color: var(--hts-text); }
+.hts .condlist .del {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--hts-text-3);
+  opacity: 0;
+}
+.condlist li:hover .del { opacity: 1; }
+.hts .condlist .del:hover { background: var(--hts-line); color: var(--hts-down); }
+
+.empty-slot {
+  margin: 0;
+  padding: 22px 12px;
+  border: 1px dashed var(--hts-border);
+  border-radius: var(--r-ctl);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--hts-text-3);
+}
 
 /* ── 카드 ─────────────────────────────────────────────────────── */
 .card {
@@ -377,7 +483,7 @@ body {
   white-space: nowrap;
 }
 .kv > .v { flex: 1; display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-width: 0; }
-.kv > .v input { flex: 1; min-width: 0; }
+.kv > .v input, .kv > .v select { flex: 1; min-width: 0; }
 .kv > .v .unit { flex: none; color: var(--hts-text-3); font-size: 12px; }
 
 /* 라디오 줄 */
@@ -448,58 +554,6 @@ body {
   color: var(--hts-text-2);
 }
 .sumcard .pills b { font-variant-numeric: tabular-nums; color: var(--hts-text); }
-
-/* 세그먼트 탭 (매수감시/매도감시…) */
-.tabs { display: flex; gap: 4px; padding: 0 16px; border-bottom: 1px solid var(--hts-border); }
-.hts .tabs button {
-  height: 40px;
-  padding: 0 12px;
-  background: none;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  color: var(--hts-text-3);
-  font-weight: 600;
-}
-.hts .tabs button:hover { color: var(--hts-text-2); background: none; }
-.hts .tabs button.on { color: var(--hts-text); border-bottom-color: var(--hts-accent); }
-
-/* 감시 목록 행 — 좌측 컬러바 + 2행 정보 */
-.listrow {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 13px 16px 13px 20px;
-  border-bottom: 1px solid var(--hts-line);
-  cursor: pointer;
-}
-.listrow:hover { background: var(--hts-hover); }
-.listrow.sel { background: var(--hts-accent-soft); }
-.listrow::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
-  background: var(--hts-text-3);
-}
-.listrow.buy::before { background: var(--hts-up); }
-.listrow.sell::before { background: var(--hts-down); }
-.listrow .r1 { display: flex; align-items: baseline; gap: 8px; }
-.listrow .r1 .nm { font-size: 14px; font-weight: 700; }
-.listrow .r2, .listrow .r3 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--hts-text-2);
-}
-.listrow .grow { margin-left: auto; }
-.listrow .state { display: flex; align-items: center; gap: 4px; font-weight: 600; }
-.listrow .state.run { color: var(--hts-up); }
-.listrow .state.hold { color: var(--hts-down); }
 
 /* 우하단 플로팅 추가 버튼 */
 .fabwrap { position: relative; }
@@ -794,12 +848,14 @@ body {
   --dv-context-menu-color: var(--hts-text);
 }
 
-/* 그룹을 카드처럼 — 둥근 모서리 + 그림자, 분할 경계는 여백으로 */
+/* 그룹을 카드처럼 — 둥근 모서리 + 그림자, 분할 경계는 여백으로.
+   테두리는 border 가 아니라 inset 그림자로 그린다. dockview 가 .dv-view 크기를
+   픽셀로 잡아주는데 border 를 더하면 정확히 2px 넘쳐서 스크롤바 두 개가 생긴다. */
 .dockview-theme-light .dv-groupview {
+  box-sizing: border-box;
   border-radius: var(--r-card);
   overflow: hidden;
-  box-shadow: var(--sh-1);
-  border: 1px solid var(--hts-border);
+  box-shadow: var(--sh-1), inset 0 0 0 1px var(--hts-border);
 }
 .dockview-theme-light .dv-view:not(:last-child) > .dv-groupview,
 .dockview-theme-light .dv-branch-node .dv-view { margin: 0; }
@@ -974,3 +1030,26 @@ body {
 .panel-body { container-type: inline-size; }
 .hts .wl-row .del { flex: none; width: 22px; height: 22px; padding: 0; font-size: 10px; opacity: 0; }
 .wl-row:hover .del { opacity: 1; }
+
+/* ── 넓은 패널 대응 ───────────────────────────────────────────────
+   dockview 패널 폭은 뷰포트 폭과 무관하다 — 같은 화면에 좁은 패널과 넓은 패널이
+   공존한다. 그래서 미디어 쿼리가 아니라 컨테이너 쿼리로 나눈다.
+   (.panel-body 에 container-type: inline-size 가 걸려 있다) */
+@container (min-width: 860px) {
+  .split { grid-template-columns: minmax(320px, 400px) minmax(0, 1fr); }
+
+  /* 폼이 패널 끝까지 늘어나면 라벨과 입력칸이 멀어져 눈이 좌우로 왕복한다.
+     넓을수록 넓히는 게 아니라, 읽기 좋은 폭에서 멈춘다. */
+  .kv > .v { max-width: 300px; }
+  .card > .bd > .form-row > button { flex: 0 1 200px; }
+
+  /* 44px 은 손가락 치수다. 마우스에는 과하다. */
+  .actionbar { justify-content: flex-end; }
+  .actionbar button { flex: 0 1 190px; height: 36px; font-size: 13px; }
+  .actionbar input, .actionbar select { flex: 0 1 220px; }
+
+  /* .hts 를 붙여야 앞의 `.hts .steps button { flex: 1 }` 을 이긴다.
+     컨테이너 쿼리는 특이도를 올려주지 않는다 — 파일 끝에 있어도 진다. */
+  .steps { justify-content: flex-start; }
+  .hts .steps button { flex: 0 1 240px; }
+}
