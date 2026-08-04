@@ -33,6 +33,11 @@ oracle = [
 opendart = [
     "opendartreader",
 ]
+# KIS(한국투자증권) 오픈API 어댑터 (src/layer4_execution/brokers/kis).
+# 조회 전용. 주문 전송은 모의투자 확보 후 별도로 붙인다(CLAUDE.md 단계 6).
+kis = [
+    "requests>=2.31",
+]
 # 케이스 검사기 웹 도구 백엔드 (ADR-0005). 데이터를 프런트로 내주기만 한다 — 매매 판단 ❌.
 webapp = [
     "fastapi>=0.115",

@@ -24,3 +24,4 @@
 | [0007](0007-backtest-skeleton.md) | 백테스트 엔진 골격 (얇은 자체 엔진) | 수락 (골격만 / 체결 시점 미확정) |
 | [0008](0008-hts-multiview-ui.md) | HTS형 멀티뷰 UI (dockview + ECharts) | 수락 |
 | [0009](0009-strategy-as-data.md) | 전략·조건은 데이터로 정의 (숨은 하드코딩 금지) | 수락 |
+| [0010](0010-kis-broker-adapter.md) | KIS 브로커 어댑터 (조회 전용) | 수락 (조회만 / 주문 미착수) |
