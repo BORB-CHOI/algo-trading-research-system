@@ -9,6 +9,9 @@ config/credentials.json
 kis_token.json
 kis_credentials.*
 
+# NH QV OpenAPI SDK — NH투자증권 소유 바이너리. 재배포 라이선스 불명 → 커밋 ❌
+openapi.qv/
+
 # 데이터 파일 (대용량, 외부 재현 가능)
 # marcap clone, 적재 데이터 전부 (ADR-0002)
 data/

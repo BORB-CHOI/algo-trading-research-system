@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "kis-code-assistant": {
+      "command": "npx",
+      "args": ["-y", "@koreainvestment/kis-code-assistant-mcp"]
+    },
+    "linear": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp"
+    }
+  }
+}

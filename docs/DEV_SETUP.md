@@ -49,9 +49,14 @@ make hooks     # pre-commit install
 가격/시총 데이터는 커밋하지 않는다 (`.gitignore`의 `*.parquet`, `data/`). 로컬에 clone:
 
 ```bash
-# 리포 밖 또는 data/ 아래(무시됨)에 clone. 약 3.4GB.
-git clone https://github.com/FinanceData/marcap.git data/marcap
+# data/ 아래(무시됨)에 clone. --depth 1 로 최신 스냅샷만 받는다.
+# 전체 이력까지 받으면 3.4GB 지만 우리는 최신 parquet 만 쓴다.
+git clone --depth 1 https://github.com/FinanceData/marcap.git data/marcap
 ```
+
+갱신은 같은 디렉터리에서 `git pull --depth 1`. 로더가 보는 경로는
+`data/marcap/data/marcap-{연도}.parquet` (1995~현재).
+marcap 저장소 갱신은 며칠~몇 주 늦으므로 그 공백은 `scripts/update_recent.py` 가 채운다 (BORB-44).
 
 수급(외인/기관/개인)은 아직 미정 (ADR-0002). KIS API 도입 시 별도 안내.
 
@@ -64,10 +69,9 @@ git clone https://github.com/FinanceData/marcap.git data/marcap
 ## MCP (선택, 개발 보조용)
 
 - **실행 경로엔 넣지 않는다** (CLAUDE.md). API 검색·이슈 관리 등 개발 보조로만.
-- **Linear** (이슈 관리): 대화형 세션에서 `/mcp` → linear 인증. 엔드포인트는
-  `https://mcp.linear.app/mcp` (HTTP). `/sse`는 폐기됨(404).
-- **KIS Code Assistant** (API 검색 보조): `uv` + Python 3.12 필요.
-  ```bash
-  claude mcp add kis-code-assistant -- npx -y @koreainvestment/kis-code-assistant-mcp
-  ```
+- 서버 등록은 `.mcp.json`(리포에 있음)이 이미 하고 있다 — Linear·KIS Code Assistant 둘 다.
+  새 머신에서는 Claude Code 첫 실행 때 이 프로젝트 MCP 를 신뢰할지 묻는다.
+- **Linear** (이슈 관리): 등록은 끝났고 **인증만 남는다** — 대화형 세션에서 `/mcp` → linear → 브라우저 로그인.
+  엔드포인트 `https://mcp.linear.app/mcp` (HTTP). `/sse`는 폐기됨(404).
+- **KIS Code Assistant** (API 검색 보조): `uv` + Python 3.12 필요. 인증 없음.
 - MCP 인증(OAuth)은 브라우저 상호작용이 필요해 **대화형 세션에서 사용자가 직접** 해야 한다.
