@@ -44,6 +44,27 @@ make hooks     # pre-commit install
 | `make test-all` | 전체 (네트워크/데이터 필요) |
 | `make check` | lint + typecheck + test (커밋 전) |
 
+## 머신을 옮겼을 때 (노트북 ↔ 데스크톱)
+
+git 에 없는 것들이 있다. 코드만 `pull` 하고 끝내면 API 가 503 으로 뜬다.
+
+```bash
+git pull
+make setup     # .venv + 파이썬/프런트 의존성
+make data      # marcap 클론 + 수정주가 빌드 + 지연분 보충 (수 분)
+```
+
+| 항목 | git 에 있나 | 어떻게 |
+|---|---|---|
+| 코드·문서·ADR | ✅ | `git pull` |
+| `.venv`, `web/node_modules` | ❌ | `make setup` |
+| `data/marcap`, `data/derived/**` | ❌ (대용량) | `make data` |
+| `.env` (KIS·DART 키) | ❌ (비밀) | 손으로 옮긴다. 예시는 `.env.example` |
+| MCP 인증 토큰 (Linear 등) | ❌ (머신별) | 대화형 세션에서 `/mcp` → 재인증 |
+| playwright (UI 캡처용) | ❌ (전역 도구) | 필요할 때 `uv pip install playwright && python -m playwright install chromium` |
+
+이미 받아둔 marcap 을 최신으로만 올리려면 `make data-refresh`.
+
 ## 데이터 준비 (marcap)
 
 가격/시총 데이터는 커밋하지 않는다 (`.gitignore`의 `*.parquet`, `data/`). 로컬에 clone:

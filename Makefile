@@ -1,4 +1,4 @@
-.PHONY: help venv install install-uv setup api web lint fmt typecheck test test-all check hooks clean
+.PHONY: help venv install install-uv setup data data-refresh api web lint fmt typecheck test test-all check hooks clean
 
 # venv 를 활성화하지 않고도 돌게 한다. 다른 경로면 `make api VENV=~/myenv`.
 VENV ?= .venv
@@ -22,6 +22,24 @@ install-uv:  ## 개발 의존성 설치 (uv, 권장)
 	uv pip install -e ".[dev,webapp,kis,oracle]"
 
 setup: venv install-uv web/node_modules  ## 새 머신에서 한 방에 — venv + 파이썬/프런트 의존성
+
+# ── 데이터 ─────────────────────────────────────────────────────────
+# 데이터는 git 에 없다(.gitignore: data/). 머신을 옮기면 여기서 다시 만든다.
+# 코드만 pull 하고 이걸 안 돌리면 API 가 503 "marcap 데이터가 없습니다" 로 뜬다.
+
+data/marcap:  ## marcap 얕은 클론 (약 0.93GB — 전체 이력은 3.4GB 라 --depth 1)
+	git clone --depth 1 https://github.com/FinanceData/marcap.git data/marcap
+
+data/derived/adjusted: data/marcap  ## 수정주가 일봉 사전 계산 (전 종목, 수 분 소요)
+	$(BIN)python scripts/build_adjusted.py
+
+data: data/derived/adjusted  ## 새 머신 데이터 준비 — marcap 클론 + 수정주가 빌드
+	$(BIN)python scripts/update_recent.py
+
+data-refresh:  ## marcap 갱신분 반영 (git pull → 수정주가 재빌드 → 지연분 보충)
+	cd data/marcap && git pull --depth 1
+	$(BIN)python scripts/build_adjusted.py
+	$(BIN)python scripts/update_recent.py
 
 api:  ## 백엔드 dev 서버 (FastAPI, :8000)
 	$(BIN)uvicorn api.main:app --reload --port 8000
