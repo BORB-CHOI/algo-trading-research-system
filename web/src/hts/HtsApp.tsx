@@ -54,7 +54,8 @@ const MENU = ['home', 'chart', 'strategy', 'watchlist', 'map', 'financials', 'ne
 const TICKER_KEYS = ['^KS11', '^KQ11', '^IXIC', '^GSPC', 'NQ=F', 'KRW=X', '^VIX']
 const TICKER_MS = 60_000
 
-const LAYOUT_KEY = 'hts-layout'
+// 기본 레이아웃을 바꿀 때 키를 올린다 — 안 올리면 브라우저에 저장된 옛 배치가 계속 이긴다.
+const LAYOUT_KEY = 'hts-layout-v2'
 
 let seq = 0
 
@@ -219,49 +220,9 @@ export function HtsApp() {
     if (api && group) void api.addPopoutGroup(group)
   }
 
+  /** 첫 실행은 홈 하나만. 차트·전략·관심종목은 메뉴에서 필요할 때 연다. */
   function defaultLayout(api: DockviewApi) {
     const home = api.addPanel({ id: 'home-0', component: 'home', title: TITLES.home })
-    api.addPanel({
-      id: 'chart-0',
-      component: 'chart',
-      title: TITLES.chart,
-      position: { referenceGroup: home.group },
-    })
-    const watchlist = api.addPanel({
-      id: 'watchlist-0',
-      component: 'watchlist',
-      title: TITLES.watchlist,
-      position: { referencePanel: home, direction: 'left' },
-      initialWidth: 330,
-    })
-    const strategy = api.addPanel({
-      id: 'strategy-0',
-      component: 'strategy',
-      title: TITLES.strategy,
-      position: { referencePanel: home, direction: 'right' },
-      initialWidth: 400,
-    })
-    api.addPanel({
-      id: 'news-0',
-      component: 'news',
-      title: TITLES.news,
-      position: { referenceGroup: strategy.group },
-    })
-    api.addPanel({
-      id: 'financials-0',
-      component: 'financials',
-      title: TITLES.financials,
-      position: { referenceGroup: strategy.group },
-    })
-    api.addPanel({
-      id: 'map-0',
-      component: 'map',
-      title: TITLES.map,
-      position: { referencePanel: home, direction: 'below' },
-      initialHeight: 220,
-    })
-    watchlist.api.setActive()
-    strategy.api.setActive()
     home.api.setActive()
   }
 
