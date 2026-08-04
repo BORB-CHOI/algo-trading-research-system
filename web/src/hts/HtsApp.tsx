@@ -256,7 +256,7 @@ export function HtsApp() {
     <div className="hts">
       <header className="topbar">
         <span className="brand">
-          케이스 검사기 <em>HTS</em>
+          ATS <em>Auto Trading System</em>
         </span>
         <OmniSearch
           onOpenModal={(q) => {

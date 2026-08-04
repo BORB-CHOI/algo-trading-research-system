@@ -239,13 +239,30 @@ export async function postSignals(req: SignalsRequest): Promise<SignalsResponse>
 export type OverlayLine = {
   price: number
   label: string // "38.2%" / "50,000 라운드" / "베이스" 등 우측 라벨
-  kind: 'fib' | 'round' | 'anchor'
+  // buy/sell 은 시뮬레이션(POST /api/simulate)이 내는 분할 매수·매도 목표가다.
+  // 시각 전용이라는 점은 같지만 선 굵기·색을 달리해 "판단 대상"임을 구분한다.
+  kind: 'fib' | 'round' | 'anchor' | 'buy' | 'sell'
 }
 
 export type OverlayTouch = {
   time: string // 'YYYY-MM-DD'
   price: number
   label: string // "38.2% 근접" 등
+}
+
+// 체결 마커 — 지정가 분할매수/매도가 실제로 닿았을 날. 시뮬레이션 결과다.
+export type OverlayFill = {
+  time: string // 'YYYY-MM-DD'
+  price: number
+  side: 'buy' | 'sell'
+  stage: number // 1차·2차·3차
+}
+
+// 앵커 VWAP 같은 시계열 곡선. 수평선(OverlayLine)과 달리 봉마다 값이 다르다.
+export type OverlaySeries = {
+  label: string // "앵커 VWAP"
+  color?: string
+  points: { time: string; value: number }[]
 }
 
 export type OverlayAnchors = {

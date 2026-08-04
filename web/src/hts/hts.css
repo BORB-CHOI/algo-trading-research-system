@@ -429,6 +429,41 @@ body {
 .condlist li:hover .del { opacity: 1; }
 .hts .condlist .del:hover { background: var(--hts-line); color: var(--hts-down); }
 
+/* ── 분할 매수·매도 차수 (BORB-50) ─────────────────────────────
+   차수를 켜고 끄며 실험하는 게 전제라, 꺼진 차수도 자리를 지키되 흐리게 둔다.
+   지우면 다시 만들어야 하지만 끄면 값이 남는다 — 그 차이가 보여야 한다. */
+.sstages { display: flex; flex-direction: column; gap: 5px; }
+.sstage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 6px 7px 9px;
+  border-radius: var(--r-ctl);
+  background: var(--hts-elev);
+}
+.sstage.off { opacity: 0.45; }
+.sstage .chk { display: flex; align-items: center; gap: 5px; flex: none; cursor: pointer; }
+.sstage .chk b { font-size: 12px; font-weight: 700; white-space: nowrap; }
+.sstage .cell { display: flex; align-items: center; gap: 4px; flex: none; }
+.sstage .cell .k { font-size: 11px; color: var(--hts-text-3); white-space: nowrap; }
+.sstage .cell input.amt { width: 54px; }
+.sstage .px { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
+.sstage .px input.amt { width: 86px; }
+.sstage .unit { font-size: 11px; color: var(--hts-text-3); }
+.hts .sstage .del {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--hts-text-3);
+  opacity: 0;
+}
+.sstage:hover .del { opacity: 1; }
+.hts .sstage .del:hover { background: var(--hts-line); color: var(--hts-down); }
+.sstage-add { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
+
 .empty-slot {
   margin: 0;
   padding: 22px 12px;

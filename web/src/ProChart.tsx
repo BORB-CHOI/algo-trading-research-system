@@ -11,10 +11,23 @@ import { registerKoreanLocale } from './locales'
 import {
   postOverlay,
   postSignals,
+  type OverlayFill,
   type OverlayLine,
+  type OverlaySeries,
   type OverlayTouch,
   type Signal,
 } from './api'
+
+/** registerIndicator 의 draw 콜백이 받는 인자. klinecharts 가 타입을 내보내지 않아
+ *  우리가 쓰는 필드만 추려 선언한다 — 그리기 헬퍼로 쪼개려면 이름이 필요하다. */
+type DrawCtx = {
+  ctx: CanvasRenderingContext2D
+  kLineDataList: KLineData[]
+  visibleRange: { from: number; to: number }
+  bounding: { width: number; height: number }
+  xAxis: { convertToPixel: (v: number) => number }
+  yAxis: { convertToPixel: (v: number) => number }
+}
 
 // 한국식: 상승 = 빨강, 하락 = 파랑. 형광 말고 차분한 톤.
 const RED = '#e01e1e'
@@ -99,88 +112,183 @@ const OVERLAY_COLORS: Record<OverlayLine['kind'], string> = {
   fib: '#d97706', // 피보나치 레벨 — 실선
   round: '#6b7280', // 라운드 피겨(호가 눈금) — 점선
   anchor: '#2f6fed', // 베이스/신고가 기준선 — 점선
+  buy: '#dd3c44', // 분할 매수 목표가 — 한국식 상승색(빨강)과 맞춘다
+  sell: '#0062df', // 분할 매도 목표가 — 하락색(파랑)
 }
+// 매수·매도 목표가는 "여기서 실제로 산다"는 선이라 더 굵게 그려 참고선과 구분한다.
+const THICK_KINDS = new Set<OverlayLine['kind']>(['buy', 'sell'])
 const TOUCH_COLOR = '#d97706' // 레벨 근접(◆) 마커
+const VWAP_COLOR = '#7c3aed' // 앵커 VWAP — 피보나치/매매선과 겹치지 않는 보라
 
 type OverlayStore = {
   indicatorName: string
   set: (lines: OverlayLine[], touches: OverlayTouch[]) => void
+  /** 시뮬레이션 결과 — 체결 마커와 곡선(앵커 VWAP). 없으면 빈 배열로 지운다. */
+  setSim: (fills: OverlayFill[], series: OverlaySeries[]) => void
   clear: () => void
 }
 
-let overlaySeq = 0
+/** 'YYYY-MM-DD' → 그날 0시 타임스탬프. 봉 timestamp 와 맞추는 유일한 창구다. */
+function dayTs(day: string): number {
+  return new Date(`${day}T00:00:00`).getTime()
+}
+
+type SeriesDraw = { label: string; color: string; byTime: Map<number, number> }
+
+/** 곡선(앵커 VWAP). 앵커 이전 구간은 값이 없어 선을 끊는다 — 이어 그리면 없는 지지선이 보인다. */
+function drawSeries(c: DrawCtx, list: SeriesDraw[]): void {
+  const { ctx, kLineDataList, visibleRange, xAxis, yAxis } = c
+  for (const s of list) {
+    ctx.strokeStyle = s.color
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([])
+    ctx.beginPath()
+    let started = false
+    for (let i = visibleRange.from; i < visibleRange.to; i++) {
+      const bar = kLineDataList[i]
+      const v = bar ? s.byTime.get(bar.timestamp) : undefined
+      if (v == null) {
+        started = false
+        continue
+      }
+      const x = xAxis.convertToPixel(i)
+      const y = yAxis.convertToPixel(v)
+      if (started) ctx.lineTo(x, y)
+      else {
+        ctx.moveTo(x, y)
+        started = true
+      }
+    }
+    ctx.stroke()
+  }
+  ctx.lineWidth = 1
+}
+
+/** 수평선 + 우측 라벨. y축 범위 밖 레벨은 건너뛴다. */
+function drawLines(c: DrawCtx, list: OverlayLine[]): void {
+  const { ctx, bounding, yAxis } = c
+  for (const ln of list) {
+    const y = Math.round(yAxis.convertToPixel(ln.price)) + 0.5 // +0.5 = 1px 라인 선명하게
+    if (y < 0 || y > bounding.height) continue
+    const color = OVERLAY_COLORS[ln.kind]
+    const thick = THICK_KINDS.has(ln.kind)
+    ctx.strokeStyle = color
+    ctx.lineWidth = thick ? 2 : 1
+    ctx.setLineDash(ln.kind === 'fib' || thick ? [] : [4, 3])
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(bounding.width, y)
+    ctx.stroke()
+    // 우측 라벨 — 캔들과 겹쳐도 읽히게 반투명 흰 바탕(라이트 테마) 위에 그린다.
+    ctx.setLineDash([])
+    ctx.lineWidth = 1
+    const pad = 3
+    const w = ctx.measureText(ln.label).width
+    const x = bounding.width - w - pad * 2 - 2
+    ctx.fillStyle = 'rgba(255,255,255,0.85)'
+    ctx.fillRect(x, y - 15, w + pad * 2, 14)
+    ctx.fillStyle = color
+    ctx.textAlign = 'left'
+    ctx.fillText(ln.label, x + pad, y - 4)
+  }
+}
+
+/** 봉마다 찍히는 마커를 공통으로 순회한다 (터치 ◆ / 체결 ▲▼). */
+function forEachBarMark<T>(
+  c: DrawCtx,
+  byTime: Map<number, T[]>,
+  fn: (mark: T, x: number) => void,
+): void {
+  const { kLineDataList, visibleRange, xAxis } = c
+  for (let i = visibleRange.from; i < visibleRange.to; i++) {
+    const bar = kLineDataList[i]
+    if (!bar) continue
+    const marks = byTime.get(bar.timestamp)
+    if (!marks) continue
+    const x = xAxis.convertToPixel(i)
+    for (const m of marks) fn(m, x)
+  }
+}
+
+let overlaySeq2 = 0
 
 function createOverlayIndicator(): OverlayStore {
   let lines: OverlayLine[] = []
   const touchesByTime = new Map<number, OverlayTouch[]>()
-  const name = `OVERLAY_${++overlaySeq}`
+  const fillsByTime = new Map<number, OverlayFill[]>()
+  let seriesList: SeriesDraw[] = []
+  const name = `OVERLAY_${++overlaySeq2}`
   registerIndicator({
     name,
     shortName: '전략오버레이',
     figures: [],
     calc: (dataList) => dataList.map(() => ({})),
-    draw: ({ ctx, kLineDataList, visibleRange, bounding, xAxis, yAxis }) => {
-      if (lines.length === 0 && touchesByTime.size === 0) return true
+    draw: (c) => {
+      const empty =
+        lines.length === 0 &&
+        touchesByTime.size === 0 &&
+        fillsByTime.size === 0 &&
+        seriesList.length === 0
+      if (empty) return true
+      const { ctx, yAxis } = c
       ctx.save()
       ctx.font = '11px sans-serif'
       ctx.lineWidth = 1
 
-      // ① 수평선 + 우측 라벨 — 현재 y축 범위 밖 레벨은 건너뛴다.
-      for (const ln of lines) {
-        const y = Math.round(yAxis.convertToPixel(ln.price)) + 0.5 // +0.5 = 1px 라인 선명하게
-        if (y < 0 || y > bounding.height) continue
-        const color = OVERLAY_COLORS[ln.kind]
-        ctx.strokeStyle = color
-        ctx.setLineDash(ln.kind === 'fib' ? [] : [4, 3]) // fib 실선, round/anchor 점선
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(bounding.width, y)
-        ctx.stroke()
-        // 우측 라벨 — 캔들과 겹쳐도 읽히게 반투명 흰 바탕(라이트 테마) 위에 그린다.
-        ctx.setLineDash([])
-        const pad = 3
-        const w = ctx.measureText(ln.label).width
-        const x = bounding.width - w - pad * 2 - 2
-        ctx.fillStyle = 'rgba(255,255,255,0.85)'
-        ctx.fillRect(x, y - 15, w + pad * 2, 14)
-        ctx.fillStyle = color
-        ctx.textAlign = 'left'
-        ctx.fillText(ln.label, x + pad, y - 4)
-      }
+      drawSeries(c, seriesList) // 곡선을 먼저 — 수평선 아래에 깔린다
+      drawLines(c, lines)
 
-      // ② 레벨 근접 터치 마커 ◆ — 해당 날짜 봉의 터치 가격 위치에 찍는다.
-      ctx.fillStyle = TOUCH_COLOR
       ctx.textAlign = 'center'
-      for (let i = visibleRange.from; i < visibleRange.to; i++) {
-        const bar = kLineDataList[i]
-        if (!bar) continue
-        const touches = touchesByTime.get(bar.timestamp)
-        if (!touches) continue
-        const x = xAxis.convertToPixel(i)
-        for (const t of touches) {
-          ctx.fillText('◆', x, yAxis.convertToPixel(t.price) + 4)
-        }
-      }
+      ctx.fillStyle = TOUCH_COLOR
+      forEachBarMark(c, touchesByTime, (t, x) => {
+        ctx.fillText('◆', x, yAxis.convertToPixel(t.price) + 4)
+      })
+
+      // 체결 마커는 "실제로 체결됐을 지점"이라 차수 숫자까지 찍어 어느 분할인지 보이게 한다.
+      forEachBarMark(c, fillsByTime, (f, x) => {
+        const y = yAxis.convertToPixel(f.price)
+        const buy = f.side === 'buy'
+        ctx.fillStyle = OVERLAY_COLORS[f.side]
+        ctx.fillText(buy ? '▲' : '▼', x, buy ? y + 14 : y - 6)
+        ctx.font = 'bold 9px sans-serif'
+        ctx.fillText(String(f.stage), x, buy ? y + 23 : y - 15)
+        ctx.font = '11px sans-serif'
+      })
 
       ctx.restore()
       return true
     },
   })
+
+  function index<T extends { time: string }>(items: T[], into: Map<number, T[]>): void {
+    into.clear()
+    for (const it of items) {
+      const ts = dayTs(it.time)
+      const arr = into.get(ts)
+      if (arr) arr.push(it)
+      else into.set(ts, [it])
+    }
+  }
+
   return {
     indicatorName: name,
     set(nextLines, nextTouches) {
       lines = nextLines
-      touchesByTime.clear()
-      for (const t of nextTouches) {
-        const ts = new Date(`${t.time}T00:00:00`).getTime()
-        const arr = touchesByTime.get(ts)
-        if (arr) arr.push(t)
-        else touchesByTime.set(ts, [t])
-      }
+      index(nextTouches, touchesByTime)
+    },
+    setSim(fills, series) {
+      index(fills, fillsByTime)
+      seriesList = series.map((s) => ({
+        label: s.label,
+        color: s.color ?? VWAP_COLOR,
+        byTime: new Map(s.points.map((p) => [dayTs(p.time), p.value])),
+      }))
     },
     clear() {
       lines = []
       touchesByTime.clear()
+      fillsByTime.clear()
+      seriesList = []
     },
   }
 }
@@ -282,11 +390,21 @@ export type StrategyPayload = {
   overlay: boolean // POST /api/overlay → 수평선 오버레이
 }
 
+/** 시뮬레이션 그리기 입력 — 계산은 전부 파이썬(POST /api/simulate)이 한다. */
+export type SimulationDraw = {
+  lines: OverlayLine[] // 분할 매수/매도 목표가 + 앵커
+  fills: OverlayFill[] // 체결됐을 지점 (▲▼ + 차수)
+  series: OverlaySeries[] // 앵커 VWAP 등 곡선
+}
+
 export type ProChartHandle = {
   /** 조건검색 결과 클릭 → 차트 종목 전환 (적용중 전략은 새 종목으로 재조회) */
   showSymbol: (code: string, name: string, market: string) => void
   /** 전략 적용(null = 해제). 신호·오버레이 계산은 전부 파이썬 — 시각 전용, 매매 판단 아님. */
   applyStrategy: (payload: StrategyPayload | null) => Promise<void>
+  /** 시뮬레이션 결과 그리기(null = 해제). 전략 오버레이와 달리 차트가 스스로 조회하지
+   *  않는다 — 파라미터를 쥔 화면(③ 시뮬레이션)이 계산해서 넘긴다. */
+  applySimulation: (sim: SimulationDraw | null) => void
 }
 
 export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref) {
@@ -364,6 +482,17 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
     async applyStrategy(payload) {
       strategyRef.current = payload
       await refreshStrategy()
+    },
+    applySimulation(sim) {
+      const ov = overlayRef.current!
+      if (sim) {
+        ov.set(sim.lines, [])
+        ov.setSim(sim.fills, sim.series)
+      } else {
+        ov.clear()
+      }
+      // Pro 가 지표 재계산 API 를 안 열어둬서 setSymbol 로 다시 그리게 한다(기존 방식과 동일).
+      chartRef.current?.setSymbol(symbolRef.current)
     },
   }))
 

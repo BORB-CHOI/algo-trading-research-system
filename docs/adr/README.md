@@ -25,3 +25,4 @@
 | [0008](0008-hts-multiview-ui.md) | HTS형 멀티뷰 UI (dockview + ECharts) | 수락 |
 | [0009](0009-strategy-as-data.md) | 전략·조건은 데이터로 정의 (숨은 하드코딩 금지) | 수락 |
 | [0010](0010-kis-broker-adapter.md) | KIS 브로커 어댑터 (조회 전용) | 수락 (조회만 / 주문 미착수) |
+| [0011](0011-strategy-one-anchor-and-splits.md) | 전략 1호 — 급등 앵커 피보나치 + 분할 매수/매도 | 수락 (계산 코어만 / 체결·UI 미착수) |

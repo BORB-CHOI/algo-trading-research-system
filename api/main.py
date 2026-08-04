@@ -62,7 +62,7 @@ _CANDLE_COLS = [
     "Stocks",
 ]
 
-app = FastAPI(title="ATS 케이스 검사기 API", version="0.1.0")
+app = FastAPI(title="ATS API", version="0.1.0")
 
 # Vite dev 서버에서 직접 부를 때를 대비. proxy 를 쓰면 사실상 필요 없다.
 app.add_middleware(
