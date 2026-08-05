@@ -61,19 +61,20 @@ export type StopRule = {
 export type Strategy = {
   /** name = ① 에서 만든 조건검색식 이름. 없으면 전체 종목이 대상. */
   screen: { name?: string; logic: ScreenLogic; conditions: SavedCondition[] }
-  /** 진입 기법과 그 파라미터. 목표가·분할 레벨은 기법이 계산한다(입력값 ❌). */
-  entry: { key: string; params: Record<string, number> }
+  /** 진입 기법(케이스 검사기 오버레이용). 전략 1호 시뮬레이션은 안 쓴다 — 선택 사항. */
+  entry?: { key: string; params: Record<string, number> }
   /** 분할 매수·매도 설계. 가격은 여기 없다 — 기법 파라미터와 종목에서 계산된다. */
   split: {
     buy: BuyStage[]
     sell: SellStage[]
     sellBasis: SellBasis
-    /** 레벨에서 ±몇 % 안의 라운드 피겨를 목표가로 삼을지 (전략 파라미터) */
-    roundTolerancePct: number
+    /** 레벨에서 ±몇 % 안의 라운드 피겨를 목표가로 삼을지. 비우면 실행 시 예시값. */
+    roundTolerancePct?: number
   }
   /** 손절. 없으면(옛 저장본) 손절 미사용으로 연다. */
   stop?: StopRule
-  order: {
+  /** 주문조건 — 주문조건 카드 삭제(2026-08-05)로 새 저장본에는 없다. 옛 저장본 호환용. */
+  order?: {
     priceType: PriceType
     qtyType: QtyType
     qty: number
@@ -89,7 +90,8 @@ export function loadStrategies(): Strategies {
     if (!raw || typeof raw !== 'object') return {}
     const out: Strategies = {}
     for (const [name, s] of Object.entries(raw)) {
-      if (s && s.screen && s.entry && s.order) {
+      // entry·order 는 이제 선택 사항 — 있어야 열리는 조건으로 걸면 새 저장본이 전부 버려진다.
+      if (s && s.screen && s.split) {
         out[name] = { ...s, screen: { ...s.screen, conditions: migrateConditions(s.screen.conditions ?? []) } }
       }
     }
@@ -180,12 +182,12 @@ export function emptyDraft(): StrategyDraft {
 
 export function toDraft(s: Strategy): StrategyDraft {
   const entryParams: Record<string, string> = {}
-  for (const [k, v] of Object.entries(s.entry.params ?? {})) entryParams[k] = String(v)
+  for (const [k, v] of Object.entries(s.entry?.params ?? {})) entryParams[k] = String(v)
   return {
     screenName: s.screen.name ?? '',
     logic: s.screen.logic,
     conditions: (s.screen.conditions ?? []).map((c) => ({ key: c.key, params: { ...c.params } })),
-    entryKey: s.entry.key ?? '',
+    entryKey: s.entry?.key ?? '',
     entryParams,
     // split 이 없는 옛 저장본도 열려야 한다 — 빈 배열로 받는다.
     buy: (s.split?.buy ?? []).map((b) => ({ ...b })),
@@ -198,10 +200,10 @@ export function toDraft(s: Strategy): StrategyDraft {
     stopSource: s.stop?.source ?? 'avwap',
     stopCustom: s.stop?.customPrice == null ? '' : String(s.stop.customPrice),
     stopTicks: String(s.stop?.tickOffset ?? 0),
-    priceType: s.order.priceType,
-    qtyType: s.order.qtyType,
-    qty: s.order.qty == null ? '' : String(s.order.qty),
-    credit: s.order.credit ?? 'cash',
+    priceType: s.order?.priceType ?? 'limit',
+    qtyType: s.order?.qtyType ?? 'shares',
+    qty: s.order?.qty == null ? '' : String(s.order.qty),
+    credit: s.order?.credit ?? 'cash',
   }
 }
 
@@ -238,7 +240,8 @@ export function parseParams(
 }
 
 /** 켜져 있는 분할 차수만 검증한다 — 꺼둔 차수는 값이 비어 있어도 저장을 막지 않는다.
- *  (오너가 차수를 켜고 끄며 실험하는 게 전제라, 끈 차수까지 채우라고 하면 방해가 된다.) */
+ *  (오너가 차수를 켜고 끄며 실험하는 게 전제라, 끈 차수까지 채우라고 하면 방해가 된다.)
+ *  비중은 **절대 %** — 합이 100 을 넘으면 과매수라 저장을 막는다 (오너 확정 2026-08-05). */
 function checkStages(d: StrategyDraft): ParseResult<true> {
   const buy = d.buy.filter((b) => b.enabled)
   if (buy.length === 0) return { ok: false, error: '분할 매수 차수를 1개 이상 켜세요.' }
@@ -248,29 +251,53 @@ function checkStages(d: StrategyDraft): ParseResult<true> {
     }
     if (b.weight <= 0) return { ok: false, error: `매수 ${i + 1}차 비중을 입력하세요.` }
   }
-  for (const [i, x] of d.sell.filter((s) => s.enabled).entries()) {
+  const buySum = buy.reduce((a, b) => a + b.weight, 0)
+  if (buySum > 100) {
+    return { ok: false, error: `매수 비중 합이 ${buySum}% — 100%를 넘을 수 없습니다.` }
+  }
+  const sell = d.sell.filter((s) => s.enabled)
+  for (const [i, x] of sell.entries()) {
     if (x.reboundPct <= 0) return { ok: false, error: `매도 ${i + 1}차 반등률을 입력하세요.` }
     if (x.weight <= 0) return { ok: false, error: `매도 ${i + 1}차 비중을 입력하세요.` }
+  }
+  const sellSum = sell.reduce((a, s) => a + s.weight, 0)
+  if (sellSum > 100) {
+    return { ok: false, error: `매도 비중 합이 ${sellSum}% — 100%를 넘을 수 없습니다.` }
   }
   return { ok: true, value: true }
 }
 
-/** 드래프트 → 저장 형식. 미입력·형식 오류는 한국어 메시지로 돌려준다. */
+/** 드래프트 → 저장 형식. 미입력·형식 오류는 한국어 메시지로 돌려준다.
+ *
+ *  필수는 분할 차수뿐이다. 진입 기법·수량·허용폭을 필수로 걸면 **입력 UI 가 없는 값**
+ *  때문에 저장이 영원히 막힌다 (2026-08-05 실제 발생 — 주문조건 카드 삭제 후 수량 검증이
+ *  남아 저장 불능). 안 채운 값은 실행 시 예시값으로 채워진다. */
 export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): ParseResult<Strategy> {
-  // 조건이 없으면 전체 종목이 대상이다 — 막지 않고 그대로 저장한다(화면에서 명시).
-  if (!d.entryKey) return { ok: false, error: '진입 기법을 선택하세요.' }
+  // 진입 기법은 선택 사항 — 골랐을 때만 파라미터를 검증한다.
+  let entry: Strategy['entry']
+  if (d.entryKey) {
+    const params = parseParams(entryDefs, d.entryParams)
+    if (!params.ok) return params
+    entry = { key: d.entryKey, params: params.value }
+  }
 
-  const params = parseParams(entryDefs, d.entryParams)
-  if (!params.ok) return params
-
-  const qty = toNum(d.qtyType === 'shares' ? '수량' : '금액', d.qty, d.qtyType === 'shares')
-  if (!qty.ok) return qty
+  // 수량은 옛 저장본 호환용 — 값이 있을 때만 담는다 (입력 UI 는 삭제됨).
+  let order: Strategy['order']
+  if (d.qty.trim()) {
+    const qty = toNum(d.qtyType === 'shares' ? '수량' : '금액', d.qty, d.qtyType === 'shares')
+    if (!qty.ok) return qty
+    order = { priceType: d.priceType, qtyType: d.qtyType, qty: qty.value, credit: d.credit }
+  }
 
   const stages = checkStages(d)
   if (!stages.ok) return stages
 
-  const tol = toNum('라운드 피겨 허용폭', d.roundTolerancePct, false)
-  if (!tol.ok) return tol
+  let tolValue: number | undefined
+  if (d.roundTolerancePct.trim()) {
+    const tol = toNum('라운드 피겨 허용폭', d.roundTolerancePct, false)
+    if (!tol.ok) return tol
+    tolValue = tol.value
+  }
 
   let stop: StopRule | undefined
   if (d.stopEnabled) {
@@ -299,20 +326,15 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
         logic: d.logic,
         conditions: d.conditions,
       },
-      entry: { key: d.entryKey, params: params.value },
+      ...(entry ? { entry } : {}),
       ...(stop ? { stop } : {}),
       split: {
         buy: d.buy.map((b) => ({ ...b })),
         sell: d.sell.map((s) => ({ ...s })),
         sellBasis: d.sellBasis,
-        roundTolerancePct: tol.value,
+        ...(tolValue != null ? { roundTolerancePct: tolValue } : {}),
       },
-      order: {
-        priceType: d.priceType,
-        qtyType: d.qtyType,
-        qty: qty.value,
-        credit: d.credit,
-      },
+      ...(order ? { order } : {}),
     },
   }
 }

@@ -34,6 +34,7 @@ from src.layer1_data.adjust import (
 )
 from src.layer1_data.dart import load_financials
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
+from src.layer1_data.industry import industry_map
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer1_data.market import index_boards, market_snapshot
 from src.layer1_data.news import market_news, stock_news
@@ -602,12 +603,14 @@ def api_quotes(
 
 @app.get("/api/heatmap")
 def api_heatmap(
-    top: int = Query(150, ge=10, le=500, description="시장별 시총 상위 N"),
+    market: Literal["KOSPI", "KOSDAQ"] = Query("KOSPI", description="시장 선택"),
+    top: int = Query(500, ge=10, le=500, description="시총 상위 N"),
 ) -> dict:
     """finviz 형 시장맵 데이터 (BORB-40). 최신 거래일 vs 직전 거래일 등락률 + 시총.
 
-    업종 분류가 marcap 에 없어 시장(KOSPI/KOSDAQ/…) 단위로 그룹핑한다.
-    업종 중첩은 업종 데이터 소스 확보 후(별도 이슈).
+    선택한 시장의 시총 상위 top 종목을 업종별로 묶는다. 업종 분류는 네이버
+    비공식 API(industry_map, 표시 전용 — 백테스트·매매 판단 ❌). 수집이 아직
+    안 끝났으면 sectors_ready=False 에 전 종목이 "기타" 로 온다.
     """
     years = available_years()
     if not years:
@@ -620,20 +623,33 @@ def api_heatmap(
     d0 = apply_exclusions(df[df["Date"] == base_date], DEFAULT_POLICY).set_index("Code")
     # 등락률은 분할 보정 포함 공통 함수로 — screen/quotes 와 같은 정본 (분할일 −98% 왜곡 방지)
     chg = _change_vs_prev(years[-1], base_date)
-    markets = {}
-    for market, g in d0.groupby("Market"):
-        sel = g.nlargest(top, "Marcap")
-        markets[str(market)] = [
+    sel = d0[d0["Market"] == market].nlargest(top, "Marcap")
+    industries, sectors_ready = industry_map()
+    groups: dict[str, list[dict]] = {}
+    for i, r in sel.iterrows():
+        code = str(i)
+        groups.setdefault(industries.get(code, "기타"), []).append(
             {
-                "code": str(i),
+                "code": code,
                 "name": str(r.Name),
                 "marcap": float(r.Marcap),
                 # 직전 거래일 데이터가 없는 종목(신규 상장 등)은 보합(0)으로 그린다
-                "chg": chg.get(str(i), 0.0),
+                "chg": chg.get(code, 0.0),
             }
-            for i, r in sel.iterrows()
-        ]
-    return {"date": pd.Timestamp(dates[-1]).strftime("%Y-%m-%d"), "markets": markets}
+        )
+    # 업종은 시총합 내림차순, 업종 안 종목은 시총 내림차순 — 트리맵 타일 배치 기준.
+    sectors = [
+        {"name": name, "items": sorted(items, key=lambda x: -x["marcap"])}
+        for name, items in sorted(
+            groups.items(), key=lambda kv: -sum(x["marcap"] for x in kv[1])
+        )
+    ]
+    return {
+        "date": base_date.strftime("%Y-%m-%d"),
+        "market": market,
+        "sectors_ready": sectors_ready,
+        "sectors": sectors,
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -886,6 +902,15 @@ def api_simulate(req: SimulateRequest) -> dict:
         key=lambda s: s.rebound_pct,
     )
 
+    # 비중은 **절대 %** 다 (오너 확정 2026-08-05). 합으로 나눠 정규화하지 않는다 —
+    # 합이 100 미만이면 나머지는 미배분(현금 대기), 100 초과는 과매수라 여기서 거부한다.
+    buy_wsum = sum(s.weight for s in buys if s.weight > 0)
+    if buy_wsum > 100:
+        raise HTTPException(status_code=400, detail=f"매수 비중 합이 {buy_wsum:g}% — 100%를 넘을 수 없습니다.")
+    sell_wsum = sum(s.weight for s in sells if s.weight > 0)
+    if sell_wsum > 100:
+        raise HTTPException(status_code=400, detail=f"매도 비중 합이 {sell_wsum:g}% — 100%를 넘을 수 없습니다.")
+
     computed: dict[str, int] = {}
     lines: list[dict] = [
         {"price": anchor.start_price, "label": "급등 시작(시가)", "kind": "anchor"},
@@ -915,8 +940,8 @@ def api_simulate(req: SimulateRequest) -> dict:
     buy_fills: list[tuple[float, float]] = []  # (가격, 비중) — 평단 계산용
     lowest_fill: float | None = None
     last_fill_date = None
-    # ② 주문수량 → 차수별 수량. 비중이 없으면 균등 분할. 주수는 항상 내림(초과 매수 방지).
-    total_bw = sum(s.weight for s in buys if s.weight > 0)
+    # 주문수량 → 차수별 수량 = 총량 × (비중/100). 비중이 전부 비면 균등 분할.
+    # 주수는 항상 내림(초과 매수 방지).
     trade_buys: list[dict] = []
     trade_sells: list[dict] = []
     for stage, level in zip(buys, blevels, strict=True):
@@ -931,7 +956,7 @@ def api_simulate(req: SimulateRequest) -> dict:
             lowest_fill = eff if lowest_fill is None else min(lowest_fill, eff)
             last_fill_date = d0["Date"] if last_fill_date is None else max(last_fill_date, d0["Date"])
             if req.qty:
-                frac = (stage.weight / total_bw) if total_bw > 0 else 1 / len(buys)
+                frac = (stage.weight / 100.0) if buy_wsum > 0 else 1 / len(buys)
                 shares = int(req.qty * frac) if req.qty_type == "shares" else int(req.qty * frac / eff)
                 trade_buys.append({
                     "stage": level.tranche, "time": fills[-1]["time"], "price": float(eff),
@@ -955,7 +980,6 @@ def api_simulate(req: SimulateRequest) -> dict:
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
             sell_scan = after if last_fill_date is None else after.loc[after["Date"] > last_fill_date]
-            total_sw = sum(s.weight for s in sells if s.weight > 0)
             position = sum(t["shares"] for t in trade_buys)
             avg_cost = (
                 sum(t["price"] * t["shares"] for t in trade_buys) / position if position else None
@@ -970,7 +994,8 @@ def api_simulate(req: SimulateRequest) -> dict:
                         d0 = hit.iloc[0]
                         fills.append({"time": d0["Date"].strftime("%Y-%m-%d"), "price": float(eff), "side": "sell", "stage": level.tranche})
                         if position and avg_cost is not None:
-                            frac = (stage.weight / total_sw) if total_sw > 0 else 1 / len(sells)
+                            # 매도 비중은 보유 포지션 대비 절대 % — 합<100 이면 잔여는 계속 보유
+                            frac = (stage.weight / 100.0) if sell_wsum > 0 else 1 / len(sells)
                             shares = min(int(position * frac), position - sum(t["shares"] for t in trade_sells))
                             if shares > 0:
                                 trade_sells.append({

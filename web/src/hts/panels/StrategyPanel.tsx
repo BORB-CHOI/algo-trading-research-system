@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   fetchConditions,
-  fetchQuotes,
   fetchStrategies,
   postSimulate,
   runScreen,
   type ConditionCategory,
   type ConditionDef,
   type ConditionParamDef,
-  type Quote,
   type ScreenResponse,
   type SimulateResponse,
   type StrategyDef,
@@ -202,61 +200,6 @@ function ParamInputs(props: {
           </span>
         </div>
       ))}
-    </>
-  )
-}
-
-function SymbolDetail({ sym }: { sym: SymbolPick | null }) {
-  const [q, setQ] = useState<Quote | null>(null)
-  const req = useRef(0)
-
-  useEffect(() => {
-    const code = sym?.code
-    if (!code) {
-      setQ(null)
-      return
-    }
-    const id = ++req.current
-    const load = () =>
-      void fetchQuotes([code], true).then((r) => {
-        if (id === req.current) setQ(r.quotes[0] ?? null)
-      })
-    load()
-    const t = window.setInterval(load, 10_000) // 실시간 시세 폴링
-    return () => window.clearInterval(t)
-  }, [sym?.code])
-
-  if (!sym) return <p className="hint">차트·검색 결과에서 종목을 고르면 여기에 표시됩니다.</p>
-  const diff = q && q.chg != null ? (q.close * q.chg) / (100 + q.chg) : null
-  return (
-    <>
-      <table className="grid">
-        <thead>
-          <tr>
-            <th>종목명</th>
-            <th className="num">현재가</th>
-            <th className="num">등락</th>
-            <th className="num">거래량</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td className="nm">{sym.name}</td>
-            <td className={`num ${chgClass(q?.chg)}`} style={{ fontWeight: 700 }}>
-              {q ? fmtPrice(q.close) : '-'}
-            </td>
-            <td className={`num ${chgClass(q?.chg)}`}>
-              {diff != null && `${diff > 0 ? '▲' : '▼'} ${fmtPrice(Math.abs(diff))}`}
-              <br />
-              {fmtChg(q?.chg)}
-            </td>
-            <td className="num">{q?.volume != null ? Math.round(q.volume).toLocaleString() : '-'}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div style={{ marginTop: 10 }}>
-        <MiniCandles data={q?.candles} width={520} height={64} />
-      </div>
     </>
   )
 }
@@ -543,10 +486,19 @@ export function StrategyPanel() {
     const filled: string[] = []
 
     let buy = draft.buy
-    if (!buy.some((b) => b.enabled && b.ratio > 0 && b.ratio < 1 && b.weight > 0)) {
+    const usable = buy.filter((b) => b.enabled && b.ratio > 0 && b.ratio < 1)
+    if (usable.length === 0) {
+      // 차수 자체가 없다 → 예시 3차로 시작한다.
       buy = SIM_EXAMPLE.buy.map((b) => newBuyStage(b.ratio, b.weight))
       set('buy', buy)
       filled.push('분할 매수 3차(38.2/50/61.8%)')
+    } else if (!usable.some((b) => b.weight > 0)) {
+      // 차수는 사용자가 만들었는데 비중만 비었다 → 사용자의 되돌림은 두고 비중만 균등하게.
+      const each = Math.floor(100 / usable.length)
+      const ids = new Set(usable.map((b) => b.id))
+      buy = buy.map((b) => (ids.has(b.id) ? { ...b, weight: each } : b))
+      set('buy', buy)
+      filled.push(`비중 균등 ${each}%씩`)
     }
 
     let tol = Number(draft.roundTolerancePct)
@@ -707,9 +659,8 @@ export function StrategyPanel() {
                 <p className={`msgline ${screenErr ? 'warn' : ''}`}>{screenErr || ' '}</p>
               </Card>
 
-              <Card title="종목 상세" right={sym && <span className="badge">{sym.code}</span>}>
-                <SymbolDetail sym={sym} />
-              </Card>
+              {/* "종목 상세" 카드는 삭제 (오너 지적 2026-08-05) — 종목을 뜯어보는 자리는
+                  우측 종목 드로어·차트 탭이지 검색식 만드는 화면이 아니다. */}
             </div>
 
             {/* ── 오른쪽: 만들어진 검색식과 그 결과 ── */}

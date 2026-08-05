@@ -1159,6 +1159,13 @@ body {
   font-weight: 500;
 }
 .sim-foot .dim { color: var(--hts-dim, #9ca3af); }
+/* 분할 비중 합계 줄 — 절대 %(합 100 안). 초과는 빨간 경고 */
+.wsum {
+  margin: 6px 2px 0;
+  font-size: 11.5px;
+  color: var(--hts-dim, #6b7280);
+}
+.wsum.over { color: #dc2626; font-weight: 600; }
 /* 분할 차수의 자동 계산 목표가 — 직접 입력값과 구분되게 흐리게 */
 .sstage .px .k {
   font-size: 11px;

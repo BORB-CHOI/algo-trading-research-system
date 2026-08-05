@@ -64,6 +64,18 @@ function StageRow(props: {
   )
 }
 
+/** 비중 합계 줄 — 비중은 절대 %(합 100 안)다 (오너 확정 2026-08-05).
+ *  합이 100 을 넘으면 빨간 경고, 100 미만이면 남은 비중(미배분 = 현금 대기)을 보여준다. */
+function WeightSum({ stages, of }: { stages: { enabled: boolean; weight: number }[]; of: string }) {
+  const used = stages.filter((s) => s.enabled).reduce((a, s) => a + (s.weight || 0), 0)
+  if (used <= 0) return null
+  if (used > 100) {
+    return <p className="wsum over">비중 합 {used}% — 100%를 넘을 수 없습니다</p>
+  }
+  const rest = used < 100 ? ` · 남은 ${100 - used}%는 ${of}` : ' — 전량 배분'
+  return <p className="wsum">비중 합 {used}%{rest}</p>
+}
+
 function NumCell(props: {
   label: string
   value: number
@@ -129,6 +141,7 @@ export function BuyStages(props: {
           </StageRow>
         ))
       )}
+      <WeightSum stages={stages} of="매수 안 함(현금 대기)" />
       <div className="sstage-add">
         {/* 되돌림 38.2 / 50 / 61.8 은 업계 표준 비율이라 버튼으로 꺼내 둔다.
             값은 추가된 뒤에도 자유롭게 고칠 수 있다 — 고정이 아니다. */}
@@ -193,6 +206,7 @@ export function SellStages(props: {
           </StageRow>
         ))
       )}
+      <WeightSum stages={stages} of="계속 보유" />
       <div className="sstage-add">
         <button className="chip" onClick={() => onChange([...stages, newSellStage(0, 0)])}>
           + 매도 차수
