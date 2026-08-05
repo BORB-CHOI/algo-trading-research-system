@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,13 @@ SUPPLY_TR = "FHPTJ04160001"
 
 # 프로브 종목 — 코스피 대형주 하나면 충분하다(한도는 종목이 아니라 API 속성).
 PROBE_CODE = "005930"
+
+# 호출 간 간격. EGW00201(초당 거래건수 초과)이 실제로 떨어져서 넣었다.
+# 값은 placeholder — 백필용 스로틀은 별도로 실측해서 정한다.
+THROTTLE_SEC = 0.6
+
+# 상폐 프로브 표본 수. 한 종목만 보면 그 종목 사정인지 API 사정인지 모른다.
+DELISTED_SAMPLE = 4
 
 # 과거 어디까지 주는지 볼 기준일들. 촘촘하게 볼 필요 없이 자릿수만 잡는다.
 PROBE_DATES = [
@@ -189,6 +197,77 @@ def probe_supply_history(client: KisClient) -> int:
     return 0
 
 
+def probe_delisted(client: KisClient) -> int:
+    """상장폐지 종목의 수급이 조회되는가 (ADR-0012 미해결 2번).
+
+    안 되면 상폐 종목 수급이 통째로 비고, CLAUDE.md 가 금지한 생존 편향이
+    수급 신호에만 생긴다. 백필 설계가 통째로 달라지는 문제라 먼저 확인한다.
+
+    비교군으로 살아 있는 종목(삼성전자)을 같은 날짜로 함께 부른다 — 상폐라서
+    안 나온 건지 그 날짜가 문제인 건지 구분하기 위해서다.
+    """
+    print("=" * 72)
+    print("ADR-0012 미해결 2번  상장폐지 종목 수급 조회 가능 여부")
+    print("=" * 72)
+
+    targets = _delisted_probe_targets()
+    if not targets:
+        print("marcap 에서 상폐 종목을 찾지 못했다.")
+        return 1
+
+    print(f"\n{'종목':>8}  {'구분':<10} {'상폐(추정)':<12} {'요청일':<10} 결과")
+    ok_count = 0
+    for code, name, last_date, label in targets:
+        # 마지막 거래일 직전을 요청한다 — 살아 있던 시점의 수급이 남아 있는지 본다.
+        req = (last_date - pd.Timedelta(days=5)).strftime("%Y%m%d")
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": code,
+            "FID_INPUT_DATE_1": req,
+            "FID_ORG_ADJ_PRC": "",
+            "FID_ETC_CLS_CODE": "",
+        }
+        time.sleep(THROTTLE_SEC)  # EGW00201 회피
+        try:
+            body = client.get(SUPPLY_PATH, SUPPLY_TR, params).body
+        except KisApiError as exc:
+            print(f"{code:>8}  {label:<10} {last_date.date()}   {req}   실패: {exc}")
+            continue
+
+        rows = body.get("output2") or body.get("output1") or []
+        if isinstance(rows, dict):
+            rows = [rows]
+        dates = [str(r.get("stck_bsop_date", "")) for r in rows if isinstance(r, dict)]
+        dates = [d for d in dates if d]
+        span = f"{min(dates)}~{max(dates)}" if dates else "(빈 응답)"
+        if dates:
+            ok_count += 1
+        print(f"{code:>8}  {label:<10} {last_date.date()}   {req}   {len(rows):>2}행 {span}  {name}")
+
+    print(f"\n→ {ok_count}/{len(targets)} 건에서 데이터가 왔다.")
+    print("  상폐 종목이 0 이고 비교군(생존)만 오면 → 백필로 상폐 수급을 못 채운다는 뜻이다.")
+    return 0
+
+
+def _delisted_probe_targets() -> list[tuple[str, str, pd.Timestamp, str]]:
+    """상폐 추정 종목 몇 개 + 비교군(생존 종목) 하나."""
+    df = load_years(2024, pd.Timestamp.today().year)
+    if df.empty:
+        return []
+    df = df.assign(Code=normalize_code(df["Code"]))
+    last = df.groupby("Code")["Date"].max()
+    recent = df["Date"].max()
+    names = df.drop_duplicates("Code").set_index("Code")["Name"]
+
+    gone = last[last < recent - pd.Timedelta(days=30)].sort_values(ascending=False)
+    targets = [
+        (code, str(names.get(code, "?")), date, "상폐(추정)")
+        for code, date in list(gone.items())[:DELISTED_SAMPLE]
+    ]
+    targets.append((PROBE_CODE, str(names.get(PROBE_CODE, "?")), recent, "비교군(생존)"))
+    return targets
+
+
 def main(argv: list[str]) -> int:
     which = argv[1] if len(argv) > 1 else "all"
     creds = _credentials()
@@ -201,6 +280,9 @@ def main(argv: list[str]) -> int:
         print()
     if which in ("all", "supply"):
         status |= probe_supply_history(client)
+        print()
+    if which in ("all", "delisted"):
+        status |= probe_delisted(client)
     return status
 
 
