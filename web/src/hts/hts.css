@@ -1129,6 +1129,8 @@ body {
   align-items: start;
 }
 .sim-split .sim-chart {
+  display: flex;
+  flex-direction: column;
   height: 640px;
   min-width: 0;
   border: 1px solid var(--hts-line);
@@ -1136,7 +1138,35 @@ body {
   overflow: hidden;
   background: var(--hts-panel);
 }
+.sim-split .sim-chart > :first-child {
+  flex: 1;
+  min-height: 0;
+}
+/* 차트 하단 결과 스트립 — 앵커·지지선 근거·최종 손익 요약 */
+.sim-foot {
+  flex: none;
+  padding: 8px 12px;
+  border-top: 1px solid var(--hts-line);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.sim-foot p { margin: 0; }
+.sim-foot b { font-weight: 600; }
+.sim-foot p > b:first-child {
+  display: inline-block;
+  min-width: 64px;
+  color: var(--hts-dim, #6b7280);
+  font-weight: 500;
+}
+.sim-foot .dim { color: var(--hts-dim, #9ca3af); }
+/* 분할 차수의 자동 계산 목표가 — 직접 입력값과 구분되게 흐리게 */
+.sstage .px .k {
+  font-size: 11px;
+  color: var(--hts-dim, #9ca3af);
+  margin-right: 2px;
+}
+.sstage .px input.auto::placeholder { color: #374151; opacity: 1; }
 @container (max-width: 860px) {
   .sim-split { grid-template-columns: 1fr; }
-  .sim-split .sim-chart { height: 480px; }
+  .sim-split .sim-chart { height: 520px; }
 }

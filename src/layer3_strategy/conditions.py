@@ -144,13 +144,23 @@ class HistPanel:
 
 @dataclass(frozen=True)
 class Param:
-    """조건 파라미터 메타 — /api/conditions 응답의 param 항목 그대로."""
+    """조건 파라미터 메타 — /api/conditions 응답의 param 항목 그대로.
+
+    `label` 은 화면에 쓰는 이름이다. **내부 구현 용어를 그대로 내보내지 않는다** —
+    "베이스"·"근접 판정" 같은 말은 우리가 지어낸 것이지 시장에서 쓰는 용어가 아니다
+    (오너 지적 2026-08-05). 한 줄로 설명이 안 되면 `desc` 에 풀어 쓴다.
+
+    `desc` 는 입력칸 아래 흐린 작은 글씨로 항상 보인다. 비워두면 아무것도 안 나온다.
+    `choices` 가 있으면 자유 입력이 아니라 드롭다운이다(type="select").
+    """
 
     key: str
     label: str
-    type: str  # "number" | "int"
-    unit: str  # "원" | "억" | "%" | "일" | "배" | "주"
+    type: str  # "number" | "int" | "select"
+    unit: str  # "원" | "억" | "%" | "일" | "배" | "주" | "" (select 는 단위 없음)
     required: bool
+    desc: str = ""
+    choices: tuple[str, ...] = ()
 
 
 # 조건 함수 시그니처: (hist, base, params) → 기준일 종목 인덱스 bool Series.

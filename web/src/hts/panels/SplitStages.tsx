@@ -25,6 +25,9 @@ function StageRow(props: {
   children: React.ReactNode
 }) {
   const auto = props.override == null
+  // 목표가는 서버 계산 결과다. 계산 전에는 칸 자체를 안 보여준다 —
+  // "계산 전" placeholder 가 필수 입력칸처럼 보인다는 오너 지적(2026-08-05).
+  const hasPrice = props.computed != null || props.override != null
   return (
     <div className={`sstage ${props.enabled ? '' : 'off'}`}>
       <label className="chk" title={props.enabled ? '이 차수 끄기' : '이 차수 켜기'}>
@@ -38,19 +41,21 @@ function StageRow(props: {
 
       {props.children}
 
-      <span className="px">
-        <input
-          className="amt"
-          placeholder={props.computed == null ? '계산 전' : fmtPrice(props.computed)}
-          value={props.override ?? ''}
-          onChange={(e) => {
-            const t = e.target.value.trim()
-            props.onOverride(t === '' ? undefined : Number(t))
-          }}
-          title={auto ? '비워두면 자동 계산값을 씁니다' : '직접 지정한 가격'}
-        />
-        <span className="unit">원</span>
-      </span>
+      {hasPrice && (
+        <span className="px" title={auto ? '자동 계산된 목표가 — 고치면 그 값으로 주문선을 긋습니다' : '직접 지정한 가격'}>
+          <span className="k">목표가</span>
+          <input
+            className={`amt ${auto ? 'auto' : ''}`}
+            placeholder={props.computed == null ? '' : fmtPrice(props.computed)}
+            value={props.override ?? ''}
+            onChange={(e) => {
+              const t = e.target.value.trim()
+              props.onOverride(t === '' ? undefined : Number(t))
+            }}
+          />
+          <span className="unit">원</span>
+        </span>
+      )}
 
       <button className="del" title="차수 삭제" onClick={props.onRemove}>
         ×

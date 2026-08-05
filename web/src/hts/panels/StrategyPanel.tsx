@@ -34,7 +34,6 @@ import {
   saveStrategy,
   toDraft,
   toStrategy,
-  type CreditType,
   type SavedCondition,
   type Strategies,
   type StrategyDraft,
@@ -48,6 +47,9 @@ import {
 // 정량 값은 전부 이 화면에서 입력한다 (ADR-0009 — 전략 숫자 하드코딩 금지).
 
 const LIMIT = 100
+
+// ③ 시뮬레이션 대표 종목 — 오너 지시(2026-08-05)로 고정. 전략 설계 확인용 기준 종목이다.
+const SIM_SYM = { code: '005930', name: '삼성전자', market: 'KOSPI' } as const
 
 const PLACEHOLDER: Record<string, string> = {
   short: '5',
@@ -97,6 +99,49 @@ function summarizeCond(c: SavedCondition, def: ConditionDef | undefined): string
     if (max != null && maxDef) parts.push(`${fmtVal(max, maxDef.unit)} ${maxDef.label}`)
   }
   return parts.length ? `${def.name} ${parts.join(' · ')}` : def.name
+}
+
+// ③ 차트 하단 결과 스트립 — 앵커 근거·지지선·최종 손익을 한 줄씩. 차트를 보면서 같이 읽는 용도.
+function SimFoot({ r }: { r: SimulateResponse }) {
+  const avwapLast = r.series.find((s) => s.label.includes('VWAP'))?.points.at(-1)?.value
+  const stopLine = r.lines.find((l) => l.kind === 'stop')
+  const buys = r.fills.filter((f) => f.side === 'buy').length
+  const sells = r.fills.filter((f) => f.side === 'sell').length
+  const t = r.trades
+  const total = t ? t.realized_pnl + t.unrealized_pnl : null
+  return (
+    <div className="sim-foot">
+      <p>
+        <b>급등 파동</b> {r.anchor.start_date} {fmtPrice(r.anchor.start_price)} →{' '}
+        {r.anchor.end_date} {fmtPrice(r.anchor.end_price)} (+{r.anchor.gain_pct.toFixed(1)}%)
+        {r.anchor.is_52w_high ? ' · 52주 신고가' : ' · 52주 신고가 아님'}
+      </p>
+      <p>
+        <b>지지선 근거</b> 급등 시작가 {fmtPrice(r.anchor.start_price)}
+        {avwapLast != null && <> · 앵커 VWAP {fmtPrice(Math.round(avwapLast))} (급등에 올라탄 사람들의 평균 매수가)</>}
+        {stopLine && <> · 손절선 {fmtPrice(stopLine.price)}</>}
+      </p>
+      {t && total != null ? (
+        <p>
+          <b>결과</b> 매수 {t.buys.length}건 체결
+          {t.avg_entry != null && <> → 평단 {fmtPrice(t.avg_entry)}</>} · 매도 {t.sells.length}건 →
+          실현 <b className={chgClass(t.realized_pnl)}>{Math.round(t.realized_pnl).toLocaleString()}원</b>
+          {t.remain_shares > 0 && (
+            <>
+              {' '}· 잔여 {t.remain_shares.toLocaleString()}주 평가{' '}
+              <b className={chgClass(t.unrealized_pnl)}>{Math.round(t.unrealized_pnl).toLocaleString()}원</b>
+            </>
+          )}{' '}
+          = 합계 <b className={chgClass(total)}>{total > 0 ? '+' : ''}{Math.round(total).toLocaleString()}원</b>
+          <span className="dim"> (수수료·세금·슬리피지 미포함)</span>
+        </p>
+      ) : (
+        <p>
+          <b>결과</b> 체결 지점 매수 {buys} · 매도 {sells} — 모의 수량을 넣으면 손익까지 계산됩니다.
+        </p>
+      )}
+    </div>
+  )
 }
 
 function Card(props: {
@@ -428,6 +473,10 @@ export function StrategyPanel() {
   }
 
   // ── ③ 시뮬레이션 — 전략 1호(급등 앵커 + 분할). 계산은 전부 파이썬(/api/simulate) ──
+  //
+  // 종목은 **대표 종목(삼성전자) 고정**이다 — ① 에서 뭘 골랐는지와 무관 (오너 지시 2026-08-05:
+  // "내가 설계한 전략이 어떻게 되는지만 보고 싶은 거"). 이 화면은 전략 설계를 눈으로
+  // 확인하는 자리지 종목 검증 자리가 아니다. 실전 적용은 백테스트 러너(ADR-0007) 몫.
   const proRef = useRef<ProChartHandle>(null)
   const [simDate, setSimDate] = useState('')
   const [simWindow, setSimWindow] = useState('')
@@ -437,21 +486,22 @@ export function StrategyPanel() {
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null)
   const [computed, setComputed] = useState<ComputedPrices>({})
 
-  // ③ 에 들어오거나 종목이 바뀌면 시뮬레이션 차트를 그 종목으로 맞춘다.
+  // 최신 결과를 ref 로도 들고 있는다 — 탭 재진입 효과가 simResult 를 deps 에 넣으면
+  // 실행할 때마다 showSymbol(데이터 재로드)이 돌아 줌이 풀리기 때문이다.
+  const simResultRef = useRef<SimulateResponse | null>(null)
   useEffect(() => {
-    if (step !== 'sim' || !sym) return
-    proRef.current?.showSymbol(sym.code, sym.name, sym.market)
-    // 이전 종목의 레벨이 새 종목 위에 남지 않게 지운다 — 다시 실행해야 그린다.
-    proRef.current?.applySimulation(null)
-    setSimResult(null)
-    setComputed({})
-  }, [step, sym])
+    simResultRef.current = simResult
+  }, [simResult])
+
+  // ③ 에 들어오면(차트가 새로 마운트되면) 대표 종목을 싣고, 직전 결과가 있으면 다시 그린다.
+  useEffect(() => {
+    if (step !== 'sim') return
+    proRef.current?.showSymbol(SIM_SYM.code, SIM_SYM.name, SIM_SYM.market)
+    const r = simResultRef.current
+    if (r) proRef.current?.applySimulation({ lines: r.lines, fills: r.fills, series: r.series })
+  }, [step])
 
   async function runSimulation() {
-    if (!sym) {
-      setSimMsg('종목을 먼저 고르세요 — ① 검색 결과나 차트에서 클릭.')
-      return
-    }
     const w = Number(simWindow)
     const g = Number(simGain)
     const tol = Number(draft.roundTolerancePct)
@@ -465,7 +515,7 @@ export function StrategyPanel() {
     setSimMsg('계산 중…')
     try {
       const res = await postSimulate({
-        code: sym.code,
+        code: SIM_SYM.code,
         end: simDate || undefined,
         window: w,
         min_gain_pct: g,
@@ -511,7 +561,7 @@ export function StrategyPanel() {
           [
             ['screen', '① 종목선정', `검색식 ${Object.keys(screens).length}`],
             ['strategy', '② 매매전략', `전략 ${Object.keys(saved).length}`],
-            ['sim', '③ 시뮬레이션', sym ? sym.name : '종목 미선택'],
+            ['sim', '③ 시뮬레이션', `${SIM_SYM.name} 기준`],
           ] as const
         ).map(([k, label, badge]) => (
           <button key={k} className={step === k ? 'on' : ''} onClick={() => setStep(k)}>
@@ -933,18 +983,22 @@ export function StrategyPanel() {
                         </div>
                       )}
                       <div className="kv">
-                        <span className="k">호가 오프셋</span>
+                        <span className="k">기준선에서</span>
                         <span className="v">
                           <input
                             className="amt"
                             placeholder="-2"
                             value={draft.stopTicks}
                             onChange={(e) => set('stopTicks', e.target.value)}
-                            title="기준선에서 몇 호가 위(+)/아래(−)에 걸지. -2 = 2호가 아래"
                           />
                           <span className="unit">호가</span>
                         </span>
                       </div>
+                      <p className="hint">
+                        기준선에서 몇 호가 아래(−)/위(+)에 걸지. 예: -2 = 2호가 아래.
+                        호가 = 그 가격대의 최소 단위(2천원대 1원, 60만원대 1,000원)라 어느
+                        가격대든 "두 칸 아래"로 뜻이 같습니다.
+                      </p>
                     </>
                   )}
                 </>
@@ -957,60 +1011,11 @@ export function StrategyPanel() {
               </div>
             </Card>
 
-            <Card title="매수 주문조건">
-              <div className="kv">
-                <span className="k">주문 구분</span>
-                <span className="v">
-                  <span className="radios" style={{ marginLeft: 'auto' }}>
-                    <label>
-                      <input
-                        type="radio"
-                        checked={draft.priceType === 'limit'}
-                        onChange={() => set('priceType', 'limit')}
-                      />
-                      보통가(지정가)
-                    </label>
-                    <label>
-                      <input
-                        type="radio"
-                        checked={draft.priceType === 'market'}
-                        onChange={() => set('priceType', 'market')}
-                      />
-                      시장가
-                    </label>
-                  </span>
-                </span>
-              </div>
-              <div className="kv">
-                <span className="k">신용 구분</span>
-                <span className="v">
-                  <span className="radios" style={{ marginLeft: 'auto' }}>
-                    {(['cash', 'credit'] as CreditType[]).map((c) => (
-                      <label key={c}>
-                        <input type="radio" checked={draft.credit === c} onChange={() => set('credit', c)} />
-                        {c === 'cash' ? '현금' : '신용'}
-                      </label>
-                    ))}
-                  </span>
-                </span>
-              </div>
-              <div className="kv">
-                <span className="k">주문수량</span>
-                <span className="v">
-                  <select
-                    style={{ flex: 'none', width: 84 }}
-                    value={draft.qtyType}
-                    onChange={(e) => set('qtyType', e.target.value as 'shares' | 'amount')}
-                  >
-                    <option value="shares">수량</option>
-                    <option value="amount">금액</option>
-                  </select>
-                  <input className="amt" value={draft.qty} onChange={(e) => set('qty', e.target.value)} />
-                  <span className="unit">{draft.qtyType === 'shares' ? '주' : '원'}</span>
-                </span>
-              </div>
-              <p className="hint">주문은 나가지 않습니다 — 전략 정의 저장용.</p>
-            </Card>
+            {/* "매수 주문조건" 카드는 삭제했다 (오너 지적 2026-08-05).
+                — 지정가/시장가: 이 전략은 미리 걸어둔 지정가로 받는 방식이라 선택지 자체가 없다.
+                — 주문수량: 분할 차수의 비중(%)과 역할이 겹쳤다. 손익 계산용 수량은 ③으로 이동.
+                — 신용 구분: 주문 전송이 없는 지금 단계(CLAUDE.md 단계 6 이전)에는 무의미.
+                실주문 조건은 모의투자 주문을 붙이는 새 ADR 때 다시 만든다. */}
 
             {msg && <p className="hint">{msg}</p>}
           </>
@@ -1024,9 +1029,13 @@ export function StrategyPanel() {
                 <div className="kv">
                   <span className="k">종목</span>
                   <span className="v">
-                    {sym ? `${sym.name} (${sym.code})` : '① 검색 결과에서 클릭'}
+                    {SIM_SYM.name} ({SIM_SYM.code}) — 대표 종목 고정
                   </span>
                 </div>
+                <p className="hint">
+                  전략 설계가 어떻게 동작하는지 이 종목으로 확인합니다. 실제 종목 적용은
+                  시뮬레이션이 아니라 백테스트에서 합니다.
+                </p>
                 <div className="kv">
                   <span className="k">기준일</span>
                   <span className="v">
@@ -1038,20 +1047,43 @@ export function StrategyPanel() {
                     />
                   </span>
                 </div>
+                {/* 급등 기준은 원래 ① 조건검색식 소관이다 (오너 지적 2026-08-05 — "급등
+                    퍼센테이지는 조건 검색식이지"). 다만 앵커(피보나치 시작점)를 찾는 데도
+                    같은 값이 필요해서, ① 개편 전까지 여기서 입력받는다. 개편 후 ①에서 물려받는다. */}
                 <div className="kv">
-                  <span className="k">급등 창</span>
+                  <span className="k">급등 찾는 기간</span>
                   <span className="v">
                     <input className="amt" placeholder="20" value={simWindow} onChange={(e) => setSimWindow(e.target.value)} />
                     <span className="unit">거래일</span>
                   </span>
                 </div>
                 <div className="kv">
-                  <span className="k">최소 상승률</span>
+                  <span className="k">급등 최소 상승률</span>
                   <span className="v">
                     <input className="amt" placeholder="30" value={simGain} onChange={(e) => setSimGain(e.target.value)} />
                     <span className="unit">%</span>
                   </span>
                 </div>
+                <p className="hint">
+                  이 기간 안에 이만큼 오른 파동을 찾아 그 시작 시가~고점을 피보나치 기준(앵커)으로
+                  잡습니다. 급등 기준은 ① 조건검색 개편 후 검색식에서 물려받을 예정.
+                </p>
+                <div className="kv">
+                  <span className="k">모의 수량</span>
+                  <span className="v">
+                    <select
+                      style={{ flex: 'none', width: 84 }}
+                      value={draft.qtyType}
+                      onChange={(e) => set('qtyType', e.target.value as 'shares' | 'amount')}
+                    >
+                      <option value="shares">수량</option>
+                      <option value="amount">금액</option>
+                    </select>
+                    <input className="amt" placeholder="100" value={draft.qty} onChange={(e) => set('qty', e.target.value)} />
+                    <span className="unit">{draft.qtyType === 'shares' ? '주' : '원'}</span>
+                  </span>
+                </div>
+                <p className="hint">넣으면 체결 수량·손익까지 계산됩니다. 실제 주문은 나가지 않습니다.</p>
                 <div className="form-row" style={{ marginTop: 8 }}>
                   <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
                     {simRunning ? '계산 중…' : '시뮬레이션 실행'}
@@ -1162,6 +1194,8 @@ export function StrategyPanel() {
             </div>
             <div className="sim-chart">
               <ProChart ref={proRef} />
+              {/* 하단 결과 스트립 — "결국 결과가 어떻게 될거다"까지 차트 밑에서 (오너 지시) */}
+              {simResult && <SimFoot r={simResult} />}
             </div>
           </div>
         )}
