@@ -50,9 +50,9 @@ from src.layer3_strategy.case_overlay import (
     strategies_payload,
 )
 from src.layer3_strategy.entry_levels import average_entry, buy_levels, sell_levels
+from src.layer3_strategy.screening import ScreeningRule, screen
 from src.layer3_strategy.surge import build_anchor
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
-from src.layer3_strategy.screening import ScreeningRule, screen
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
 # Amount(거래대금)는 KLineChart 의 turnover 로. Stocks(상장주식수)는 액면분할 감지용(ADR-0006).

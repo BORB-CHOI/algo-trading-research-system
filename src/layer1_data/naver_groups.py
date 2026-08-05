@@ -7,10 +7,13 @@ m.stock.naver.com 비공식 API. 백테스트·매매 판단에 쓰지 않는다
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
 TIMEOUT = 8
@@ -57,26 +60,31 @@ class GroupCollector:
     def _build(self) -> None:
         m: dict[str, list[str]] = {}
         try:
-            for g in _groups(self._base):
-                name = str(g.get("name", "")).strip()
-                no = g.get("no")
-                if not name or no is None:
-                    continue
-                try:
-                    for code in _members(self._base, int(no), int(g.get("totalCount") or 0)):
-                        m.setdefault(code, []).append(name)
-                except requests.RequestException:
-                    continue  # 그룹 하나 실패는 건너뛴다 — 전체를 버리지 않는다
-                time.sleep(0.05)
-        except requests.RequestException:
-            if not m:
-                with self._lock:
-                    self._state["building"] = False
-                return
-        with self._lock:
-            self._state["map"] = m
-            self._state["at"] = time.time()
-            self._state["building"] = False
+            try:
+                for g in _groups(self._base):
+                    name = str(g.get("name", "")).strip()
+                    no = g.get("no")
+                    if not name or no is None:
+                        continue
+                    try:
+                        for code in _members(self._base, int(no), int(g.get("totalCount") or 0)):
+                            m.setdefault(code, []).append(name)
+                    except requests.RequestException:
+                        # 그룹 하나 실패는 건너뛴다 — 전체를 버리지 않는다
+                        logger.warning("네이버 그룹 수집 실패(건너뜀): %s — %s", self._base, name)
+                        continue
+                    time.sleep(0.05)
+            except Exception:  # 비공식 API — 포맷 변경(파싱 오류) 포함 예상 밖 예외도 흡수
+                # 조용히 삼키면 ready=False 인 이유를 추적할 수 없다 — 원인은 로그로 남긴다
+                logger.warning("네이버 그룹 수집 중단: %s", self._base, exc_info=True)
+                if not m:
+                    return
+            with self._lock:
+                self._state["map"] = m
+                self._state["at"] = time.time()
+        finally:
+            with self._lock:
+                self._state["building"] = False
 
     def map(self) -> tuple[dict[str, list[str]], bool]:
         """(code → 그룹명 목록, ready). 처음/만료 시 백그라운드로 재수집."""
