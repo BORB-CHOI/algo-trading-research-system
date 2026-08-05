@@ -30,6 +30,7 @@ import {
   deleteStrategy,
   emptyDraft,
   loadStrategies,
+  newBuyStage,
   parseParams,
   saveStrategy,
   toDraft,
@@ -50,6 +51,21 @@ const LIMIT = 100
 
 // ③ 시뮬레이션 대표 종목 — 오너 지시(2026-08-05)로 고정. 전략 설계 확인용 기준 종목이다.
 const SIM_SYM = { code: '005930', name: '삼성전자', market: 'KOSPI' } as const
+
+// ③ 예시 기본값 — 지위는 PLACEHOLDER 와 같다 (ADR-0009: 서버 하드코딩 금지, UI 예시는 허용).
+// 실행 시 **빈 항목만** 이 값으로 채우고, 채운 값은 전부 화면(분할 카드·메시지)에 보인다.
+// "실행 버튼을 누르면 무조건 예시가 보여야 한다"(오너) — 빈 폼 때문에 실행을 막지 않는다.
+const SIM_EXAMPLE = {
+  window: 20,
+  gainPct: 30,
+  tolerancePct: 1.5,
+  qtyShares: 100,
+  buy: [
+    { ratio: 0.382, weight: 33 },
+    { ratio: 0.5, weight: 33 },
+    { ratio: 0.618, weight: 34 },
+  ],
+} as const
 
 const PLACEHOLDER: Record<string, string> = {
   short: '5',
@@ -477,14 +493,35 @@ export function StrategyPanel() {
   // 종목은 **대표 종목(삼성전자) 고정**이다 — ① 에서 뭘 골랐는지와 무관 (오너 지시 2026-08-05:
   // "내가 설계한 전략이 어떻게 되는지만 보고 싶은 거"). 이 화면은 전략 설계를 눈으로
   // 확인하는 자리지 종목 검증 자리가 아니다. 실전 적용은 백테스트 러너(ADR-0007) 몫.
+  //
+  // 입력은 **기준일 하나**다 (오너 지시). 급등 기준은 전략에 담긴 ① 검색식 조건에서 읽고,
+  // 나머지 빈 값은 예시값으로 채워서 실행이 절대 막히지 않게 한다 — 채운 값은 화면에 보인다.
   const proRef = useRef<ProChartHandle>(null)
   const [simDate, setSimDate] = useState('')
-  const [simWindow, setSimWindow] = useState('')
-  const [simGain, setSimGain] = useState('')
   const [simMsg, setSimMsg] = useState('')
   const [simRunning, setSimRunning] = useState(false)
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null)
   const [computed, setComputed] = useState<ComputedPrices>({})
+
+  // 급등 기준 — ① 조건검색식 소관이다 (오너: "급등 퍼센테이지는 조건 검색식이지").
+  // 전략이 담고 있는 검색식 조건에서 읽는다. 없으면 예시값(화면에 예시임을 명시).
+  const surge = useMemo(() => {
+    const cum = draft.conditions.find(
+      (c) => c.key === 'cum_change' && c.params['days'] > 0 && c.params['min'] > 0,
+    )
+    if (cum) {
+      return {
+        window: cum.params['days'],
+        gainPct: cum.params['min'],
+        src: `검색식 조건에서 — ${cum.params['days']}일 누적등락률 +${cum.params['min']}% 이상`,
+      }
+    }
+    const day = draft.conditions.find((c) => c.key === 'change_range' && c.params['min'] > 0)
+    if (day) {
+      return { window: 1, gainPct: day.params['min'], src: `검색식 조건에서 — 당일등락률 +${day.params['min']}% 이상` }
+    }
+    return { window: SIM_EXAMPLE.window, gainPct: SIM_EXAMPLE.gainPct, src: '' }
+  }, [draft.conditions])
 
   // 최신 결과를 ref 로도 들고 있는다 — 탭 재진입 효과가 simResult 를 deps 에 넣으면
   // 실행할 때마다 showSymbol(데이터 재로드)이 돌아 줌이 풀리기 때문이다.
@@ -502,24 +539,36 @@ export function StrategyPanel() {
   }, [step])
 
   async function runSimulation() {
-    const w = Number(simWindow)
-    const g = Number(simGain)
-    const tol = Number(draft.roundTolerancePct)
-    if (!Number.isInteger(w) || w < 1) return setSimMsg('[급등 창] 1 이상의 정수(거래일)를 입력하세요.')
-    if (!(g > 0)) return setSimMsg('[최소 상승률] 0보다 큰 %를 입력하세요.')
-    if (!(tol > 0)) return setSimMsg('[라운드 허용폭] 0보다 큰 %를 입력하세요 (② 분할 카드).')
-    if (!draft.buy.some((b) => b.enabled && b.ratio > 0)) {
-      return setSimMsg('분할 매수 차수를 1개 이상 켜고 되돌림을 입력하세요 (② 매매전략).')
+    // 빈 값 때문에 실행을 막지 않는다 — 예시값으로 채우고, 채운 사실을 메시지로 알린다.
+    const filled: string[] = []
+
+    let buy = draft.buy
+    if (!buy.some((b) => b.enabled && b.ratio > 0 && b.ratio < 1 && b.weight > 0)) {
+      buy = SIM_EXAMPLE.buy.map((b) => newBuyStage(b.ratio, b.weight))
+      set('buy', buy)
+      filled.push('분할 매수 3차(38.2/50/61.8%)')
     }
+
+    let tol = Number(draft.roundTolerancePct)
+    if (!(tol > 0)) {
+      tol = SIM_EXAMPLE.tolerancePct
+      set('roundTolerancePct', String(tol))
+      filled.push(`라운드 허용폭 ${tol}%`)
+    }
+
+    const hasQty = Number(draft.qty) > 0
+    const qty = hasQty ? Number(draft.qty) : SIM_EXAMPLE.qtyShares
+    if (!hasQty) filled.push(`수량 ${SIM_EXAMPLE.qtyShares}주`)
+
     setSimRunning(true)
     setSimMsg('계산 중…')
     try {
       const res = await postSimulate({
         code: SIM_SYM.code,
         end: simDate || undefined,
-        window: w,
-        min_gain_pct: g,
-        buy: draft.buy.map((b) => ({
+        window: surge.window,
+        min_gain_pct: surge.gainPct,
+        buy: buy.map((b) => ({
           id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled, price_override: b.priceOverride,
         })),
         sell: draft.sell.map((s) => ({
@@ -527,9 +576,8 @@ export function StrategyPanel() {
         })),
         sell_basis: draft.sellBasis,
         round_tolerance_pct: tol,
-        // ② 주문수량이 있으면 체결 수량·손익까지 계산된다
-        qty: Number(draft.qty) > 0 ? Number(draft.qty) : undefined,
-        qty_type: draft.qtyType,
+        qty,
+        qty_type: hasQty ? draft.qtyType : 'shares',
         stop: draft.stopEnabled
           ? {
               enabled: true,
@@ -544,7 +592,7 @@ export function StrategyPanel() {
       setSimResult(res)
       setComputed(res.computed)
       proRef.current?.applySimulation({ lines: res.lines, fills: res.fills, series: res.series })
-      setSimMsg('')
+      setSimMsg(filled.length ? `예시값 사용: ${filled.join(' · ')}` : '')
     } catch (e) {
       setSimResult(null)
       proRef.current?.applySimulation(null)
@@ -1003,12 +1051,7 @@ export function StrategyPanel() {
                   )}
                 </>
               )}
-              <p className="hint">목표가·손절선·체결 마커는 ③ 시뮬레이션에서 본다.</p>
-              <div className="form-row">
-                <button style={{ flex: 1 }} onClick={() => setStep('sim')}>
-                  ③ 시뮬레이션에서 확인
-                </button>
-              </div>
+              <p className="hint">목표가·손절선·체결 마커는 ③ 시뮬레이션 탭에서 본다.</p>
             </Card>
 
             {/* "매수 주문조건" 카드는 삭제했다 (오너 지적 2026-08-05).
@@ -1025,17 +1068,30 @@ export function StrategyPanel() {
         {step === 'sim' && (
           <div className="sim-split">
             <div className="sim-side">
-              <Card title="시뮬레이션" sub="전략 1호 — 급등 앵커 + 분할">
+              <Card title="시뮬레이션" sub={`${SIM_SYM.name} 고정 — 전략 1호`}>
+                {/* 입력은 전략 선택 + 기준일뿐이다 (오너: "기준일만 넣어").
+                    급등 기준은 전략의 ① 검색식 조건에서 읽고, 빈 값은 예시로 채워 실행한다. */}
                 <div className="kv">
-                  <span className="k">종목</span>
+                  <span className="k">전략</span>
                   <span className="v">
-                    {SIM_SYM.name} ({SIM_SYM.code}) — 대표 종목 고정
+                    <select
+                      style={{ flex: 1 }}
+                      value={saved[name] ? name : ''}
+                      onChange={(e) => {
+                        const n = e.target.value
+                        if (n && saved[n]) {
+                          setName(n)
+                          setDraft(toDraft(saved[n]))
+                        }
+                      }}
+                    >
+                      <option value="">지금 편집 중인 값 {Object.keys(saved).length === 0 ? '(저장된 전략 없음)' : ''}</option>
+                      {Object.keys(saved).map((n) => (
+                        <option key={n} value={n}>{n}</option>
+                      ))}
+                    </select>
                   </span>
                 </div>
-                <p className="hint">
-                  전략 설계가 어떻게 동작하는지 이 종목으로 확인합니다. 실제 종목 적용은
-                  시뮬레이션이 아니라 백테스트에서 합니다.
-                </p>
                 <div className="kv">
                   <span className="k">기준일</span>
                   <span className="v">
@@ -1043,47 +1099,18 @@ export function StrategyPanel() {
                       type="date"
                       value={simDate}
                       onChange={(e) => setSimDate(e.target.value)}
-                      title="빈칸 = 최신 거래일. 백테스트 재현 시 과거 날짜를 준다."
+                      title="빈칸 = 최신 거래일. 과거 날짜를 주면 그 시점을 재현한다."
                     />
                   </span>
                 </div>
-                {/* 급등 기준은 원래 ① 조건검색식 소관이다 (오너 지적 2026-08-05 — "급등
-                    퍼센테이지는 조건 검색식이지"). 다만 앵커(피보나치 시작점)를 찾는 데도
-                    같은 값이 필요해서, ① 개편 전까지 여기서 입력받는다. 개편 후 ①에서 물려받는다. */}
                 <div className="kv">
-                  <span className="k">급등 찾는 기간</span>
-                  <span className="v">
-                    <input className="amt" placeholder="20" value={simWindow} onChange={(e) => setSimWindow(e.target.value)} />
-                    <span className="unit">거래일</span>
-                  </span>
-                </div>
-                <div className="kv">
-                  <span className="k">급등 최소 상승률</span>
-                  <span className="v">
-                    <input className="amt" placeholder="30" value={simGain} onChange={(e) => setSimGain(e.target.value)} />
-                    <span className="unit">%</span>
-                  </span>
+                  <span className="k">급등 기준</span>
+                  <span className="v">최근 {surge.window}거래일 +{surge.gainPct}%</span>
                 </div>
                 <p className="hint">
-                  이 기간 안에 이만큼 오른 파동을 찾아 그 시작 시가~고점을 피보나치 기준(앵커)으로
-                  잡습니다. 급등 기준은 ① 조건검색 개편 후 검색식에서 물려받을 예정.
+                  {surge.src ||
+                    '검색식에 등락률 조건이 없어 예시값입니다. 급등 기준(며칠·몇 %)은 ① 조건검색식에서 정합니다.'}
                 </p>
-                <div className="kv">
-                  <span className="k">모의 수량</span>
-                  <span className="v">
-                    <select
-                      style={{ flex: 'none', width: 84 }}
-                      value={draft.qtyType}
-                      onChange={(e) => set('qtyType', e.target.value as 'shares' | 'amount')}
-                    >
-                      <option value="shares">수량</option>
-                      <option value="amount">금액</option>
-                    </select>
-                    <input className="amt" placeholder="100" value={draft.qty} onChange={(e) => set('qty', e.target.value)} />
-                    <span className="unit">{draft.qtyType === 'shares' ? '주' : '원'}</span>
-                  </span>
-                </div>
-                <p className="hint">넣으면 체결 수량·손익까지 계산됩니다. 실제 주문은 나가지 않습니다.</p>
                 <div className="form-row" style={{ marginTop: 8 }}>
                   <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
                     {simRunning ? '계산 중…' : '시뮬레이션 실행'}
