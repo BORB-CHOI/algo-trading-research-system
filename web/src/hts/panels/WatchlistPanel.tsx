@@ -4,7 +4,7 @@ import useEmblaCarousel from 'embla-carousel-react'
 import { fetchQuotes, type Quote, type Symbol } from '../../api'
 import { notifyWatchlistChanged, onSymbolPick, onWatchlistChanged, pickSymbol, type SymbolPick } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
-import { Sparkline } from '../Sparkline'
+import { MiniCandles } from '../MiniCandles'
 import { SearchModal } from '../components/SearchModal'
 
 // 관심종목 — 그룹을 하나씩 갈아 끼우는 대신 [전체] 에서 모든 그룹을 접었다 폈다 하며 본다.
@@ -67,7 +67,7 @@ function Row(props: { it: SymbolPick; q: Quote | undefined; onDelete?: () => voi
         </small>
       </span>
       <span className="spark">
-        <Sparkline data={q?.spark} width={54} height={20} tone={cls as 'up' | 'down' | 'flat'} />
+        <MiniCandles data={q?.candles} width={54} height={20} />
       </span>
       <span className={`px num ${cls}`}>{q ? fmtPrice(q.close) : '-'}</span>
       <span className={`chg num ${cls}`}>
@@ -169,6 +169,9 @@ export function WatchlistPanel() {
 
   useEffect(() => {
     void refreshQuotes(visible.map((i) => i.code))
+    // 실시간 시세(네이버 폴링) — 서버 캐시 5초라 10초면 충분히 신선하다
+    const t = window.setInterval(() => void refreshQuotes(visible.map((i) => i.code)), 10_000)
+    return () => window.clearInterval(t)
   }, [visible, refreshQuotes])
 
   function save(next: Watchlist) {

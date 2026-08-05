@@ -19,11 +19,12 @@ def test_market_snapshot_shape() -> None:
     items = [it for g in groups for it in g["items"]]
     assert len(items) == sum(len(v) for _, v in GROUPS)
     for it in items:
-        assert set(it) == {"key", "name", "unit", "price", "chg", "asof", "spark"}
+        assert set(it) == {"key", "name", "unit", "price", "chg", "asof", "candles"}
     # 전부 실패면 소스가 깨진 것 — 최소 절반은 값이 있어야 한다
     assert sum(it["price"] is not None for it in items) >= len(items) // 2
-    # 미니차트용 최근 종가 — 값이 있는 항목은 2점 이상이라야 선이 그려진다
-    assert all(len(it["spark"]) >= 2 for it in items if it["price"] is not None)
+    # 미니 캔들차트 — 값이 있는 항목은 [O,H,L,C] 2개 이상이라야 그려진다
+    assert all(len(it["candles"]) >= 2 for it in items if it["price"] is not None)
+    assert all(len(c) == 4 for it in items for c in it["candles"])
 
 
 def test_market_news_shape() -> None:

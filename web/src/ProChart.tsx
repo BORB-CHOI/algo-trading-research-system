@@ -114,9 +114,10 @@ const OVERLAY_COLORS: Record<OverlayLine['kind'], string> = {
   anchor: '#2f6fed', // 베이스/신고가 기준선 — 점선
   buy: '#dd3c44', // 분할 매수 목표가 — 한국식 상승색(빨강)과 맞춘다
   sell: '#0062df', // 분할 매도 목표가 — 하락색(파랑)
+  stop: '#111827', // 손절선 — 매매선과 확실히 구분되는 진회색
 }
-// 매수·매도 목표가는 "여기서 실제로 산다"는 선이라 더 굵게 그려 참고선과 구분한다.
-const THICK_KINDS = new Set<OverlayLine['kind']>(['buy', 'sell'])
+// 매수·매도·손절은 "여기서 실제로 주문이 나간다"는 선이라 더 굵게 그린다.
+const THICK_KINDS = new Set<OverlayLine['kind']>(['buy', 'sell', 'stop'])
 const TOUCH_COLOR = '#d97706' // 레벨 근접(◆) 마커
 const VWAP_COLOR = '#7c3aed' // 앵커 VWAP — 피보나치/매매선과 겹치지 않는 보라
 
@@ -248,10 +249,11 @@ function createOverlayIndicator(): OverlayStore {
       forEachBarMark(c, fillsByTime, (f, x) => {
         const y = yAxis.convertToPixel(f.price)
         const buy = f.side === 'buy'
-        ctx.fillStyle = OVERLAY_COLORS[f.side]
+        const isStop = !buy && f.stage === 0 // stage 0 = 손절 체결
+        ctx.fillStyle = isStop ? OVERLAY_COLORS.stop : OVERLAY_COLORS[f.side]
         ctx.fillText(buy ? '▲' : '▼', x, buy ? y + 14 : y - 6)
         ctx.font = 'bold 9px sans-serif'
-        ctx.fillText(String(f.stage), x, buy ? y + 23 : y - 15)
+        ctx.fillText(isStop ? '손' : String(f.stage), x, buy ? y + 23 : y - 15)
         ctx.font = '11px sans-serif'
       })
 
@@ -527,6 +529,10 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
       if (pending) return // 드래그 중 연속 호출은 한 프레임에 하나로 합친다
       pending = requestAnimationFrame(() => {
         pending = 0
+        // 탭 전환으로 패널이 숨겨지면 크기가 0 이 된다 — 이때 리사이즈를 태우면
+        // 차트가 0px 기준으로 보이는 봉 수를 다시 잡아, 돌아올 때마다 확대돼 보인다.
+        const r = el.getBoundingClientRect()
+        if (r.width < 2 || r.height < 2) return
         window.dispatchEvent(new Event('resize'))
       })
     })

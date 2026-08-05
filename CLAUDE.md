@@ -9,6 +9,8 @@
   - 예) KIS Code Assistant MCP = 개발 시점 API 검색 도구로만 OK.
 - 금지: LLM/MCP가 BUY/SELL·포지션 크기·손절 라인을 결정하거나 주문을 전송하는 것.
   - `migusdn/KIS_MCP_Server` 등 **조회·주문을 수행하는 서드파티 KIS MCP는 실행 경로에 연결 ❌.**
+  - 예외(2026-08-05 오너): KIS 공식 트레이딩 MCP를 개발 세션에 **조회 전용**으로 연결 허용.
+    주문·정정·취소 도구 호출 금지, 연결되면 해당 도구를 settings 권한 deny 목록에 등록한다.
 - 근거: `PROJECT_GUIDELINES.md` §3.1(Layer 3 매매 = 결정론적 룰), §3.2(LLM은 ordinal 등급까지만),
   README "Group A 함정 #1(잘못된 도구 사용)". 매매 실행은 항상 결정론적 코드가 한다.
 

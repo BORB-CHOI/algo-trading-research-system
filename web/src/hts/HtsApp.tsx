@@ -10,7 +10,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { fetchMarket, type MarketItem, type Symbol } from '../api'
 import { onSymbolPick, pickSymbol, type SymbolPick } from './bus'
 import { chgClass, fmtChg } from './format'
-import { Sparkline } from './Sparkline'
+import { MiniCandles } from './MiniCandles'
 import { SymbolDrawer } from './SymbolDrawer'
 import { SearchModal } from './components/SearchModal'
 import { SymbolResults } from './components/SymbolResults'
@@ -158,8 +158,7 @@ function Ticker() {
             {it.price == null ? '-' : it.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
           </span>
           <span className={`c ${chgClass(it.chg)}`}>{fmtChg(it.chg)}</span>
-          {/* 티커에서는 당일 등락과 색을 맞춘다 — 30일 추세색이면 숫자와 어긋나 보인다 */}
-          <Sparkline data={it.spark} width={44} height={16} tone={chgClass(it.chg) as 'up' | 'down' | 'flat'} />
+          <MiniCandles data={it.candles} width={44} height={16} />
         </span>
       ))}
     </div>

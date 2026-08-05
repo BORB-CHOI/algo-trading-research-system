@@ -1,7 +1,7 @@
 // 조건검색식 저장소 — 전략과 분리해서 여러 개를 만들고 고쳐 쓴다.
 // 전략(2단계)은 여기 저장된 검색식 하나를 골라 매매기법을 붙인다.
 
-import type { SavedCondition, ScreenLogic } from './strategyStore'
+import { migrateConditions, type SavedCondition, type ScreenLogic } from './strategyStore'
 
 export const SCREEN_KEY = 'hts-screens'
 
@@ -14,7 +14,9 @@ export function loadScreens(): Screens {
     if (!raw || typeof raw !== 'object') return {}
     const out: Screens = {}
     for (const [name, s] of Object.entries(raw)) {
-      if (s && Array.isArray(s.conditions)) out[name] = { logic: s.logic ?? 'and', conditions: s.conditions }
+      if (s && Array.isArray(s.conditions)) {
+        out[name] = { logic: s.logic ?? 'and', conditions: migrateConditions(s.conditions) }
+      }
     }
     return out
   } catch {

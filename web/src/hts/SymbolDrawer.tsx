@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { fetchNews, fetchQuotes, type NewsItem, type Quote } from '../api'
 import { notifyWatchlistChanged, type SymbolPick } from './bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from './format'
-import { Sparkline } from './Sparkline'
+import { MiniCandles } from './MiniCandles'
 
 // 우측에서 밀려나오는 종목 요약. PC 는 폭이 남으니 차트를 가리지 않고 옆에 붙인다.
 // "차트 크게" 를 누르면 차트 패널로 넘긴다 — 상세는 차트가, 요약은 여기가 맡는다.
@@ -51,14 +51,18 @@ export function SymbolDrawer({ sym, onClose, onOpenChart }: Props) {
     setMsg('')
     setQ(null)
     setNews([])
-    void fetchQuotes([sym.code], true).then((r) => {
-      if (id === req.current) setQ(r.quotes[0] ?? null)
-    })
+    const loadQuote = () =>
+      void fetchQuotes([sym.code], true).then((r) => {
+        if (id === req.current) setQ(r.quotes[0] ?? null)
+      })
+    loadQuote()
+    const t = window.setInterval(loadQuote, 10_000) // 실시간 시세 폴링
     void fetchNews(sym.code, NEWS_N)
       .then((n) => {
         if (id === req.current) setNews(n)
       })
       .catch(() => {})
+    return () => window.clearInterval(t)
   }, [sym?.code])
 
   useEffect(() => {
@@ -93,10 +97,10 @@ export function SymbolDrawer({ sym, onClose, onOpenChart }: Props) {
           {diff != null && `${diff > 0 ? '▲' : '▼'} ${fmtPrice(Math.abs(diff))}`} ({fmtChg(q?.chg)})
         </div>
         <div style={{ margin: '10px 0 4px' }}>
-          <Sparkline data={q?.spark} width={300} height={78} dot />
+          <MiniCandles data={q?.candles} width={300} height={78} />
         </div>
         <p className="hint" style={{ textAlign: 'right', margin: 0 }}>
-          최근 30 거래일 종가
+          최근 30 거래일
         </p>
 
         <dl className="facts">

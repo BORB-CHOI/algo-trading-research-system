@@ -118,3 +118,14 @@ class TestRoundFiguresNear:
 def _trailing_zeros(n: int) -> int:
     s = str(int(n))
     return len(s) - len(s.rstrip("0"))
+
+
+def test_shift_ticks_basic_and_boundary() -> None:
+    from src.layer3_strategy.tick_size import shift_ticks
+
+    assert shift_ticks(10_000, 1) == 10_010
+    assert shift_ticks(10_000, -2) == 9_980
+    # 구간 경계: 50,000 위로는 100원, 아래로는 50원 단위
+    assert shift_ticks(50_000, 1) == 50_100
+    assert shift_ticks(50_000, -1) == 49_950
+    assert shift_ticks(50_000, 0) == 50_000

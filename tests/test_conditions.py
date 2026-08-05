@@ -156,14 +156,14 @@ def test_parse_short_must_be_less_than_long() -> None:
         parse_conditions([{"key": "golden_cross", "params": {"short": 20, "long": 5, "within": 3}}])
 
 
-def test_parse_lookback_capped_at_260() -> None:
+def test_parse_lookback_capped() -> None:
     ok = parse_conditions(
-        [{"key": "golden_cross", "params": {"short": 5, "long": 200, "within": 60}}]
+        [{"key": "new_high", "params": {"days": 250, "within": 250}}]
     )
-    assert required_lookback(ok) == 260
+    assert required_lookback(ok) == 500
     with pytest.raises(ValueError, match=str(MAX_LOOKBACK)):
         parse_conditions(
-            [{"key": "golden_cross", "params": {"short": 5, "long": 240, "within": 60}}]
+            [{"key": "new_high", "params": {"days": 400, "within": 200}}]
         )
 
 
@@ -221,16 +221,33 @@ def test_new_high_and_new_low() -> None:
         "B": [5.0, 6.0, 9.0, 4.0, 8.0],  # 직전 3일 최고 9 → 아님
         "C": [7.0, 8.0],  # 이력 부족 → 아님
     }
-    assert run([{"key": "new_high", "params": {"days": 3}}], closes) == {"A"}
+    assert run([{"key": "new_high", "params": {"days": 3, "within": 1}}], closes) == {"A"}
     lows = {"A": [5.0, 4.0, 3.0, 6.0, 2.0], "B": [5.0, 4.0, 3.0, 6.0, 4.0]}
-    assert run([{"key": "new_low", "params": {"days": 3}}], lows) == {"A"}
+    assert run([{"key": "new_low", "params": {"days": 3, "within": 1}}], lows) == {"A"}
+
+
+def test_new_high_within() -> None:
+    """이내(within): 기준일엔 신고가가 아니어도 최근 X일 안에 돌파했으면 잡힌다 — 눌림 검색용."""
+    closes = {
+        "A": [5.0, 6.0, 7.0, 9.0, 8.0],  # 어제 9 로 돌파 후 오늘 눌림
+        "B": [5.0, 6.0, 9.0, 8.0, 7.0],  # 돌파일이 3일 전 → within 2 밖
+    }
+    assert run([{"key": "new_high", "params": {"days": 3, "within": 1}}], closes) == set()
+    assert run([{"key": "new_high", "params": {"days": 3, "within": 2}}], closes) == {"A"}
 
 
 def test_gap_up() -> None:
     closes = {"A": [100.0, 120.0], "B": [100.0, 120.0]}
     opens = {"A": [100.0, 110.0], "B": [100.0, 102.0]}  # A 갭 +10%, B 갭 +2%
-    got = run([{"key": "gap_up", "params": {"min": 5}}], closes, opens=opens)
+    got = run([{"key": "gap_up", "params": {"min": 5, "within": 1}}], closes, opens=opens)
     assert got == {"A"}
+
+
+def test_gap_up_within() -> None:
+    closes = {"A": [100.0, 120.0, 118.0], "B": [100.0, 102.0, 101.0]}
+    opens = {"A": [100.0, 110.0, 119.0], "B": [100.0, 102.0, 101.0]}  # A 는 어제 +10% 갭
+    assert run([{"key": "gap_up", "params": {"min": 5, "within": 1}}], closes, opens=opens) == set()
+    assert run([{"key": "gap_up", "params": {"min": 5, "within": 2}}], closes, opens=opens) == {"A"}
 
 
 def test_consec_up_down() -> None:
@@ -376,14 +393,18 @@ def test_api_run_golden_cross_plus_amount() -> None:
     r = client.post("/api/screen/run", json=body)
     assert r.status_code == 200
     j = r.json()
-    assert set(j) == {"date", "total", "conditions", "avg_chg", "items"}
+    assert set(j) == {"date", "total", "conditions", "avg_chg", "themes_ready", "items"}
     assert j["conditions"] == 2
     assert len(j["items"]) <= 20
     amounts = [it["amount"] for it in j["items"]]
     assert amounts == sorted(amounts, reverse=True)  # 거래대금 내림차순
     assert all(a >= 100 * 1e8 for a in amounts)
     if j["items"]:
-        assert set(j["items"][0]) == {"code", "name", "market", "close", "chg", "amount", "marcap"}
+        it = j["items"][0]
+        assert set(it) == {
+            "code", "name", "market", "close", "chg", "amount", "marcap", "candles", "themes",
+        }
+        assert all(len(c) == 4 for c in it["candles"])  # [O,H,L,C]
 
 
 @pytest.mark.slow

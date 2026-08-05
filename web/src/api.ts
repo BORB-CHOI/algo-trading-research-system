@@ -26,10 +26,13 @@ export type ScreenItem = {
   chg: number | null // 직전 거래일 대비 등락률(%). 연초 첫 거래일 등은 null
   amount: number // 거래대금(원)
   marcap: number // 시총(원)
+  candles?: number[][] // 미니차트용 최근 [O,H,L,C] (표시 전용, 분할 미보정)
+  themes?: string[] // 네이버 테마명 (표시 전용)
 }
 
-// spark = 미니차트용 최근 종가, volume = 최신 거래일 거래량(주)
-export type Quote = ScreenItem & { spark?: number[]; volume?: number }
+// candles = 미니 캔들차트용 최근 [O,H,L,C], volume = 최신 거래일 거래량(주)
+// live = close·chg 가 네이버 실시간 시세인지 (false = 최신 일봉 종가)
+export type Quote = ScreenItem & { volume?: number; live?: boolean }
 
 export type QuotesResponse = {
   date: string | null
@@ -88,6 +91,7 @@ export type ScreenResponse = {
   total: number
   conditions?: number // 적용된 조건 수 (0 = 전체 종목)
   avg_chg?: number | null // 검색된 종목의 당일 평균 등락률(%)
+  themes_ready?: boolean // false = 테마 맵 백그라운드 수집 중
   items: ScreenItem[]
 }
 
@@ -239,9 +243,9 @@ export async function postSignals(req: SignalsRequest): Promise<SignalsResponse>
 export type OverlayLine = {
   price: number
   label: string // "38.2%" / "50,000 라운드" / "베이스" 등 우측 라벨
-  // buy/sell 은 시뮬레이션(POST /api/simulate)이 내는 분할 매수·매도 목표가다.
+  // buy/sell/stop 은 시뮬레이션(POST /api/simulate)이 내는 매매 목표가·손절가다.
   // 시각 전용이라는 점은 같지만 선 굵기·색을 달리해 "판단 대상"임을 구분한다.
-  kind: 'fib' | 'round' | 'anchor' | 'buy' | 'sell'
+  kind: 'fib' | 'round' | 'anchor' | 'buy' | 'sell' | 'stop'
 }
 
 export type OverlayTouch = {
@@ -293,6 +297,79 @@ export async function postOverlay(req: OverlayRequest): Promise<OverlayResponse>
   return postJson('/api/overlay', req)
 }
 
+// ── 전략 1호 시뮬레이션 (POST /api/simulate, ADR-0011) — 시각 전용 ──
+
+export type SimStagePayload = {
+  id: string
+  ratio?: number // 매수: 되돌림 비율(0~1)
+  rebound_pct?: number // 매도: 반등률(%)
+  weight: number
+  enabled: boolean
+  price_override?: number
+}
+
+export type SimulateRequest = {
+  code: string
+  end?: string
+  window: number // 급등 판정 창(거래일)
+  min_gain_pct: number // 급등 최소 상승률(%)
+  buy: SimStagePayload[]
+  sell: SimStagePayload[]
+  sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high'
+  round_tolerance_pct: number
+  qty?: number // ② 주문수량 — 주면 체결 내역(수량·손익)까지 온다
+  qty_type?: 'shares' | 'amount'
+  stop?: {
+    enabled: boolean
+    mode: 'pct' | 'support'
+    pct?: number
+    source?: 'avwap' | 'anchor_start' | 'custom'
+    custom_price?: number
+    tick_offset?: number // 지지저항 ±N호가
+  }
+}
+
+export type SimTrade = {
+  stage: number
+  time: string
+  price: number
+  shares: number
+  amount: number
+  pnl_pct?: number // 매도만
+  pnl?: number // 매도만
+}
+
+export type SimTrades = {
+  buys: SimTrade[]
+  sells: SimTrade[]
+  avg_entry: number | null
+  realized_pnl: number
+  remain_shares: number
+  last_close: number
+  unrealized_pnl: number
+}
+
+export type SimulateResponse = {
+  code: string
+  anchor: {
+    start_date: string
+    start_price: number
+    end_date: string
+    end_price: number
+    gain_pct: number
+    is_52w_high: boolean
+  }
+  computed: Record<string, number> // stage.id → 자동 계산 목표가
+  lines: OverlayLine[]
+  fills: OverlayFill[]
+  series: OverlaySeries[]
+  trades: SimTrades | null // qty 를 준 경우만
+}
+
+export async function postSimulate(req: SimulateRequest): Promise<SimulateResponse> {
+  return postJson('/api/simulate', req)
+}
+
 export async function fetchCandles(
   code: string,
   start?: string,
@@ -333,7 +410,7 @@ export type MarketItem = {
   price: number | null
   chg: number | null
   asof: string | null
-  spark: number[]
+  candles: number[][] // [O,H,L,C]
 }
 
 export type MarketGroup = { group: string; items: MarketItem[] }
@@ -360,7 +437,7 @@ export type IndexBoard = {
   prev_close: number | null
   chg: number | null
   diff: number | null
-  intraday: { t: string; v: number }[]
+  intraday: { t: string; o: number; h: number; l: number; c: number }[]
   flow: IndexFlow | null
 }
 

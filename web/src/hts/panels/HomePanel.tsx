@@ -13,7 +13,7 @@ import {
 import { pickSymbol } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
 import { IntradayChart } from '../IntradayChart'
-import { Sparkline } from '../Sparkline'
+import { MiniCandles } from '../MiniCandles'
 
 const REFRESH_MS = 60_000
 const NEWS_N = 8
@@ -227,7 +227,7 @@ export function HomePanel() {
                     <div className="num v">{fmtQuote(it.price, it.unit)}</div>
                     <div className="r">
                       <span className={`num ${chgClass(it.chg)}`}>{fmtChg(it.chg)}</span>
-                      <Sparkline data={it.spark} width={78} height={28} dot />
+                      <MiniCandles data={it.candles} width={78} height={28} />
                     </div>
                     <div className="asof">{it.asof ?? '-'}</div>
                   </div>

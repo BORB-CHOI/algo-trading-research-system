@@ -37,14 +37,20 @@ from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer1_data.market import index_boards, market_snapshot
 from src.layer1_data.news import market_news, stock_news
+from src.layer1_data.quotes_rt import realtime_quotes
 from src.layer1_data.recent import merge_with_marcap, recent_meta
+from src.layer1_data.themes import theme_map
 from src.layer3_strategy import conditions as cond_registry
+from src.layer3_strategy.avwap import anchored_vwap
 from src.layer3_strategy.case_overlay import (
     STRATEGIES,
     Strategy,
     parse_params,
     strategies_payload,
 )
+from src.layer3_strategy.entry_levels import average_entry, buy_levels, sell_levels
+from src.layer3_strategy.surge import build_anchor
+from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 from src.layer3_strategy.screening import ScreeningRule, screen
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
@@ -157,7 +163,10 @@ def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
 
 
 # 조건검색은 시총·소속부까지 필요해 캔들 캐시와 컬럼을 분리한다. Stocks 는 등락률 분할 보정용.
-_SCREEN_COLS = ["Date", "Code", "Name", "Market", "Dept", "Close", "Volume", "Amount", "Marcap", "Stocks"]
+_SCREEN_COLS = [
+    "Date", "Code", "Name", "Market", "Dept",
+    "Open", "High", "Low", "Close", "Volume", "Amount", "Marcap", "Stocks",
+]
 
 
 @lru_cache(maxsize=4)
@@ -461,6 +470,10 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
     df = _load_year_screen(year)
     if req.date:
         df = df[df["Date"] <= pd.Timestamp(req.date)]
+    else:
+        # 기본 기준일 = 마지막 완결 거래일. 장중(오늘) 보충 데이터로 조건을 평가하면
+        # 거래대금 등이 반나절치라 결과가 왜곡된다 — 오너 지시(2026-08-05): 전날 기준.
+        df = df[df["Date"] < pd.Timestamp.today().normalize()]
     if df.empty:
         raise HTTPException(status_code=503, detail=f"{req.date} 이전 거래일 데이터가 없습니다.")
     base_date = df["Date"].max()  # 기준일이 휴장일이면 직전 거래일로
@@ -480,12 +493,15 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
     chg = _change_vs_prev(year, base_date)
     hit_chgs = [c for c in (chg.get(str(i)) for i in hits.index) if c is not None]
     hits = hits.head(req.limit)
+    candles = _candle_map(year, {str(i) for i in hits.index}, years, base_date)
+    themes, themes_ready = theme_map()
     return {
         "date": base_date.strftime("%Y-%m-%d"),
         "total": total,
         "conditions": len(parsed),
         # 검색된 종목들의 당일 평균 등락률 — 검색식이 오늘 얼마나 먹혔는지 한 줄 요약
         "avg_chg": (sum(hit_chgs) / len(hit_chgs)) if hit_chgs else None,
+        "themes_ready": themes_ready,
         "items": [
             {
                 "code": str(r.Index),
@@ -495,6 +511,8 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
                 "chg": chg.get(str(r.Index)),
                 "amount": float(r.Amount),
                 "marcap": float(r.Marcap),
+                "candles": candles.get(str(r.Index), []),
+                "themes": themes.get(str(r.Index), []),
             }
             for r in hits.itertuples()
         ],
@@ -504,14 +522,16 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
 _SPARK_N = 30
 
 
-def _spark_map(year: int, codes: set[str], years: list[int]) -> dict[str, list[float]]:
-    """미니차트용 최근 종가 배열. 표시 전용이라 분할 보정은 하지 않는다."""
+def _recent_rows(year: int, codes: set[str], years: list[int], base_date: pd.Timestamp | None = None) -> pd.DataFrame:
+    """codes 의 최근 _SPARK_N 거래일 행. 표시 전용이라 분할 보정은 하지 않는다."""
     frames = []
     have = 0
     for y in range(year, years[0] - 1, -1):
         if y not in years:
             continue
         df = _load_year_screen(y)
+        if base_date is not None:
+            df = df[df["Date"] <= base_date]
         sub = df[df["Code"].isin(codes)]
         if sub.empty:
             continue
@@ -520,10 +540,23 @@ def _spark_map(year: int, codes: set[str], years: list[int]) -> dict[str, list[f
         if have >= _SPARK_N:
             break
     if not frames:
+        return pd.DataFrame(columns=_SCREEN_COLS)
+    return pd.concat(frames, ignore_index=True).sort_values("Date")
+
+
+def _candle_map(
+    year: int, codes: set[str], years: list[int], base_date: pd.Timestamp
+) -> dict[str, list[list[float]]]:
+    """미니 캔들차트용 [O,H,L,C] 배열. 기준일까지만 — 검색 기준일과 차트를 일치시킨다."""
+    all_ = _recent_rows(year, codes, years, base_date)
+    if all_.empty:
         return {}
-    all_ = pd.concat(frames, ignore_index=True).sort_values("Date")
+    all_ = all_.dropna(subset=["Open", "High", "Low", "Close"])
     return {
-        str(code): [float(v) for v in g["Close"].tail(_SPARK_N)]
+        str(code): [
+            [float(r.Open), float(r.High), float(r.Low), float(r.Close)]
+            for r in g.tail(_SPARK_N).itertuples()
+        ]
         for code, g in all_.groupby("Code")
     }
 
@@ -531,7 +564,7 @@ def _spark_map(year: int, codes: set[str], years: list[int]) -> dict[str, list[f
 @app.get("/api/quotes")
 def api_quotes(
     codes: str = Query(..., description="쉼표로 구분한 종목코드 목록 (예: 005930,000660)"),
-    spark: bool = Query(False, description="미니차트용 최근 종가 배열 포함"),
+    spark: bool = Query(False, description="미니 캔들차트용 최근 [O,H,L,C] 배열 포함"),
 ) -> dict:
     """관심종목 패널용 시세 스냅샷 — 최신 거래일 종가·등락률·거래대금·시총."""
     wanted = [c.strip().zfill(6) for c in codes.split(",") if c.strip()][:100]
@@ -542,24 +575,27 @@ def api_quotes(
     base_date = df["Date"].max()
     chg = _change_vs_prev(years[-1], base_date)
     d0 = df[df["Date"] == base_date].set_index("Code")
-    sparks = _spark_map(years[-1], set(wanted), years) if spark else {}
+    cmap = _candle_map(years[-1], set(wanted), years, base_date) if spark else {}
+    rt = realtime_quotes(wanted)  # 표시용 실시간 현재가 — 실패 종목은 일봉 값 폴백
     quotes = []
     for code in wanted:
         if code not in d0.index:
             continue
         r = d0.loc[code]
+        live = rt.get(code)
         q = {
             "code": code,
             "name": str(r["Name"]),
             "market": str(r["Market"]),
-            "close": float(r["Close"]),
-            "chg": chg.get(code),
+            "close": float(live["price"]) if live else float(r["Close"]),
+            "chg": live["chg"] if live and live.get("chg") is not None else chg.get(code),
             "volume": float(r["Volume"]),
             "amount": float(r["Amount"]),
             "marcap": float(r["Marcap"]),
+            "live": bool(live),
         }
         if spark:
-            q["spark"] = sparks.get(code, [])
+            q["candles"] = cmap.get(code, [])
         quotes.append(q)
     return {"date": base_date.strftime("%Y-%m-%d"), "quotes": quotes}
 
@@ -780,3 +816,257 @@ def api_overlay(req: OverlayRequest) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"code": req.code.strip().zfill(6), "strategy": strat.key, **result}
+
+
+# ─────────────────────────────────────────────────────────────
+# 전략 1호 시뮬레이션 (ADR-0011, BORB-52) — 시각 전용, 주문 아님
+# ─────────────────────────────────────────────────────────────
+
+
+class SimStage(BaseModel):
+    id: str
+    ratio: float | None = None  # 매수: 되돌림 비율(0~1)
+    rebound_pct: float | None = None  # 매도: 반등률(%)
+    weight: float = 0
+    enabled: bool = True
+    price_override: float | None = None
+
+
+class SimStop(BaseModel):
+    """손절 정의 — 평단 대비 % 또는 지지저항(±N호가). 전부 데이터(ADR-0009)."""
+
+    enabled: bool = False
+    mode: str = "pct"  # pct(평단 -%) | support(지지저항 기준)
+    pct: float | None = None  # mode=pct: 평단에서 몇 % 아래
+    source: str = "avwap"  # mode=support: avwap | anchor_start | custom
+    custom_price: float | None = None
+    tick_offset: int = 0  # 지지저항에서 ±N호가 (음수 = 아래)
+
+
+class SimulateRequest(BaseModel):
+    code: str
+    end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    window: int  # 급등 판정 창(거래일)
+    min_gain_pct: float  # 급등 최소 상승률(%)
+    buy: list[SimStage] = Field(default_factory=list)
+    sell: list[SimStage] = Field(default_factory=list)
+    sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high
+    round_tolerance_pct: float
+    # ② 주문수량 — 주면 체결 내역에 수량·금액·손익까지 계산한다 (표시 전용, 비용 미포함)
+    qty: float | None = None
+    qty_type: str = "shares"  # shares(주) | amount(원)
+    stop: SimStop | None = None
+
+
+@app.post("/api/simulate")
+def api_simulate(req: SimulateRequest) -> dict:
+    """전략 1호(급등 앵커 피보나치 + 분할) 시뮬레이션 — 앵커·목표가·체결 마커·앵커 VWAP.
+
+    **시각화 전용 결정론 계산.** 주문 전송·매매 판단 없음(CLAUDE.md). 모든 전략 숫자는
+    요청에서 받는다(ADR-0009). end 를 기준일로 주면 그 시점까지만 본다(look-ahead 방지).
+    """
+    code = req.code.strip().zfill(6)
+    end_ts = pd.Timestamp(req.end) if req.end else pd.Timestamp.now().normalize()
+    # 52주 신고가 판정 + 급등 탐색이 1년 이상을 봐야 하므로 2년 치를 읽는다.
+    start = (end_ts - pd.Timedelta(days=365 * 2)).strftime("%Y-%m-%d")
+    df = get_candles(code, start, req.end, adjust=True)
+    if df.empty:
+        raise HTTPException(status_code=404, detail=f"'{code}' 데이터가 없습니다.")
+    try:
+        anchor = build_anchor(df, window=req.window, min_gain_pct=req.min_gain_pct)
+    except ValueError as e:  # 급등 없음 — 메시지에 실제 최대 상승률 포함(한국어)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    buys = sorted(
+        (s for s in req.buy if s.enabled and s.ratio is not None and 0 < s.ratio < 1),
+        key=lambda s: s.ratio,
+    )
+    sells = sorted(
+        (s for s in req.sell if s.enabled and s.rebound_pct is not None and s.rebound_pct > 0),
+        key=lambda s: s.rebound_pct,
+    )
+
+    computed: dict[str, int] = {}
+    lines: list[dict] = [
+        {"price": anchor.start_price, "label": "급등 시작(시가)", "kind": "anchor"},
+        {"price": anchor.end_price, "label": "신고가" if anchor.is_52w_high else "파동 고점(52주 아님)", "kind": "anchor"},
+    ]
+    for s in buys:  # 되돌림 원값 — 목표가(라운드)와 근거 레벨을 함께 보여준다
+        lv = anchor.end_price - s.ratio * anchor.span
+        lines.append({"price": lv, "label": f"{s.ratio * 100:.1f}%", "kind": "fib"})
+
+    try:
+        blevels = (
+            buy_levels(
+                anchor.start_price,
+                anchor.end_price,
+                ratios=[s.ratio for s in buys],
+                tolerance_pct=req.round_tolerance_pct,
+            )
+            if buys
+            else []
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # 체결 스캔은 파동 고점 다음 날부터 — 고점 이전 하락은 이 전략의 눌림이 아니다.
+    after = df.loc[df["Date"] > anchor.end_date].reset_index(drop=True)
+    fills: list[dict] = []
+    buy_fills: list[tuple[float, float]] = []  # (가격, 비중) — 평단 계산용
+    lowest_fill: float | None = None
+    last_fill_date = None
+    # ② 주문수량 → 차수별 수량. 비중이 없으면 균등 분할. 주수는 항상 내림(초과 매수 방지).
+    total_bw = sum(s.weight for s in buys if s.weight > 0)
+    trade_buys: list[dict] = []
+    trade_sells: list[dict] = []
+    for stage, level in zip(buys, blevels, strict=True):
+        computed[stage.id] = level.price
+        eff = stage.price_override if stage.price_override is not None else level.price
+        lines.append({"price": eff, "label": f"매수 {level.tranche}차", "kind": "buy"})
+        hit = after.loc[after["Low"] <= eff]
+        if not hit.empty:
+            d0 = hit.iloc[0]
+            fills.append({"time": d0["Date"].strftime("%Y-%m-%d"), "price": float(eff), "side": "buy", "stage": level.tranche})
+            buy_fills.append((float(eff), stage.weight or 1.0))
+            lowest_fill = eff if lowest_fill is None else min(lowest_fill, eff)
+            last_fill_date = d0["Date"] if last_fill_date is None else max(last_fill_date, d0["Date"])
+            if req.qty:
+                frac = (stage.weight / total_bw) if total_bw > 0 else 1 / len(buys)
+                shares = int(req.qty * frac) if req.qty_type == "shares" else int(req.qty * frac / eff)
+                trade_buys.append({
+                    "stage": level.tranche, "time": fills[-1]["time"], "price": float(eff),
+                    "shares": shares, "amount": shares * float(eff),
+                })
+
+    if sells:
+        if req.sell_basis == "anchor_high":
+            basis = anchor.end_price
+        elif req.sell_basis == "lowest_fill":
+            basis = lowest_fill
+        else:
+            basis = average_entry(buy_fills) if buy_fills else None
+        if basis is not None:
+            try:
+                slevels = sell_levels(
+                    basis,
+                    rebound_pcts=[s.rebound_pct for s in sells],
+                    tolerance_pct=req.round_tolerance_pct,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            sell_scan = after if last_fill_date is None else after.loc[after["Date"] > last_fill_date]
+            total_sw = sum(s.weight for s in sells if s.weight > 0)
+            position = sum(t["shares"] for t in trade_buys)
+            avg_cost = (
+                sum(t["price"] * t["shares"] for t in trade_buys) / position if position else None
+            )
+            for stage, level in zip(sells, slevels, strict=True):
+                computed[stage.id] = level.price
+                eff = stage.price_override if stage.price_override is not None else level.price
+                lines.append({"price": eff, "label": f"매도 {level.tranche}차", "kind": "sell"})
+                if buy_fills:  # 보유가 없으면 매도 체결은 없다 — 선만 그린다
+                    hit = sell_scan.loc[sell_scan["High"] >= eff]
+                    if not hit.empty:
+                        d0 = hit.iloc[0]
+                        fills.append({"time": d0["Date"].strftime("%Y-%m-%d"), "price": float(eff), "side": "sell", "stage": level.tranche})
+                        if position and avg_cost is not None:
+                            frac = (stage.weight / total_sw) if total_sw > 0 else 1 / len(sells)
+                            shares = min(int(position * frac), position - sum(t["shares"] for t in trade_sells))
+                            if shares > 0:
+                                trade_sells.append({
+                                    "stage": level.tranche, "time": fills[-1]["time"], "price": float(eff),
+                                    "shares": shares, "amount": shares * float(eff),
+                                    "pnl_pct": (float(eff) / avg_cost - 1) * 100,
+                                    "pnl": (float(eff) - avg_cost) * shares,
+                                })
+
+    vw = anchored_vwap(df, anchor.start_date)
+
+    # ── 손절 — 평단 -% 또는 지지저항 ±N호가. 첫 매수 체결일부터 Low ≤ 손절가 첫 날 발동 ──
+    stop_price: int | None = None
+    if req.stop and req.stop.enabled and buy_fills:
+        s = req.stop
+        if s.mode == "pct":
+            if not s.pct or s.pct <= 0:
+                raise HTTPException(status_code=400, detail="손절 %는 0보다 커야 합니다.")
+            stop_price = round_to_tick(average_entry(buy_fills) * (1 - s.pct / 100), "down")
+        else:
+            if s.source == "anchor_start":
+                base_px = anchor.start_price
+            elif s.source == "custom":
+                if not s.custom_price or s.custom_price <= 0:
+                    raise HTTPException(status_code=400, detail="손절 기준 가격을 입력하세요.")
+                base_px = s.custom_price
+            else:  # avwap — 기준일의 앵커 VWAP 값
+                base_px = float(vw.dropna().iloc[-1])
+            stop_price = shift_ticks(base_px, s.tick_offset)
+        lines.append({"price": stop_price, "label": "손절", "kind": "stop"})
+
+    if stop_price is not None:
+        first_buy = min(f["time"] for f in fills if f["side"] == "buy")
+        scan = after.loc[after["Date"] >= pd.Timestamp(first_buy)]
+        hit = scan.loc[scan["Low"] <= stop_price]
+        if not hit.empty:
+            stop_time = hit.iloc[0]["Date"].strftime("%Y-%m-%d")
+            # 손절 이후 체결은 취소. 당일 겹침은 장중 순서를 모르니 보수적으로 —
+            # 매수는 유지(사자마자 손절 = 손실 커짐), 매도는 취소(익절 못 한 걸로 본다).
+            fills = [
+                f for f in fills
+                if (f["side"] == "buy" and f["time"] <= stop_time)
+                or (f["side"] == "sell" and f["time"] < stop_time)
+            ]
+            trade_buys = [t for t in trade_buys if t["time"] <= stop_time]
+            trade_sells = [t for t in trade_sells if t["time"] < stop_time]
+            fills.append({"time": stop_time, "price": float(stop_price), "side": "sell", "stage": 0})
+            bought0 = sum(t["shares"] for t in trade_buys)
+            held = bought0 - sum(t["shares"] for t in trade_sells)
+            if held > 0:
+                avg0 = sum(t["price"] * t["shares"] for t in trade_buys) / bought0
+                trade_sells.append({
+                    "stage": 0, "time": stop_time, "price": float(stop_price),
+                    "shares": held, "amount": held * float(stop_price),
+                    "pnl_pct": (float(stop_price) / avg0 - 1) * 100,
+                    "pnl": (float(stop_price) - avg0) * held,
+                })
+
+    series = [{
+        "label": "앵커 VWAP",
+        "points": [{"time": ts.strftime("%Y-%m-%d"), "value": float(v)} for ts, v in vw.items() if pd.notna(v)],
+    }]
+
+    # 체결 요약 — 평단·실현손익·잔여 평가(기준일 종가). 비용·슬리피지 미포함(ADR-0004 소관).
+    trades = None
+    if req.qty:
+        bought = sum(t["shares"] for t in trade_buys)
+        sold = sum(t["shares"] for t in trade_sells)
+        avg_cost = (
+            sum(t["price"] * t["shares"] for t in trade_buys) / bought if bought else None
+        )
+        remain = bought - sold
+        last_close = float(df["Close"].iloc[-1])
+        trades = {
+            "buys": trade_buys,
+            "sells": trade_sells,
+            "avg_entry": avg_cost,
+            "realized_pnl": sum(t["pnl"] for t in trade_sells),
+            "remain_shares": remain,
+            "last_close": last_close,
+            "unrealized_pnl": (last_close - avg_cost) * remain if remain and avg_cost else 0.0,
+        }
+
+    return {
+        "code": code,
+        "anchor": {
+            "start_date": anchor.start_date.strftime("%Y-%m-%d"),
+            "start_price": anchor.start_price,
+            "end_date": anchor.end_date.strftime("%Y-%m-%d"),
+            "end_price": anchor.end_price,
+            "gain_pct": anchor.surge.gain_pct,
+            "is_52w_high": anchor.is_52w_high,
+        },
+        "computed": computed,
+        "lines": lines,
+        "fills": fills,
+        "series": series,
+        "trades": trades,
+    }

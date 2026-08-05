@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 
+import pandas as pd
 import requests
 import yfinance as yf
 
@@ -38,31 +39,38 @@ GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
 _cache: dict[str, object] = {"at": 0.0, "data": None}
 
 
-SPARK_N = 30  # 카드 미니차트에 그릴 최근 종가 개수
+SPARK_N = 30  # 카드 미니차트에 그릴 최근 캔들 개수
 
 
 def _snapshot() -> list[dict]:
     tickers = [t for _, items in GROUPS for t, _, _ in items]
     df = yf.download(tickers, period="3mo", interval="1d", progress=False, auto_adjust=False)
-    close = df["Close"]
     out = []
     for group, items in GROUPS:
         rows = []
         for ticker, name, unit in items:
             price = chg = None
             asof = None
-            spark: list[float] = []
+            candles: list[list[float]] = []
             try:
-                s = close[ticker].dropna()
-                if len(s) >= 2:
+                ohlc = (
+                    df.loc[:, [(k, ticker) for k in ("Open", "High", "Low", "Close")]]
+                    .droplevel(1, axis=1)
+                    .dropna()
+                )
+                if len(ohlc) >= 2:
+                    s = ohlc["Close"]
                     price = float(s.iloc[-1])
                     chg = float((s.iloc[-1] / s.iloc[-2] - 1) * 100)
-                    asof = str(s.index[-1].date())
-                    spark = [float(v) for v in s.iloc[-SPARK_N:]]
+                    asof = str(ohlc.index[-1].date())
+                    candles = [
+                        [float(r.Open), float(r.High), float(r.Low), float(r.Close)]
+                        for r in ohlc.tail(SPARK_N).itertuples()
+                    ]
             except (KeyError, IndexError):
                 pass
             rows.append({"key": ticker, "name": name, "unit": unit,
-                         "price": price, "chg": chg, "asof": asof, "spark": spark})
+                         "price": price, "chg": chg, "asof": asof, "candles": candles})
         out.append({"group": group, "items": rows})
     return out
 
@@ -117,17 +125,21 @@ def _flow(code: str) -> dict | None:
 
 
 def _intraday(ticker: str) -> list[dict]:
+    """장중 5분 캔들 [{t,o,h,l,c}]."""
     try:
         df = yf.download(ticker, period="1d", interval="5m", progress=False, auto_adjust=False)
     except Exception:  # noqa: BLE001 — 장중 데이터가 없어도 보드는 떠야 한다
         return []
     if df is None or df.empty or "Close" not in df:
         return []
-    s = df["Close"]
-    if hasattr(s, "columns"):  # 단일 티커인데도 MultiIndex 로 오는 경우
-        s = s.iloc[:, 0]
-    s = s.dropna()
-    return [{"t": ts.strftime("%H:%M"), "v": float(v)} for ts, v in s.items()]
+    if isinstance(df.columns, pd.MultiIndex):  # 단일 티커인데도 MultiIndex 로 오는 경우
+        df = df.droplevel(1, axis=1)
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    return [
+        {"t": ts.strftime("%H:%M"), "o": float(r.Open), "h": float(r.High),
+         "l": float(r.Low), "c": float(r.Close)}
+        for ts, r in zip(df.index, df.itertuples(), strict=True)
+    ]
 
 
 def _boards() -> list[dict]:
@@ -147,7 +159,7 @@ def _boards() -> list[dict]:
             chg = (price / prev - 1) * 100
         points = _intraday(ticker)
         if points:
-            price = points[-1]["v"]
+            price = points[-1]["c"]
             if prev:
                 chg = (price / prev - 1) * 100
         out.append({

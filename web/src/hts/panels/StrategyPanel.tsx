@@ -3,17 +3,21 @@ import {
   fetchConditions,
   fetchQuotes,
   fetchStrategies,
+  postSimulate,
   runScreen,
   type ConditionCategory,
   type ConditionDef,
   type ConditionParamDef,
   type Quote,
   type ScreenResponse,
+  type SimulateResponse,
   type StrategyDef,
 } from '../../api'
-import { currentSymbol, onSymbolPick, pickStrategy, pickSymbol, type StrategyPick, type SymbolPick } from '../bus'
+import { ProChart, type ProChartHandle } from '../../ProChart'
+import { currentSymbol, onSymbolPick, pickSymbol, type SymbolPick } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
-import { Sparkline } from '../Sparkline'
+import { MiniCandles } from '../MiniCandles'
+import { BuyStages, SellStages, type ComputedPrices } from './SplitStages'
 import {
   QUICK_CONDITIONS,
   deleteScreen,
@@ -36,10 +40,11 @@ import {
   type StrategyDraft,
 } from './strategyStore'
 
-// 전략 화면은 2단계다.
+// 전략 화면은 3단계다.
 //  ① 종목선정 — 조건검색식을 여러 개 만들고 고친다 (저장소: hts-screens)
-//  ② 매매전략 — 그중 하나를 골라 진입기법·주문조건을 붙인다 (저장소: hts-strategies)
-// 시세포착 감시는 제거했다 (ADR-0008 개정 4) — 목표가는 진입 기법이 계산할 몫이다.
+//  ② 매매전략 — 그중 하나를 골라 분할 매수/매도·주문조건을 붙인다 (저장소: hts-strategies)
+//  ③ 시뮬레이션 — 고른 종목에 전략 1호(급등 앵커+분할)를 돌려 전용 차트로 확인 (오너 지시:
+//    종목 차트 오버레이 ❌, 이 탭에서 본다)
 // 정량 값은 전부 이 화면에서 입력한다 (ADR-0009 — 전략 숫자 하드코딩 금지).
 
 const LIMIT = 100
@@ -57,7 +62,7 @@ const PLACEHOLDER: Record<string, string> = {
   near: '1.5',
 }
 
-type Step = 'screen' | 'strategy'
+type Step = 'screen' | 'strategy' | 'sim'
 
 function rowLabel(i: number): string {
   return i < 26 ? String.fromCharCode(65 + i) : String(i + 1)
@@ -65,6 +70,12 @@ function rowLabel(i: number): string {
 
 function fmtVal(v: number, unit: string): string {
   return `${v.toLocaleString()}${unit}`
+}
+
+function fmtMarket(m: string): string {
+  if (m.startsWith('KOSPI')) return '코스피'
+  if (m.startsWith('KOSDAQ')) return '코스닥'
+  return m
 }
 
 function summarizeCond(c: SavedCondition, def: ConditionDef | undefined): string {
@@ -145,9 +156,13 @@ function SymbolDetail({ sym }: { sym: SymbolPick | null }) {
       return
     }
     const id = ++req.current
-    void fetchQuotes([code], true).then((r) => {
-      if (id === req.current) setQ(r.quotes[0] ?? null)
-    })
+    const load = () =>
+      void fetchQuotes([code], true).then((r) => {
+        if (id === req.current) setQ(r.quotes[0] ?? null)
+      })
+    load()
+    const t = window.setInterval(load, 10_000) // 실시간 시세 폴링
+    return () => window.clearInterval(t)
   }, [sym?.code])
 
   if (!sym) return <p className="hint">차트·검색 결과에서 종목을 고르면 여기에 표시됩니다.</p>
@@ -179,7 +194,7 @@ function SymbolDetail({ sym }: { sym: SymbolPick | null }) {
         </tbody>
       </table>
       <div style={{ marginTop: 10 }}>
-        <Sparkline data={q?.spark} width={520} height={64} dot />
+        <MiniCandles data={q?.candles} width={520} height={64} />
       </div>
     </>
   )
@@ -412,24 +427,81 @@ export function StrategyPanel() {
     setConfirmDel(false)
   }
 
-  function showOnChart() {
-    if (!entryDef) {
-      setEntryErr('진입 기법을 선택하세요.')
+  // ── ③ 시뮬레이션 — 전략 1호(급등 앵커 + 분할). 계산은 전부 파이썬(/api/simulate) ──
+  const proRef = useRef<ProChartHandle>(null)
+  const [simDate, setSimDate] = useState('')
+  const [simWindow, setSimWindow] = useState('')
+  const [simGain, setSimGain] = useState('')
+  const [simMsg, setSimMsg] = useState('')
+  const [simRunning, setSimRunning] = useState(false)
+  const [simResult, setSimResult] = useState<SimulateResponse | null>(null)
+  const [computed, setComputed] = useState<ComputedPrices>({})
+
+  // ③ 에 들어오거나 종목이 바뀌면 시뮬레이션 차트를 그 종목으로 맞춘다.
+  useEffect(() => {
+    if (step !== 'sim' || !sym) return
+    proRef.current?.showSymbol(sym.code, sym.name, sym.market)
+    // 이전 종목의 레벨이 새 종목 위에 남지 않게 지운다 — 다시 실행해야 그린다.
+    proRef.current?.applySimulation(null)
+    setSimResult(null)
+    setComputed({})
+  }, [step, sym])
+
+  async function runSimulation() {
+    if (!sym) {
+      setSimMsg('종목을 먼저 고르세요 — ① 검색 결과나 차트에서 클릭.')
       return
     }
-    const r = parseParams(entryDef.params, draft.entryParams)
-    if (!r.ok) {
-      setEntryErr(r.error)
-      return
+    const w = Number(simWindow)
+    const g = Number(simGain)
+    const tol = Number(draft.roundTolerancePct)
+    if (!Number.isInteger(w) || w < 1) return setSimMsg('[급등 창] 1 이상의 정수(거래일)를 입력하세요.')
+    if (!(g > 0)) return setSimMsg('[최소 상승률] 0보다 큰 %를 입력하세요.')
+    if (!(tol > 0)) return setSimMsg('[라운드 허용폭] 0보다 큰 %를 입력하세요 (② 분할 카드).')
+    if (!draft.buy.some((b) => b.enabled && b.ratio > 0)) {
+      return setSimMsg('분할 매수 차수를 1개 이상 켜고 되돌림을 입력하세요 (② 매매전략).')
     }
-    setEntryErr('')
-    const pick: StrategyPick = {
-      key: entryDef.key,
-      params: r.value,
-      signals: entryDef.signals,
-      overlay: entryDef.overlay,
+    setSimRunning(true)
+    setSimMsg('계산 중…')
+    try {
+      const res = await postSimulate({
+        code: sym.code,
+        end: simDate || undefined,
+        window: w,
+        min_gain_pct: g,
+        buy: draft.buy.map((b) => ({
+          id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled, price_override: b.priceOverride,
+        })),
+        sell: draft.sell.map((s) => ({
+          id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled, price_override: s.priceOverride,
+        })),
+        sell_basis: draft.sellBasis,
+        round_tolerance_pct: tol,
+        // ② 주문수량이 있으면 체결 수량·손익까지 계산된다
+        qty: Number(draft.qty) > 0 ? Number(draft.qty) : undefined,
+        qty_type: draft.qtyType,
+        stop: draft.stopEnabled
+          ? {
+              enabled: true,
+              mode: draft.stopMode,
+              pct: Number(draft.stopPct) > 0 ? Number(draft.stopPct) : undefined,
+              source: draft.stopSource,
+              custom_price: Number(draft.stopCustom) > 0 ? Number(draft.stopCustom) : undefined,
+              tick_offset: Number.isInteger(Number(draft.stopTicks)) ? Number(draft.stopTicks) : 0,
+            }
+          : undefined,
+      })
+      setSimResult(res)
+      setComputed(res.computed)
+      proRef.current?.applySimulation({ lines: res.lines, fills: res.fills, series: res.series })
+      setSimMsg('')
+    } catch (e) {
+      setSimResult(null)
+      proRef.current?.applySimulation(null)
+      setSimMsg(e instanceof Error ? e.message : '시뮬레이션 실패')
+    } finally {
+      setSimRunning(false)
     }
-    pickStrategy(pick)
   }
 
   return (
@@ -439,6 +511,7 @@ export function StrategyPanel() {
           [
             ['screen', '① 종목선정', `검색식 ${Object.keys(screens).length}`],
             ['strategy', '② 매매전략', `전략 ${Object.keys(saved).length}`],
+            ['sim', '③ 시뮬레이션', sym ? sym.name : '종목 미선택'],
           ] as const
         ).map(([k, label, badge]) => (
           <button key={k} className={step === k ? 'on' : ''} onClick={() => setStep(k)}>
@@ -513,7 +586,7 @@ export function StrategyPanel() {
                     <>
                       <p className="hint">
                         {condDef.desc}
-                        {condKey === 'new_high' && ' · 52주 ≈ 250거래일 (최대 260)'}
+                        {condKey === 'new_high' && ' · 52주 ≈ 250거래일 (기간+이내 ≤ 520)'}
                       </p>
                       <ParamInputs
                         defs={condDef.params}
@@ -534,6 +607,10 @@ export function StrategyPanel() {
                 </div>
                 {/* 항상 한 줄을 차지한다 — 에러가 뜰 때만 생기면 화면이 튄다 */}
                 <p className={`msgline ${screenErr ? 'warn' : ''}`}>{screenErr || ' '}</p>
+              </Card>
+
+              <Card title="종목 상세" right={sym && <span className="badge">{sym.code}</span>}>
+                <SymbolDetail sym={sym} />
               </Card>
             </div>
 
@@ -625,35 +702,46 @@ export function StrategyPanel() {
                     조건에 맞는 종목이 없습니다.
                   </p>
                 ) : (
-                  <table className="grid">
-                    <thead>
-                      <tr>
-                        <th>종목명</th>
-                        <th className="num">현재가</th>
-                        <th className="num">등락률</th>
-                        <th className="num">거래대금</th>
-                      </tr>
-                    </thead>
-                    <tbody>
+                  <>
+                    {result.themes_ready === false && (
+                      <p className="hint" style={{ padding: '0 16px' }}>
+                        테마 수집 중 — 잠시 후 다시 검색하면 표시됩니다.
+                      </p>
+                    )}
+                    <ul className="hitlist">
                       {result.items.map((it) => (
-                        <tr
+                        <li
                           key={it.code}
                           className={sym?.code === it.code ? 'selected' : undefined}
                           onClick={() => pickSymbol({ code: it.code, name: it.name, market: it.market })}
                         >
-                          <td className="nm">
-                            {it.name}
-                            <small style={{ display: 'block', color: 'var(--hts-text-3)', fontWeight: 400 }}>
-                              {it.market} · {it.code}
+                          <MiniCandles data={it.candles} />
+                          <div className="who">
+                            <span className="nm">{it.name}</span>
+                            <small>
+                              <span className={`mkt ${it.market.startsWith('KOSPI') ? 'kospi' : 'kosdaq'}`}>
+                                {fmtMarket(it.market)}
+                              </span>{' '}
+                              {it.code}
                             </small>
-                          </td>
-                          <td className={`num ${chgClass(it.chg)}`}>{fmtPrice(it.close)}</td>
-                          <td className={`num ${chgClass(it.chg)}`}>{fmtChg(it.chg)}</td>
-                          <td className="num">{fmtEok(it.amount)}</td>
-                        </tr>
+                          </div>
+                          <div className={`px num ${chgClass(it.chg)}`}>
+                            <span className="close">{fmtPrice(it.close)}</span>
+                            <small>{fmtChg(it.chg)}</small>
+                          </div>
+                          <div className="etc num">
+                            <small>거래대금 {fmtEok(it.amount)}</small>
+                            {it.themes && it.themes.length > 0 && (
+                              <span className="themes" title={it.themes.join(' · ')}>
+                                {it.themes.slice(0, 2).join(' · ')}
+                                {it.themes.length > 2 && ` 외 ${it.themes.length - 2}`}
+                              </span>
+                            )}
+                          </div>
+                        </li>
                       ))}
-                    </tbody>
-                  </table>
+                    </ul>
+                  </>
                 )}
                 </Card>
               )}
@@ -703,22 +791,7 @@ export function StrategyPanel() {
                   </tbody>
                 </table>
               )}
-              <div className="form-row" style={{ marginTop: 8 }}>
-                <button
-                  style={{ flex: 1 }}
-                  disabled={running}
-                  onClick={() => {
-                    setStep('screen')
-                    void run(draft.conditions, draft.logic)
-                  }}
-                >
-                  이 조건으로 종목 보기
-                </button>
-              </div>
-            </Card>
-
-            <Card title="종목 상세" right={sym && <span className="badge">{sym.code}</span>}>
-              <SymbolDetail sym={sym} />
+              <p className="hint">종목 확인은 ① 종목선정 탭에서 — 검색식을 고르고 검색하세요.</p>
             </Card>
 
             <Card title="진입 기법" sub="피보나치 등">
@@ -751,21 +824,137 @@ export function StrategyPanel() {
                     values={draft.entryParams}
                     onChange={(k, v) => set('entryParams', { ...draft.entryParams, [k]: v })}
                   />
-                  {(entryDef.overlay || entryDef.signals) && (
-                    <div className="form-row" style={{ marginTop: 8 }}>
-                      <button style={{ flex: 1 }} onClick={showOnChart}>
-                        차트에 표시
-                      </button>
-                      <button className="ghost" onClick={() => pickStrategy(null)}>
-                        해제
-                      </button>
-                    </div>
-                  )}
                 </>
               ) : (
                 <p className="hint">기법을 선택하면 파라미터 입력 폼이 나옵니다.</p>
               )}
               {entryErr && <p className="hint warn">{entryErr}</p>}
+            </Card>
+
+            <Card title="분할 매수" sub="되돌림 레벨의 라운드 피겨에 건다 (ADR-0011)">
+              <BuyStages stages={draft.buy} computed={computed} onChange={(b) => set('buy', b)} />
+            </Card>
+
+            <Card title="분할 매도" sub="기준점 대비 반등률">
+              <div className="kv">
+                <span className="k">매도 기준점</span>
+                <span className="v">
+                  <span className="radios" style={{ marginLeft: 'auto' }}>
+                    {(
+                      [
+                        ['avg_entry', '매수 평단'],
+                        ['lowest_fill', '최저 체결가'],
+                        ['anchor_high', '앵커 고점'],
+                      ] as const
+                    ).map(([k, label]) => (
+                      <label key={k}>
+                        <input type="radio" checked={draft.sellBasis === k} onChange={() => set('sellBasis', k)} />
+                        {label}
+                      </label>
+                    ))}
+                  </span>
+                </span>
+              </div>
+              <SellStages stages={draft.sell} computed={computed} onChange={(s) => set('sell', s)} />
+              <div className="kv" style={{ marginTop: 8 }}>
+                <span className="k">라운드 허용폭</span>
+                <span className="v">
+                  <input
+                    className="amt"
+                    placeholder="1.5"
+                    value={draft.roundTolerancePct}
+                    onChange={(e) => set('roundTolerancePct', e.target.value)}
+                  />
+                  <span className="unit">%</span>
+                </span>
+              </div>
+            </Card>
+
+            <Card title="손절" sub="평단 -% 또는 지지저항 ±N호가">
+              <div className="kv">
+                <span className="k">사용</span>
+                <span className="v">
+                  <span className="radios" style={{ marginLeft: 'auto' }}>
+                    <label>
+                      <input type="checkbox" checked={draft.stopEnabled} onChange={(e) => set('stopEnabled', e.target.checked)} />
+                      손절 건다
+                    </label>
+                  </span>
+                </span>
+              </div>
+              {draft.stopEnabled && (
+                <>
+                  <div className="kv">
+                    <span className="k">방식</span>
+                    <span className="v">
+                      <span className="radios" style={{ marginLeft: 'auto' }}>
+                        <label>
+                          <input type="radio" checked={draft.stopMode === 'pct'} onChange={() => set('stopMode', 'pct')} />
+                          평단 대비 %
+                        </label>
+                        <label>
+                          <input type="radio" checked={draft.stopMode === 'support'} onChange={() => set('stopMode', 'support')} />
+                          지지저항 기준
+                        </label>
+                      </span>
+                    </span>
+                  </div>
+                  {draft.stopMode === 'pct' ? (
+                    <div className="kv">
+                      <span className="k">평단에서</span>
+                      <span className="v">
+                        <input className="amt" placeholder="3" value={draft.stopPct} onChange={(e) => set('stopPct', e.target.value)} />
+                        <span className="unit">% 아래</span>
+                      </span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="kv">
+                        <span className="k">기준선</span>
+                        <span className="v">
+                          <select
+                            style={{ flex: 1 }}
+                            value={draft.stopSource}
+                            onChange={(e) => set('stopSource', e.target.value as 'avwap' | 'anchor_start' | 'custom')}
+                          >
+                            <option value="avwap">앵커 VWAP (지지선)</option>
+                            <option value="anchor_start">급등 시작가</option>
+                            <option value="custom">직접 가격</option>
+                          </select>
+                        </span>
+                      </div>
+                      {draft.stopSource === 'custom' && (
+                        <div className="kv">
+                          <span className="k">기준 가격</span>
+                          <span className="v">
+                            <input className="amt" value={draft.stopCustom} onChange={(e) => set('stopCustom', e.target.value)} />
+                            <span className="unit">원</span>
+                          </span>
+                        </div>
+                      )}
+                      <div className="kv">
+                        <span className="k">호가 오프셋</span>
+                        <span className="v">
+                          <input
+                            className="amt"
+                            placeholder="-2"
+                            value={draft.stopTicks}
+                            onChange={(e) => set('stopTicks', e.target.value)}
+                            title="기준선에서 몇 호가 위(+)/아래(−)에 걸지. -2 = 2호가 아래"
+                          />
+                          <span className="unit">호가</span>
+                        </span>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+              <p className="hint">목표가·손절선·체결 마커는 ③ 시뮬레이션에서 본다.</p>
+              <div className="form-row">
+                <button style={{ flex: 1 }} onClick={() => setStep('sim')}>
+                  ③ 시뮬레이션에서 확인
+                </button>
+              </div>
             </Card>
 
             <Card title="매수 주문조건">
@@ -825,6 +1014,156 @@ export function StrategyPanel() {
 
             {msg && <p className="hint">{msg}</p>}
           </>
+        )}
+
+        {/* ─────────────── ③ 시뮬레이션 ─────────────── */}
+        {step === 'sim' && (
+          <div className="sim-split">
+            <div className="sim-side">
+              <Card title="시뮬레이션" sub="전략 1호 — 급등 앵커 + 분할">
+                <div className="kv">
+                  <span className="k">종목</span>
+                  <span className="v">
+                    {sym ? `${sym.name} (${sym.code})` : '① 검색 결과에서 클릭'}
+                  </span>
+                </div>
+                <div className="kv">
+                  <span className="k">기준일</span>
+                  <span className="v">
+                    <input
+                      type="date"
+                      value={simDate}
+                      onChange={(e) => setSimDate(e.target.value)}
+                      title="빈칸 = 최신 거래일. 백테스트 재현 시 과거 날짜를 준다."
+                    />
+                  </span>
+                </div>
+                <div className="kv">
+                  <span className="k">급등 창</span>
+                  <span className="v">
+                    <input className="amt" placeholder="20" value={simWindow} onChange={(e) => setSimWindow(e.target.value)} />
+                    <span className="unit">거래일</span>
+                  </span>
+                </div>
+                <div className="kv">
+                  <span className="k">최소 상승률</span>
+                  <span className="v">
+                    <input className="amt" placeholder="30" value={simGain} onChange={(e) => setSimGain(e.target.value)} />
+                    <span className="unit">%</span>
+                  </span>
+                </div>
+                <div className="form-row" style={{ marginTop: 8 }}>
+                  <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
+                    {simRunning ? '계산 중…' : '시뮬레이션 실행'}
+                  </button>
+                  <button className="ghost" onClick={() => { proRef.current?.applySimulation(null); setSimResult(null); setSimMsg('') }}>
+                    지우기
+                  </button>
+                </div>
+                <p className={`msgline ${simMsg ? 'warn' : ''}`}>{simMsg || ' '}</p>
+                {simResult && (
+                  <table className="grid">
+                    <tbody>
+                      <tr>
+                        <td className="flat">급등 파동</td>
+                        <td className="num">
+                          {simResult.anchor.start_date} → {simResult.anchor.end_date} (+
+                          {simResult.anchor.gain_pct.toFixed(1)}%)
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="flat">앵커</td>
+                        <td className="num">
+                          {fmtPrice(simResult.anchor.start_price)} ~ {fmtPrice(simResult.anchor.end_price)}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="flat">52주 신고가</td>
+                        <td className="num">{simResult.anchor.is_52w_high ? '예' : '아니오 — 파동 고점이 52주 최고가 아님'}</td>
+                      </tr>
+                      <tr>
+                        <td className="flat">체결 마커</td>
+                        <td className="num">
+                          매수 {simResult.fills.filter((f) => f.side === 'buy').length} · 매도{' '}
+                          {simResult.fills.filter((f) => f.side === 'sell').length}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                )}
+              </Card>
+
+              {simResult && (
+                <Card title="체결 내역" sub={simResult.trades ? undefined : '②에서 주문수량을 넣으면 수량·손익 계산'} flush>
+                  {simResult.trades ? (
+                    <>
+                      <table className="grid">
+                        <thead>
+                          <tr>
+                            <th>구분</th>
+                            <th className="num">체결일</th>
+                            <th className="num">가격</th>
+                            <th className="num">수량</th>
+                            <th className="num">손익</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {simResult.trades.buys.map((t) => (
+                            <tr key={`b${t.stage}`}>
+                              <td className="up">매수 {t.stage}차</td>
+                              <td className="num">{t.time}</td>
+                              <td className="num">{fmtPrice(t.price)}</td>
+                              <td className="num">{t.shares.toLocaleString()}주</td>
+                              <td className="num">-</td>
+                            </tr>
+                          ))}
+                          {simResult.trades.sells.map((t) => (
+                            <tr key={`s${t.stage}`}>
+                              <td className="down">매도 {t.stage}차</td>
+                              <td className="num">{t.time}</td>
+                              <td className="num">{fmtPrice(t.price)}</td>
+                              <td className="num">{t.shares.toLocaleString()}주</td>
+                              <td className={`num ${chgClass(t.pnl_pct)}`}>
+                                {t.pnl != null && `${t.pnl > 0 ? '+' : ''}${Math.round(t.pnl).toLocaleString()}원`}
+                                <small style={{ display: 'block' }}>{fmtChg(t.pnl_pct)}</small>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <div className="sumcard">
+                        <div className="pills">
+                          <span>평단 <b>{simResult.trades.avg_entry != null ? fmtPrice(simResult.trades.avg_entry) : '-'}</b></span>
+                          <span>실현 <b className={chgClass(simResult.trades.realized_pnl)}>{Math.round(simResult.trades.realized_pnl).toLocaleString()}원</b></span>
+                          <span>
+                            잔여 <b>{simResult.trades.remain_shares.toLocaleString()}주</b> 평가{' '}
+                            <b className={chgClass(simResult.trades.unrealized_pnl)}>{Math.round(simResult.trades.unrealized_pnl).toLocaleString()}원</b>
+                          </span>
+                        </div>
+                      </div>
+                      <p className="hint" style={{ padding: '0 16px 10px' }}>
+                        수수료·세금·슬리피지 미포함 — 정식 손익은 백테스트 엔진(ADR-0004) 몫.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="hint" style={{ padding: '0 16px 10px' }}>
+                      ② 매매전략의 주문수량(수량/금액)을 입력하고 다시 실행하세요.
+                    </p>
+                  )}
+                </Card>
+              )}
+
+              <Card title="분할 매수" sub="②와 같은 값 — 여기서 고쳐도 됨">
+                <BuyStages stages={draft.buy} computed={computed} onChange={(b) => set('buy', b)} />
+              </Card>
+              <Card title="분할 매도">
+                <SellStages stages={draft.sell} computed={computed} onChange={(s) => set('sell', s)} />
+              </Card>
+            </div>
+            <div className="sim-chart">
+              <ProChart ref={proRef} />
+            </div>
+          </div>
         )}
 
       </div>

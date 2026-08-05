@@ -86,6 +86,28 @@ def round_to_tick(price: float, how: Rounding = "nearest", kind: InstrumentKind 
     return int(out)
 
 
+def shift_ticks(price: float, n: int, kind: InstrumentKind = "stock") -> int:
+    """`price` 에서 위(+n)/아래(−n)로 n호가 이동한 유효 가격.
+
+    한 칸씩 움직인다 — 구간 경계(예: 50,000)를 지나면 그 지점부터 새 호가단위가 적용돼야
+    해서 tick 하나로 곱셈하면 틀린다. 내려갈 때 경계값의 단위는 아래 구간 것을 쓴다
+    (50,000 의 한 칸 아래는 49,950 — 50원 구간).
+    """
+    p = round_to_tick(price, "nearest", kind)
+    for _ in range(abs(n)):
+        if n > 0:
+            p += tick_size(p, kind)
+        else:
+            step = tick_size(p - 1, kind) if p > 1 else tick_size(p, kind)
+            nxt = p - step
+            if nxt <= 0:
+                raise ValueError(f"{price} 에서 {n}호가 아래는 0 이하가 된다")
+            p = nxt
+    if not is_valid_price(p, kind):
+        p = round_to_tick(p, "down" if n < 0 else "up", kind)
+    return int(p)
+
+
 def round_figures_near(
     level: float,
     tolerance_pct: float,

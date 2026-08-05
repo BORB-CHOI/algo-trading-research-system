@@ -12,6 +12,17 @@ export type CreditType = 'cash' | 'credit'
 
 export type SavedCondition = { key: string; params: Record<string, number> }
 
+/** within(이내) 파라미터 추가(2026-08-05) 이전 저장분 이관 — '이내' 없음 = 당일(1).
+ *  기본값 주입이 아니라 기존 검색식의 원래 의미(당일 발생만) 보존이다. */
+const NEEDS_WITHIN = new Set(['new_high', 'new_low', 'gap_up'])
+export function migrateConditions(conds: SavedCondition[]): SavedCondition[] {
+  return conds.map((c) =>
+    NEEDS_WITHIN.has(c.key) && c.params['within'] == null
+      ? { ...c, params: { ...c.params, within: 1 } }
+      : c,
+  )
+}
+
 /** 분할 매수 한 차수. 되돌림 비율에서 목표가가 나오고, 사용자가 값을 덮어쓸 수 있다.
  *  오너 요구: "각각 다 커스텀으로 추가·해제 하면서" — 그래서 차수가 고정 3개가 아니다. */
 export type BuyStage = {
@@ -37,6 +48,16 @@ export type SellStage = {
 /** 매도 반등률의 기준점. 오너가 "반등 몇 %"라 했을 때 무엇 대비인지가 갈려서 고르게 둔다. */
 export type SellBasis = 'avg_entry' | 'lowest_fill' | 'anchor_high'
 
+/** 손절 — 평단 대비 % 또는 지지저항(앵커 VWAP·급등 시작가·직접 가격) ±N호가 (오너 요구). */
+export type StopRule = {
+  enabled: boolean
+  mode: 'pct' | 'support'
+  pct?: number // mode=pct: 평단에서 몇 % 아래
+  source: 'avwap' | 'anchor_start' | 'custom' // mode=support 기준선
+  customPrice?: number
+  tickOffset: number // 지지저항에서 ±N호가 (음수 = 아래)
+}
+
 export type Strategy = {
   /** name = ① 에서 만든 조건검색식 이름. 없으면 전체 종목이 대상. */
   screen: { name?: string; logic: ScreenLogic; conditions: SavedCondition[] }
@@ -50,6 +71,8 @@ export type Strategy = {
     /** 레벨에서 ±몇 % 안의 라운드 피겨를 목표가로 삼을지 (전략 파라미터) */
     roundTolerancePct: number
   }
+  /** 손절. 없으면(옛 저장본) 손절 미사용으로 연다. */
+  stop?: StopRule
   order: {
     priceType: PriceType
     qtyType: QtyType
@@ -66,7 +89,9 @@ export function loadStrategies(): Strategies {
     if (!raw || typeof raw !== 'object') return {}
     const out: Strategies = {}
     for (const [name, s] of Object.entries(raw)) {
-      if (s && s.screen && s.entry && s.order) out[name] = s
+      if (s && s.screen && s.entry && s.order) {
+        out[name] = { ...s, screen: { ...s.screen, conditions: migrateConditions(s.screen.conditions ?? []) } }
+      }
     }
     return out
   } catch {
@@ -101,6 +126,12 @@ export type StrategyDraft = {
   sell: SellStage[]
   sellBasis: SellBasis
   roundTolerancePct: string
+  stopEnabled: boolean
+  stopMode: 'pct' | 'support'
+  stopPct: string
+  stopSource: 'avwap' | 'anchor_start' | 'custom'
+  stopCustom: string
+  stopTicks: string // ±N호가 (음수 = 아래)
   priceType: PriceType
   qtyType: QtyType
   qty: string
@@ -134,6 +165,12 @@ export function emptyDraft(): StrategyDraft {
     sell: [],
     sellBasis: 'avg_entry',
     roundTolerancePct: '',
+    stopEnabled: false,
+    stopMode: 'pct',
+    stopPct: '',
+    stopSource: 'avwap',
+    stopCustom: '',
+    stopTicks: '0',
     priceType: 'limit',
     qtyType: 'shares',
     qty: '',
@@ -155,6 +192,12 @@ export function toDraft(s: Strategy): StrategyDraft {
     sell: (s.split?.sell ?? []).map((x) => ({ ...x })),
     sellBasis: s.split?.sellBasis ?? 'avg_entry',
     roundTolerancePct: s.split?.roundTolerancePct == null ? '' : String(s.split.roundTolerancePct),
+    stopEnabled: s.stop?.enabled ?? false,
+    stopMode: s.stop?.mode ?? 'pct',
+    stopPct: s.stop?.pct == null ? '' : String(s.stop.pct),
+    stopSource: s.stop?.source ?? 'avwap',
+    stopCustom: s.stop?.customPrice == null ? '' : String(s.stop.customPrice),
+    stopTicks: String(s.stop?.tickOffset ?? 0),
     priceType: s.order.priceType,
     qtyType: s.order.qtyType,
     qty: s.order.qty == null ? '' : String(s.order.qty),
@@ -229,6 +272,25 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
   const tol = toNum('라운드 피겨 허용폭', d.roundTolerancePct, false)
   if (!tol.ok) return tol
 
+  let stop: StopRule | undefined
+  if (d.stopEnabled) {
+    const ticks = Number(d.stopTicks || '0')
+    if (!Number.isInteger(ticks)) return { ok: false, error: '[손절 호가 오프셋] 정수를 입력하세요.' }
+    if (d.stopMode === 'pct') {
+      const pct = toNum('손절 %', d.stopPct, false)
+      if (!pct.ok) return pct
+      stop = { enabled: true, mode: 'pct', pct: pct.value, source: d.stopSource, tickOffset: ticks }
+    } else {
+      let customPrice: number | undefined
+      if (d.stopSource === 'custom') {
+        const cp = toNum('손절 기준 가격', d.stopCustom, false)
+        if (!cp.ok) return cp
+        customPrice = cp.value
+      }
+      stop = { enabled: true, mode: 'support', source: d.stopSource, customPrice, tickOffset: ticks }
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -238,6 +300,7 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
         conditions: d.conditions,
       },
       entry: { key: d.entryKey, params: params.value },
+      ...(stop ? { stop } : {}),
       split: {
         buy: d.buy.map((b) => ({ ...b })),
         sell: d.sell.map((s) => ({ ...s })),

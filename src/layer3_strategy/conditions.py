@@ -34,9 +34,10 @@ import talib.abstract  # Function(...).lookback — 패턴 워밍업 계산용 (
 
 from src.layer1_data.adjust import SPLIT_PRICE_MATCH, SPLIT_SHARE_HI, SPLIT_SHARE_LO
 
-# 이평·신고가 룩백 상한 — 기준일 이전 최대 260 거래일(약 1년). 이걸 넘는 요청은 400.
-# 연도 parquet 2개(당해+전년)만 읽으면 되는 선이기도 하다.
-MAX_LOOKBACK = 260
+# 이평·신고가 룩백 상한 — 기준일 이전 최대 520 거래일(약 2년). 이걸 넘는 요청은 400.
+# "52주 신고가(250일)를 최근 1년(이내 250일) 안에 찍은 종목"이 들어가는 선 (오너 요구 2026-08-05).
+# 연도 경계는 _load_history_panel 이 채워질 때까지 전년도로 거슬러 올라간다.
+MAX_LOOKBACK = 520
 
 # 서버가 억 단위 입력을 원 단위로 환산할 때 쓴다 (시가총액·거래대금).
 _EOK = 1e8
@@ -267,37 +268,36 @@ def cond_cum_change(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
 
 
 def cond_new_high(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
-    """N일신고가돌파: 기준일 종가 > 직전 N거래일(당일 제외) 최고 종가.
+    """N일신고가돌파: 종가 > 직전 N거래일(당일 제외) 최고 종가 — 최근 within일 이내 발생.
 
-    직전 N일 이력이 다 있어야 인정한다 — 신규상장 직후 반쪽 이력으로 신고가 처리하지 않는다.
+    rolling(min_periods=days) 라 직전 N일 이력이 다 있어야 인정한다 —
+    신규상장 직후 반쪽 이력으로 신고가 처리하지 않는다(NaN 비교 → False).
     """
     d = p["days"]
     c = hist.close
     if len(c.index) < d + 1:
         return _none(base)
-    window = c.iloc[-1 - d : -1]
-    full = window.count() >= d
-    return full & (c.iloc[-1] > window.max())
+    prev_max = c.rolling(d, min_periods=d).max().shift(1)
+    return (c > prev_max).iloc[-p["within"] :].any()
 
 
 def cond_new_low(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
-    """N일신저가: 기준일 종가 < 직전 N거래일(당일 제외) 최저 종가."""
+    """N일신저가: 종가 < 직전 N거래일(당일 제외) 최저 종가 — 최근 within일 이내 발생."""
     d = p["days"]
     c = hist.close
     if len(c.index) < d + 1:
         return _none(base)
-    window = c.iloc[-1 - d : -1]
-    full = window.count() >= d
-    return full & (c.iloc[-1] < window.min())
+    prev_min = c.rolling(d, min_periods=d).min().shift(1)
+    return (c < prev_min).iloc[-p["within"] :].any()
 
 
 def cond_gap_up(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
-    """갭상승률: 기준일 시가 vs 전일 종가 상승률(%)이 min 이상."""
+    """갭상승률: 시가 vs 전일 종가 상승률(%) ≥ min — 최근 within일 이내 발생."""
     o, c = hist.open, hist.close
     if len(c.index) < 2:
         return _none(base)
-    gap = (o.iloc[-1] / c.iloc[-2] - 1) * 100
-    return gap >= p["min"]
+    gap = (o / c.shift(1) - 1) * 100
+    return (gap.iloc[-p["within"] :] >= p["min"]).any()
 
 
 def cond_consec_up(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
@@ -550,26 +550,26 @@ _ALL = [
     Condition(
         "new_high",
         "N일신고가돌파",
-        "종가가 직전 N거래일 최고 종가를 돌파 (종가 기준)",
-        (_int("days", "기간"),),
+        "종가가 직전 N거래일 최고 종가를 돌파 — 최근 X일 이내 발생 (종가 기준)",
+        (_int("days", "기간"), _int("within", "이내")),
         cond_new_high,
-        lookback=lambda p: p["days"],
+        lookback=lambda p: p["days"] + p["within"],
     ),
     Condition(
         "new_low",
         "N일신저가",
-        "종가가 직전 N거래일 최저 종가보다 낮음 (종가 기준)",
-        (_int("days", "기간"),),
+        "종가가 직전 N거래일 최저 종가보다 낮음 — 최근 X일 이내 발생 (종가 기준)",
+        (_int("days", "기간"), _int("within", "이내")),
         cond_new_low,
-        lookback=lambda p: p["days"],
+        lookback=lambda p: p["days"] + p["within"],
     ),
     Condition(
         "gap_up",
         "갭상승률",
-        "시가가 전일 종가 대비 X% 이상 갭상승",
-        (_num("min", "이상", "%", required=True),),
+        "시가가 전일 종가 대비 X% 이상 갭상승 — 최근 X일 이내 발생",
+        (_num("min", "이상", "%", required=True), _int("within", "이내")),
         cond_gap_up,
-        lookback=lambda p: 1,
+        lookback=lambda p: p["within"],
     ),
     Condition(
         "consec_up",
