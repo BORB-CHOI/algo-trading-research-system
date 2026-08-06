@@ -55,6 +55,7 @@ from src.layer3_strategy.screening import ScreeningRule, screen
 from src.layer3_strategy.support_resistance import find_levels
 from src.layer3_strategy.surge import find_52w_high, find_cycle_low
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
+from src.layer4_execution.strategy_one import run_strategy_one
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
 # Amount(거래대금)는 KLineChart 의 turnover 로. Stocks(상장주식수)는 액면분할 감지용(ADR-0006).
@@ -1201,3 +1202,75 @@ def api_simulate(req: SimulateRequest) -> dict:
         "series": series,
         "trades": trades,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# ④ 백테스팅 — 전략 1호 전수 검사 (layer4 strategy_one, ADR-0013·0014)
+# ─────────────────────────────────────────────────────────────
+
+
+class BacktestRequest(BaseModel):
+    split: str  # train | validate | test(명시 동의 필요)
+    conditions: list[dict] = Field(default_factory=list)  # POST /api/screen/run 과 동일 형식
+    logic: str = "and"
+    cycle_drop_pct: float
+    sr_span: int
+    sr_cluster_pct: float
+    buy: list[SimStage] = Field(default_factory=list)
+    sell: list[SimStage] = Field(default_factory=list)
+    sell_basis: str = "avg_entry"
+    buy_tick_offset: int = 0
+    sell_tick_offset: int = 0
+    stop: SimStop | None = None
+    # §4.1 Test 는 단 1회 — UI 의 명시 체크 없이는 서버가 거부한다(가드 정본 slice_split).
+    i_know_test_is_once: bool = False
+
+
+@app.post("/api/backtest")
+def api_backtest(req: BacktestRequest) -> dict:
+    """전략 1호 전수 백테스트 — 조건검색식 유니버스 전 종목에 세팅→체결→집계.
+
+    **분석 전용 결정론 계산, 주문 없음(CLAUDE.md).** 세팅은 기준일(선별일) 왼쪽만,
+    체결은 오른쪽만 — look-ahead 는 구조로 차단(strategy_one docstring).
+    비용은 왕복 정액률(ADR-0004 placeholder) 포함. N<30 은 reliable=False 로 표시.
+    """
+    if not req.conditions:
+        raise HTTPException(status_code=400, detail="조건검색식이 비었습니다 — ①에서 검색식을 고르세요.")
+    buys = [
+        {"ratio": s.ratio, "weight": s.weight}
+        for s in req.buy
+        if s.enabled and s.ratio is not None and 0 < s.ratio < 1
+    ]
+    sells = [
+        {"rebound_pct": s.rebound_pct, "weight": s.weight}
+        for s in req.sell
+        if s.enabled and s.rebound_pct is not None and s.rebound_pct > 0
+    ]
+    stop = None
+    if req.stop and req.stop.enabled:
+        stop = {
+            "enabled": True,
+            "mode": req.stop.mode,
+            "pct": req.stop.pct,
+            "source": "custom" if req.stop.source == "custom" else "cycle_low",
+            "custom_price": req.stop.custom_price,
+            "tick_offset": req.stop.tick_offset,
+        }
+    try:
+        return run_strategy_one(
+            req.conditions,
+            req.logic,
+            req.split,
+            cycle_drop_pct=req.cycle_drop_pct,
+            sr_span=req.sr_span,
+            sr_cluster_pct=req.sr_cluster_pct,
+            buy=buys,
+            sell=sells,
+            sell_basis=req.sell_basis,
+            buy_tick_offset=req.buy_tick_offset,
+            sell_tick_offset=req.sell_tick_offset,
+            stop=stop,
+            i_know_test_is_once=req.i_know_test_is_once,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

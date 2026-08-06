@@ -29,11 +29,14 @@ def make_hist(
     closes: dict[str, list[float]],
     opens: dict[str, list[float]] | None = None,
     volumes: dict[str, list[float]] | None = None,
+    amounts: dict[str, list[float]] | None = None,
     base: str = "2026-07-16",
 ) -> tuple[pd.DataFrame, pd.Timestamp]:
     """종목별 종가 리스트 → long 형 일봉. 마지막 원소 = 기준일.
 
     리스트가 짧은 종목은 최근 쪽으로 정렬한다(신규상장 흉내).
+    amounts 를 주면 일별 거래대금(원) 컬럼이 생긴다 — 안 주면 컬럼 자체가 없다
+    (거래대금 이력 조건의 has("Amount") 가드를 그대로 태우기 위해).
     """
     n = max(len(v) for v in closes.values())
     dates = pd.bdate_range(end=base, periods=n)
@@ -41,16 +44,18 @@ def make_hist(
     for code, cs in closes.items():
         os_ = (opens or {}).get(code, cs)
         vs = (volumes or {}).get(code, [1000.0] * len(cs))
+        ams = (amounts or {}).get(code, [1e9] * len(cs)) if amounts is not None else None
         for i, c in enumerate(cs):
-            rows.append(
-                {
-                    "Date": dates[n - len(cs) + i],
-                    "Code": code,
-                    "Open": os_[i],
-                    "Close": c,
-                    "Volume": vs[i],
-                }
-            )
+            row = {
+                "Date": dates[n - len(cs) + i],
+                "Code": code,
+                "Open": os_[i],
+                "Close": c,
+                "Volume": vs[i],
+            }
+            if ams is not None:
+                row["Amount"] = ams[i]
+            rows.append(row)
     return pd.DataFrame(rows), dates[-1]
 
 
@@ -61,9 +66,10 @@ def run(
     volumes: dict[str, list[float]] | None = None,
     logic: str = "and",
     base_over: dict[str, dict[str, float]] | None = None,
+    amounts: dict[str, list[float]] | None = None,
 ) -> set[str]:
     """조건식을 합성 패널에 돌려 매칭된 종목 코드 집합을 돌려준다."""
-    hist_df, base_date = make_hist(closes, opens, volumes)
+    hist_df, base_date = make_hist(closes, opens, volumes, amounts)
     panel = HistPanel(hist_df, base_date)
     last = hist_df[hist_df["Date"] == base_date].set_index("Code")
     base = pd.DataFrame(
@@ -234,6 +240,43 @@ def test_new_high_within() -> None:
     }
     assert run([{"key": "new_high", "params": {"days": 3, "within": 1}}], closes) == set()
     assert run([{"key": "new_high", "params": {"days": 3, "within": 2}}], closes) == {"A"}
+
+
+def test_new_high_burst_same_bar() -> None:
+    """신고가 돌파일에 거래대금까지 터져야 잡힌다 — 돌파와 터짐이 같은 봉 (오너 정의).
+
+    A: 오늘 돌파 + 오늘 500억 → 매칭. B: 돌파했지만 대금 10억 → 탈락.
+    C: 대금은 터졌지만 돌파 아님 → 탈락.
+    """
+    closes = {
+        "A": [5.0, 6.0, 7.0, 4.0, 8.0],
+        "B": [5.0, 6.0, 7.0, 4.0, 8.0],
+        "C": [5.0, 6.0, 9.0, 4.0, 8.0],
+    }
+    amounts = {
+        "A": [1e9] * 4 + [500 * 1e8],
+        "B": [1e9] * 5,
+        "C": [1e9] * 4 + [500 * 1e8],
+    }
+    conds = [{"key": "new_high_burst", "params": {"days": 3, "amount": 300, "within": 1}}]
+    assert run(conds, closes, amounts=amounts) == {"A"}
+
+
+def test_new_high_burst_needs_burst_on_breakout_day() -> None:
+    """어제 조용히 돌파 + 오늘 대금만 폭발 = 아님. 돌파일(어제)에 터졌으면 within 으로 잡힘."""
+    closes = {"A": [5.0, 6.0, 7.0, 9.0, 8.0]}  # 어제 9 돌파, 오늘 눌림
+    conds = [{"key": "new_high_burst", "params": {"days": 3, "amount": 300, "within": 2}}]
+    today_burst = {"A": [1e9, 1e9, 1e9, 1e9, 500 * 1e8]}
+    assert run(conds, closes, amounts=today_burst) == set()
+    breakout_burst = {"A": [1e9, 1e9, 1e9, 500 * 1e8, 1e9]}
+    assert run(conds, closes, amounts=breakout_burst) == {"A"}
+
+
+def test_new_high_burst_without_amount_column() -> None:
+    """거래대금 이력이 없는 패널이면 판정 불가 → 전부 False (조용히 통과시키지 않는다)."""
+    closes = {"A": [5.0, 6.0, 7.0, 4.0, 8.0]}
+    conds = [{"key": "new_high_burst", "params": {"days": 3, "amount": 1, "within": 1}}]
+    assert run(conds, closes) == set()
 
 
 def test_gap_up() -> None:

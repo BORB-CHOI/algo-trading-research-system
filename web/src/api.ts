@@ -377,6 +377,58 @@ export async function postSimulate(req: SimulateRequest): Promise<SimulateRespon
   return postJson('/api/simulate', req)
 }
 
+// ── ④ 백테스팅 (POST /api/backtest) — 전략 1호 전수 검사 (ADR-0013·0014) ──
+
+export type BacktestRequest = {
+  split: 'train' | 'validate' | 'test'
+  conditions: { key: string; params: Record<string, number> }[]
+  logic: 'and' | 'or'
+  cycle_drop_pct: number
+  sr_span: number
+  sr_cluster_pct: number
+  buy: SimStagePayload[]
+  sell: SimStagePayload[]
+  sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high'
+  buy_tick_offset?: number
+  sell_tick_offset?: number
+  stop?: SimulateRequest['stop']
+  i_know_test_is_once?: boolean // §4.1 — Test 는 단 1회, UI 명시 체크 필수
+}
+
+export type BacktestRow = {
+  code: string
+  n_buys: number
+  stopped: boolean
+  avg_entry?: number
+  exit_value?: number
+  first_fill?: string
+  last_exit?: string
+  gross_return?: number
+  net_return?: number
+}
+
+export type BacktestResponse = {
+  split: string
+  base_date: string // 유니버스 선별 기준일 (split 시작 직전 거래일)
+  universe: number
+  results: BacktestRow[] // 체결된 종목만, 순수익률 내림차순
+  no_fill: number // 매수 미체결(거래 아님 — 통계 제외)
+  skipped: Record<string, string>
+  metrics: {
+    n_trades: number
+    win_rate: number | null
+    avg_win: number | null
+    avg_loss: number | null
+    expectancy: number | null
+    cum_net_return: number
+    reliable: boolean // N ≥ 30 (CLAUDE.md: N<30 신뢰 불가)
+  }
+}
+
+export async function postBacktest(req: BacktestRequest): Promise<BacktestResponse> {
+  return postJson('/api/backtest', req)
+}
+
 export async function fetchCandles(
   code: string,
   start?: string,

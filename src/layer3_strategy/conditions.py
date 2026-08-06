@@ -136,6 +136,11 @@ class HistPanel:
         # 분할 전 거래량은 주식수가 적었으니 비교를 위해 늘린다 (adjust.py 와 동일)
         return self._adjusted("Volume", divide=True)
 
+    @property
+    def amount(self) -> pd.DataFrame:
+        # 거래대금은 가격×수량이라 분할 보정과 무관 — 원본 그대로. 호출부는 has("Amount") 확인.
+        return self._wide("Amount")
+
 
 # ─────────────────────────────────────────────────────────────
 # 레지스트리 자료형
@@ -289,6 +294,25 @@ def cond_new_high(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
         return _none(base)
     prev_max = c.rolling(d, min_periods=d).max().shift(1)
     return (c > prev_max).iloc[-p["within"] :].any()
+
+
+def cond_new_high_burst(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
+    """신고가+거래대금: 종가가 직전 N일 최고 종가를 돌파했고 **그 돌파일** 거래대금이
+    X억 원 이상 — 최근 within일 이내 발생.
+
+    돌파와 대금 터짐이 **같은 봉**이어야 한다(오너 정의 2026-08-06: "신고가의 기준봉을
+    거래대금 터졌을 때로 찾아야"). 따로 평가하면 "어제 조용히 돌파 + 오늘 대금만 폭발"이
+    같은 종목으로 잡힌다 — 그건 이 조건이 아니다.
+    """
+    if not hist.has("Amount"):
+        return _none(base)
+    d = p["days"]
+    c = hist.close
+    if len(c.index) < d + 1:
+        return _none(base)
+    prev_max = c.rolling(d, min_periods=d).max().shift(1)
+    hit = (c > prev_max) & (hist.amount >= p["amount"] * 1e8)
+    return hit.iloc[-p["within"] :].any()
 
 
 def cond_new_low(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
@@ -566,6 +590,18 @@ _ALL = [
         lookback=lambda p: p["days"] + p["within"],
     ),
     Condition(
+        "new_high_burst",
+        "신고가+거래대금",
+        "종가가 직전 N거래일 최고 종가를 돌파했고 그 돌파일 거래대금이 X억 원 이상 — 최근 X일 이내 발생 (돌파와 터짐이 같은 봉)",
+        (
+            _int("days", "기간"),
+            _num("amount", "돌파일 거래대금", "억", required=True),
+            _int("within", "이내"),
+        ),
+        cond_new_high_burst,
+        lookback=lambda p: p["days"] + p["within"],
+    ),
+    Condition(
         "new_low",
         "N일신저가",
         "종가가 직전 N거래일 최저 종가보다 낮음 — 최근 X일 이내 발생 (종가 기준)",
@@ -689,7 +725,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "price",
         "시세분석",
-        ["change_range", "cum_change", "new_high", "new_low", "gap_up", "consec_up", "consec_down"],
+        ["change_range", "cum_change", "new_high", "new_high_burst", "new_low", "gap_up", "consec_up", "consec_down"],
     ),
     (
         "technical",

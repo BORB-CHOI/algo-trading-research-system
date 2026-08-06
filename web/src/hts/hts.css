@@ -71,13 +71,14 @@ body {
 .hts *:hover { scrollbar-color: var(--hts-scrollbar) transparent; }
 
 /* ── 상단바 1행: 브랜드 · 통합검색 · 지수 티커 ─────────────────── */
+/* 헤더 다이어트(2026-08-06 오너): 고정 줄 높이를 줄여 ③ 차트가 스크롤 없이 들어가게 */
 .topbar {
   flex: none;
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 52px;
-  padding: 0 14px;
+  height: 42px;
+  padding: 0 12px;
   background: var(--hts-panel);
   border-bottom: 1px solid var(--hts-border);
 }
@@ -198,8 +199,8 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
-  height: 42px;
-  padding: 0 10px;
+  height: 34px;
+  padding: 0 8px;
   background: var(--hts-panel);
   border-bottom: 1px solid var(--hts-border);
 }
@@ -219,7 +220,7 @@ body {
 .menubar .menu:hover { background: var(--hts-hover); color: var(--hts-text); }
 .menubar .menu.on { background: var(--hts-accent-soft); color: var(--hts-accent-down); }
 
-.dock-area { flex: 1; min-height: 0; padding: 8px; box-sizing: border-box; }
+.dock-area { flex: 1; min-height: 0; padding: 5px; box-sizing: border-box; }
 
 /* ── 컨트롤 공통 ──────────────────────────────────────────────── */
 .hts button {
@@ -547,7 +548,7 @@ body {
   flex: none;
   display: flex;
   gap: 6px;
-  padding: 8px 10px;
+  padding: 5px 8px;
   background: var(--hts-panel);
   border-bottom: 1px solid var(--hts-border);
 }
@@ -557,7 +558,7 @@ body {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 36px;
+  height: 30px;
   padding: 0 8px;
   border-radius: var(--r-ctl);
   background: var(--hts-bg);
@@ -854,7 +855,7 @@ body {
 
 /* ── dockview 오버라이드 ──────────────────────────────────────── */
 .dockview-theme-light {
-  --dv-tabs-and-actions-container-height: 38px;
+  --dv-tabs-and-actions-container-height: 30px;
   --dv-tabs-and-actions-container-font-size: 13px;
   --dv-tab-font-size: 13px;
   --dv-tab-close-icon-size: 13px;
@@ -1127,11 +1128,16 @@ body {
   grid-template-columns: minmax(300px, 360px) 1fr;
   gap: 12px;
   align-items: start;
+  min-height: 100%;
 }
 .sim-split .sim-chart {
   display: flex;
   flex-direction: column;
-  height: 640px;
+  /* 화면(패널) 높이에 맞춰 늘어난다 — 고정 640px 는 헤더와 합치면 한 화면을 넘었다 */
+  position: sticky;
+  top: 0;
+  height: calc(100vh - 176px);
+  min-height: 480px;
   min-width: 0;
   border: 1px solid var(--hts-line);
   border-radius: 10px;
@@ -1192,5 +1198,5 @@ body {
 .sstage .px input.auto::placeholder { color: #374151; opacity: 1; }
 @container (max-width: 860px) {
   .sim-split { grid-template-columns: 1fr; }
-  .sim-split .sim-chart { height: 520px; }
+  .sim-split .sim-chart { height: calc(100vh - 176px); min-height: 420px; }
 }
