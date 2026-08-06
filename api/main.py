@@ -51,7 +51,7 @@ from src.layer3_strategy.case_overlay import (
 )
 from src.layer3_strategy.entry_levels import average_entry, buy_levels, sell_levels
 from src.layer3_strategy.screening import ScreeningRule, screen
-from src.layer3_strategy.surge import build_anchor
+from src.layer3_strategy.surge import build_anchor, find_cycle_low
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
@@ -854,7 +854,7 @@ class SimStop(BaseModel):
     enabled: bool = False
     mode: str = "pct"  # pct(평단 -%) | support(지지저항 기준)
     pct: float | None = None  # mode=pct: 평단에서 몇 % 아래
-    source: str = "avwap"  # mode=support: avwap | anchor_start | custom
+    source: str = "avwap"  # mode=support: avwap | anchor_start | cycle_low | custom
     custom_price: float | None = None
     tick_offset: int = 0  # 지지저항에서 ±N호가 (음수 = 아래)
 
@@ -864,6 +864,7 @@ class SimulateRequest(BaseModel):
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     window: int  # 급등 판정 창(거래일)
     min_gain_pct: float  # 급등 최소 상승률(%)
+    cycle_drop_pct: float  # 사이클 하락 기준(%) — 이만큼 안 빠진 구간 = 한 상승장(ADR-0012)
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high
@@ -880,18 +881,35 @@ def api_simulate(req: SimulateRequest) -> dict:
 
     **시각화 전용 결정론 계산.** 주문 전송·매매 판단 없음(CLAUDE.md). 모든 전략 숫자는
     요청에서 받는다(ADR-0009). end 를 기준일로 주면 그 시점까지만 본다(look-ahead 방지).
+
+    피보나치 시작점은 급등 시작 시가가 아니라 **사이클 저점**이다(ADR-0012, 오너 확정
+    2026-08-06). 급등 앵커는 파동 식별·앵커 VWAP·손절 기준으로 계속 쓴다.
     """
     code = req.code.strip().zfill(6)
     end_ts = pd.Timestamp(req.end) if req.end else pd.Timestamp.now().normalize()
-    # 52주 신고가 판정 + 급등 탐색이 1년 이상을 봐야 하므로 2년 치를 읽는다.
-    start = (end_ts - pd.Timedelta(days=365 * 2)).strftime("%Y-%m-%d")
-    df = get_candles(code, start, req.end, adjust=True)
-    if df.empty:
+    # 사이클 저점(피보 시작점)은 수년 전 바닥일 수 있다 — 이 종목의 전체 이력을 읽는다.
+    years = available_years()
+    full = get_candles(code, f"{years[0]}-01-01" if years else None, req.end, adjust=True)
+    if full.empty:
         raise HTTPException(status_code=404, detail=f"'{code}' 데이터가 없습니다.")
+    # 급등 탐색·체결 스캔은 기존과 같은 2년 창 — 전체 이력을 주면 수년 전 파동이 잡힌다.
+    df = full.loc[full["Date"] >= end_ts - pd.Timedelta(days=365 * 2)].reset_index(drop=True)
+    if df.empty:
+        raise HTTPException(status_code=404, detail=f"'{code}' 기준일 2년 내 데이터가 없습니다.")
     try:
         anchor = build_anchor(df, window=req.window, min_gain_pct=req.min_gain_pct)
+        # 사이클 저점은 파동 고점 이전에서만 찾는다 — 고점 뒤 하락은 이 파동의 눌림이다.
+        cycle = find_cycle_low(
+            full.loc[full["Date"] <= anchor.end_date], drop_pct=req.cycle_drop_pct
+        )
     except ValueError as e:  # 급등 없음 — 메시지에 실제 최대 상승률 포함(한국어)
         raise HTTPException(status_code=400, detail=str(e)) from e
+    fib_span = anchor.end_price - cycle.price
+    if fib_span <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"사이클 저점({cycle.price:,.0f})이 파동 고점({anchor.end_price:,.0f}) 이상입니다 — 하락 기준을 조정하세요.",
+        )
 
     buys = sorted(
         (s for s in req.buy if s.enabled and s.ratio is not None and 0 < s.ratio < 1),
@@ -913,17 +931,18 @@ def api_simulate(req: SimulateRequest) -> dict:
 
     computed: dict[str, int] = {}
     lines: list[dict] = [
+        {"price": cycle.price, "label": "사이클 저점", "kind": "anchor"},
         {"price": anchor.start_price, "label": "급등 시작(시가)", "kind": "anchor"},
         {"price": anchor.end_price, "label": "신고가" if anchor.is_52w_high else "파동 고점(52주 아님)", "kind": "anchor"},
     ]
     for s in buys:  # 되돌림 원값 — 목표가(라운드)와 근거 레벨을 함께 보여준다
-        lv = anchor.end_price - s.ratio * anchor.span
+        lv = anchor.end_price - s.ratio * fib_span
         lines.append({"price": lv, "label": f"{s.ratio * 100:.1f}%", "kind": "fib"})
 
     try:
         blevels = (
             buy_levels(
-                anchor.start_price,
+                cycle.price,  # 피보 시작점 = 사이클 저점 (ADR-0012)
                 anchor.end_price,
                 ratios=[s.ratio for s in buys],
                 tolerance_pct=req.round_tolerance_pct,
@@ -1018,6 +1037,8 @@ def api_simulate(req: SimulateRequest) -> dict:
         else:
             if s.source == "anchor_start":
                 base_px = anchor.start_price
+            elif s.source == "cycle_low":
+                base_px = cycle.price
             elif s.source == "custom":
                 if not s.custom_price or s.custom_price <= 0:
                     raise HTTPException(status_code=400, detail="손절 기준 가격을 입력하세요.")
@@ -1088,6 +1109,13 @@ def api_simulate(req: SimulateRequest) -> dict:
             "end_price": anchor.end_price,
             "gain_pct": anchor.surge.gain_pct,
             "is_52w_high": anchor.is_52w_high,
+        },
+        # 피보 시작점(ADR-0012). confirmed=False = 하락 기준 미충족 — 구간 최저가로 대신함.
+        "cycle": {
+            "date": cycle.date.strftime("%Y-%m-%d"),
+            "price": cycle.price,
+            "drop_pct": req.cycle_drop_pct,
+            "confirmed": cycle.confirmed,
         },
         "computed": computed,
         "lines": lines,

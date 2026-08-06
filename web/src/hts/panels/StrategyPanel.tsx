@@ -12,6 +12,7 @@ import {
   type StrategyDef,
 } from '../../api'
 import { ProChart, type ProChartHandle } from '../../ProChart'
+import { allVisible, type SimVisibility } from '../../simVisibility'
 import { currentSymbol, onSymbolPick, pickSymbol, type SymbolPick } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
 import { MiniCandles } from '../MiniCandles'
@@ -56,6 +57,7 @@ const SIM_SYM = { code: '005930', name: '삼성전자', market: 'KOSPI' } as con
 const SIM_EXAMPLE = {
   window: 20,
   gainPct: 30,
+  cycleDropPct: 50, // 오너도 -50/-60 미확정 — 화면에서 조정하는 값이다(ADR-0012)
   tolerancePct: 1.5,
   qtyShares: 100,
   buy: [
@@ -64,6 +66,17 @@ const SIM_EXAMPLE = {
     { ratio: 0.618, weight: 34 },
   ],
 } as const
+
+// ③ 차트 요소별 표시 필터 — 겹칠 때 하나씩 끄고 본다 (오너 지시 2026-08-06).
+const SIM_LAYERS: readonly (readonly [keyof SimVisibility, string])[] = [
+  ['anchor', '앵커'],
+  ['fib', '피보나치'],
+  ['buy', '매수'],
+  ['sell', '매도'],
+  ['stop', '손절'],
+  ['vwap', 'VWAP'],
+  ['fills', '체결'],
+] as const
 
 const PLACEHOLDER: Record<string, string> = {
   short: '5',
@@ -129,6 +142,13 @@ function SimFoot({ r }: { r: SimulateResponse }) {
         <b>급등 파동</b> {r.anchor.start_date} {fmtPrice(r.anchor.start_price)} →{' '}
         {r.anchor.end_date} {fmtPrice(r.anchor.end_price)} (+{r.anchor.gain_pct.toFixed(1)}%)
         {r.anchor.is_52w_high ? ' · 52주 신고가' : ' · 52주 신고가 아님'}
+      </p>
+      <p>
+        <b>피보 구간</b> 사이클 저점 {r.cycle.date} {fmtPrice(r.cycle.price)} → 고점{' '}
+        {fmtPrice(r.anchor.end_price)}
+        {r.cycle.confirmed
+          ? ` (-${r.cycle.drop_pct}% 하락 후 바닥)`
+          : ` (-${r.cycle.drop_pct}% 하락 없음 — 구간 최저가로 대신)`}
       </p>
       <p>
         <b>지지선 근거</b> 급등 시작가 {fmtPrice(r.anchor.start_price)}
@@ -445,6 +465,13 @@ export function StrategyPanel() {
   const [simRunning, setSimRunning] = useState(false)
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null)
   const [computed, setComputed] = useState<ComputedPrices>({})
+  const [simVis, setSimVis] = useState<SimVisibility>(allVisible)
+
+  function toggleLayer(k: keyof SimVisibility) {
+    const next = { ...simVis, [k]: !simVis[k] }
+    setSimVis(next)
+    proRef.current?.setSimVisibility(next)
+  }
 
   // 급등 기준 — ① 조건검색식 소관이다 (오너: "급등 퍼센테이지는 조건 검색식이지").
   // 전략이 담고 있는 검색식 조건에서 읽는다. 없으면 예시값(화면에 예시임을 명시).
@@ -472,6 +499,10 @@ export function StrategyPanel() {
   useEffect(() => {
     simResultRef.current = simResult
   }, [simResult])
+  const simVisRef = useRef(simVis)
+  useEffect(() => {
+    simVisRef.current = simVis
+  }, [simVis])
 
   // ③ 에 들어오면(차트가 새로 마운트되면) 대표 종목을 싣고, 직전 결과가 있으면 다시 그린다.
   useEffect(() => {
@@ -479,6 +510,8 @@ export function StrategyPanel() {
     proRef.current?.showSymbol(SIM_SYM.code, SIM_SYM.name, SIM_SYM.market)
     const r = simResultRef.current
     if (r) proRef.current?.applySimulation({ lines: r.lines, fills: r.fills, series: r.series })
+    // 차트가 새로 마운트되면 필터는 전체 표시로 초기화된다 — 이전 선택을 다시 입힌다.
+    proRef.current?.setSimVisibility(simVisRef.current)
   }, [step])
 
   async function runSimulation() {
@@ -508,6 +541,13 @@ export function StrategyPanel() {
       filled.push(`라운드 허용폭 ${tol}%`)
     }
 
+    let cyc = Number(draft.cycleDropPct)
+    if (!(cyc > 0 && cyc < 100)) {
+      cyc = SIM_EXAMPLE.cycleDropPct
+      set('cycleDropPct', String(cyc))
+      filled.push(`사이클 하락 기준 ${cyc}%`)
+    }
+
     const hasQty = Number(draft.qty) > 0
     const qty = hasQty ? Number(draft.qty) : SIM_EXAMPLE.qtyShares
     if (!hasQty) filled.push(`수량 ${SIM_EXAMPLE.qtyShares}주`)
@@ -520,6 +560,7 @@ export function StrategyPanel() {
         end: simDate || undefined,
         window: surge.window,
         min_gain_pct: surge.gainPct,
+        cycle_drop_pct: cyc,
         buy: buy.map((b) => ({
           id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled, price_override: b.priceOverride,
         })),
@@ -964,10 +1005,13 @@ export function StrategyPanel() {
                           <select
                             style={{ flex: 1 }}
                             value={draft.stopSource}
-                            onChange={(e) => set('stopSource', e.target.value as 'avwap' | 'anchor_start' | 'custom')}
+                            onChange={(e) =>
+                              set('stopSource', e.target.value as 'avwap' | 'anchor_start' | 'cycle_low' | 'custom')
+                            }
                           >
                             <option value="avwap">앵커 VWAP (지지선)</option>
                             <option value="anchor_start">급등 시작가</option>
+                            <option value="cycle_low">사이클 저점 (피보 시작점)</option>
                             <option value="custom">직접 가격</option>
                           </select>
                         </span>
@@ -1062,6 +1106,21 @@ export function StrategyPanel() {
                   {surge.src ||
                     '검색식에 등락률 조건이 없어 예시값입니다. 급등 기준(며칠·몇 %)은 ① 조건검색식에서 정합니다.'}
                 </p>
+                <div className="kv">
+                  <span className="k">사이클 하락 기준</span>
+                  <span className="v">
+                    <input
+                      className="amt"
+                      placeholder={String(SIM_EXAMPLE.cycleDropPct)}
+                      value={draft.cycleDropPct}
+                      onChange={(e) => set('cycleDropPct', e.target.value)}
+                    />
+                    <span className="unit">%</span>
+                  </span>
+                </div>
+                <p className="hint">
+                  이만큼 빠진 적 없는 구간은 한 상승장 — 그 시작 저점이 피보나치 시작점입니다(ADR-0012).
+                </p>
                 <div className="form-row" style={{ marginTop: 8 }}>
                   <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
                     {simRunning ? '계산 중…' : '시뮬레이션 실행'}
@@ -1082,9 +1141,18 @@ export function StrategyPanel() {
                         </td>
                       </tr>
                       <tr>
-                        <td className="flat">앵커</td>
+                        <td className="flat">피보 시작점</td>
                         <td className="num">
-                          {fmtPrice(simResult.anchor.start_price)} ~ {fmtPrice(simResult.anchor.end_price)}
+                          {simResult.cycle.date} {fmtPrice(simResult.cycle.price)}
+                          {!simResult.cycle.confirmed && (
+                            <small style={{ display: 'block' }}>-{simResult.cycle.drop_pct}% 하락 없음 — 구간 최저가</small>
+                          )}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="flat">피보 구간</td>
+                        <td className="num">
+                          {fmtPrice(simResult.cycle.price)} ~ {fmtPrice(simResult.anchor.end_price)}
                         </td>
                       </tr>
                       <tr>
@@ -1171,7 +1239,22 @@ export function StrategyPanel() {
               </Card>
             </div>
             <div className="sim-chart">
-              <ProChart ref={proRef} />
+              {/* 요소별 필터 — 겹칠 때 하나씩 끄고 본다 (오너 지시 2026-08-06). 줌은 유지된다. */}
+              <div className="chips sim-layers">
+                {SIM_LAYERS.map(([k, label]) => (
+                  <button
+                    key={k}
+                    className={`chip ${simVis[k] ? 'on' : ''}`}
+                    title={simVis[k] ? '숨기기' : '표시'}
+                    onClick={() => toggleLayer(k)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="sim-canvas">
+                <ProChart ref={proRef} />
+              </div>
               {/* 하단 결과 스트립 — "결국 결과가 어떻게 될거다"까지 차트 밑에서 (오너 지시) */}
               {simResult && <SimFoot r={simResult} />}
             </div>

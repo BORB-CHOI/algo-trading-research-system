@@ -112,6 +112,24 @@ class SurgeAnchor:
 
 
 @dataclass(frozen=True)
+class CycleLow:
+    """상승장 사이클의 시작 저점 — 피보나치 되돌림의 시작점 (ADR-0012).
+
+    오너 정의(2026-08-06): "고점 대비 drop_pct 급 하락을 안 맞은 구간은 전부 한 상승장."
+    사이클 경계는 drop_pct % 하락이고, 되돌림은 그 경계 직후의 바닥(Low)에서 긋는다.
+    급등 시작일 시가(ADR-0011)보다 훨씬 아래 — 파동 전체에 긋는 실제 관찰 방식이다.
+
+    `confirmed` = drop_pct 하락이 데이터 안에서 실제로 관측됐는가. False 면 구간 전체가
+    한 상승장이라 **구간 최저 Low** 로 대신했다는 뜻 — 화면이 이 사실을 알려야 한다
+    (데이터를 더 길게 주면 진짜 경계가 나올 수 있다).
+    """
+
+    date: pd.Timestamp
+    price: float
+    confirmed: bool
+
+
+@dataclass(frozen=True)
 class FibAnchor:
     """피보나치 되돌림을 그을 두 점.
 
@@ -313,6 +331,65 @@ def find_52w_high(
     if w.empty:
         raise ValueError(f"as_of({cut.date()}) 기준 최근 {weeks}주에 거래일이 없습니다.")
     return _argmax_high(w)
+
+
+def find_cycle_low(df: pd.DataFrame, *, drop_pct: float, as_of: AsOf = None) -> CycleLow:
+    """상승장 사이클이 시작된 저점 = 피보나치 되돌림의 시작점 (ADR-0012).
+
+    지그재그 상태기계 한 번 훑기 (대칭 임계값):
+
+    - 상승 상태: 고점(최고 High)을 갱신하다가 고점 대비 `drop_pct` % 이상 빠지면 하락 상태로.
+    - 하락 상태: 저점(최저 Low)을 갱신하다가 저점 대비 `drop_pct` % 이상 반등하면
+      그 저점을 사이클 시작으로 확정하고 상승 상태로.
+    - 데이터 끝이 하락 상태면 그때까지의 최저 Low 가 진행 중인 바닥 — 그걸 쓴다.
+      (파동 고점 직전에 큰 하락의 바닥이 있는, 오너가 실제로 긋는 케이스가 이쪽이다.)
+
+    사이클이 여러 번이면 **가장 최근** 확정 저점. 동률은 고점·저점 모두 **가장 이른 날**
+    (strict 비교 — 같은 값은 갱신하지 않는다). 하락·반등 판정은 경계 포함(이상).
+    같은 봉에서 신저가와 반등 확정이 동시에 나오면 그 봉의 저가가 저점이 된다 —
+    장중 순서를 모르니 봉 하나는 쪼개지 않는다.
+
+    `drop_pct` 는 전략 판단 기준이라 **기본값이 없다**(ADR-0009). 오너도 -50이냐 -60이냐를
+    확정하지 않았다 — 화면에서 조정하는 파라미터다.
+
+    **look-ahead:** `as_of` 를 주면 그 시점까지만 본다. 피보나치 시작점으로 쓸 때는
+    호출부가 df 를 **파동 고점일까지** 잘라 넘겨야 시작점이 고점 뒤에 잡히지 않는다.
+    """
+    if not 0 < drop_pct < 100:
+        raise ValueError(f"drop_pct 는 0과 100 사이(%)여야 합니다: {drop_pct!r}")
+    d, _ = _truncate(df, as_of)
+    highs = d["High"].to_numpy(dtype=np.float64)
+    lows = d["Low"].to_numpy(dtype=np.float64)
+
+    fall = 1.0 - drop_pct / 100.0
+    rise = 1.0 + drop_pct / 100.0
+    peak_px = highs[0]
+    trough_px, trough_i = lows[0], 0
+    cycle_i: int | None = None
+    down = False
+    for i in range(1, len(d)):
+        if down:
+            if lows[i] < trough_px:
+                trough_px, trough_i = lows[i], i
+            if highs[i] >= trough_px * rise:
+                cycle_i = trough_i
+                down = False
+                peak_px = highs[i]
+        else:
+            if highs[i] > peak_px:
+                peak_px = highs[i]
+            if lows[i] <= peak_px * fall:
+                down = True
+                trough_px, trough_i = lows[i], i
+
+    if down:
+        cycle_i = trough_i
+    if cycle_i is None:
+        i = int(np.argmin(lows))
+        return CycleLow(date=pd.Timestamp(d["Date"].iloc[i]), price=float(lows[i]), confirmed=False)
+    return CycleLow(
+        date=pd.Timestamp(d["Date"].iloc[cycle_i]), price=float(lows[cycle_i]), confirmed=True
+    )
 
 
 def build_anchor(

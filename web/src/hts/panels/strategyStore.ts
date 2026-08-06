@@ -48,12 +48,12 @@ export type SellStage = {
 /** 매도 반등률의 기준점. 오너가 "반등 몇 %"라 했을 때 무엇 대비인지가 갈려서 고르게 둔다. */
 export type SellBasis = 'avg_entry' | 'lowest_fill' | 'anchor_high'
 
-/** 손절 — 평단 대비 % 또는 지지저항(앵커 VWAP·급등 시작가·직접 가격) ±N호가 (오너 요구). */
+/** 손절 — 평단 대비 % 또는 지지저항(앵커 VWAP·급등 시작가·사이클 저점·직접 가격) ±N호가. */
 export type StopRule = {
   enabled: boolean
   mode: 'pct' | 'support'
   pct?: number // mode=pct: 평단에서 몇 % 아래
-  source: 'avwap' | 'anchor_start' | 'custom' // mode=support 기준선
+  source: 'avwap' | 'anchor_start' | 'cycle_low' | 'custom' // mode=support 기준선
   customPrice?: number
   tickOffset: number // 지지저항에서 ±N호가 (음수 = 아래)
 }
@@ -73,6 +73,8 @@ export type Strategy = {
   }
   /** 손절. 없으면(옛 저장본) 손절 미사용으로 연다. */
   stop?: StopRule
+  /** 사이클 하락 기준(%) — 피보 시작점 = 사이클 저점(ADR-0012). 비우면 실행 시 예시값. */
+  cycleDropPct?: number
   /** 주문조건 — 주문조건 카드 삭제(2026-08-05)로 새 저장본에는 없다. 옛 저장본 호환용. */
   order?: {
     priceType: PriceType
@@ -128,10 +130,11 @@ export type StrategyDraft = {
   sell: SellStage[]
   sellBasis: SellBasis
   roundTolerancePct: string
+  cycleDropPct: string
   stopEnabled: boolean
   stopMode: 'pct' | 'support'
   stopPct: string
-  stopSource: 'avwap' | 'anchor_start' | 'custom'
+  stopSource: 'avwap' | 'anchor_start' | 'cycle_low' | 'custom'
   stopCustom: string
   stopTicks: string // ±N호가 (음수 = 아래)
   priceType: PriceType
@@ -167,6 +170,7 @@ export function emptyDraft(): StrategyDraft {
     sell: [],
     sellBasis: 'avg_entry',
     roundTolerancePct: '',
+    cycleDropPct: '',
     stopEnabled: false,
     stopMode: 'pct',
     stopPct: '',
@@ -194,6 +198,7 @@ export function toDraft(s: Strategy): StrategyDraft {
     sell: (s.split?.sell ?? []).map((x) => ({ ...x })),
     sellBasis: s.split?.sellBasis ?? 'avg_entry',
     roundTolerancePct: s.split?.roundTolerancePct == null ? '' : String(s.split.roundTolerancePct),
+    cycleDropPct: s.cycleDropPct == null ? '' : String(s.cycleDropPct),
     stopEnabled: s.stop?.enabled ?? false,
     stopMode: s.stop?.mode ?? 'pct',
     stopPct: s.stop?.pct == null ? '' : String(s.stop.pct),
@@ -299,6 +304,14 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
     tolValue = tol.value
   }
 
+  let cycleValue: number | undefined
+  if (d.cycleDropPct.trim()) {
+    const cyc = toNum('사이클 하락 기준', d.cycleDropPct, false)
+    if (!cyc.ok) return cyc
+    if (cyc.value >= 100) return { ok: false, error: '[사이클 하락 기준] 100% 미만이어야 합니다.' }
+    cycleValue = cyc.value
+  }
+
   let stop: StopRule | undefined
   if (d.stopEnabled) {
     const ticks = Number(d.stopTicks || '0')
@@ -328,6 +341,7 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
       },
       ...(entry ? { entry } : {}),
       ...(stop ? { stop } : {}),
+      ...(cycleValue != null ? { cycleDropPct: cycleValue } : {}),
       split: {
         buy: d.buy.map((b) => ({ ...b })),
         sell: d.sell.map((s) => ({ ...s })),

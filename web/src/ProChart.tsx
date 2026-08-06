@@ -8,6 +8,7 @@ import {
 } from '@klinecharts/pro'
 import '@klinecharts/pro/dist/klinecharts-pro.css'
 import { registerKoreanLocale } from './locales'
+import { allVisible, type SimVisibility } from './simVisibility'
 import {
   postOverlay,
   postSignals,
@@ -126,6 +127,7 @@ type OverlayStore = {
   set: (lines: OverlayLine[], touches: OverlayTouch[]) => void
   /** 시뮬레이션 결과 — 체결 마커와 곡선(앵커 VWAP). 없으면 빈 배열로 지운다. */
   setSim: (fills: OverlayFill[], series: OverlaySeries[]) => void
+  setVisibility: (v: SimVisibility) => void
   clear: () => void
 }
 
@@ -185,6 +187,8 @@ function drawLines(c: DrawCtx, list: OverlayLine[]): void {
     ctx.lineTo(bounding.width, y)
     ctx.stroke()
     // 우측 라벨 — 캔들과 겹쳐도 읽히게 반투명 흰 바탕(라이트 테마) 위에 그린다.
+    // 선 **아래**에 둔다 — 위에 얹으면 바로 위 선·라벨과 포개져 숫자가 안 읽힌다
+    // (오너 지적 2026-08-06: "퍼센테이지랑 숫자값을 선 아래에").
     ctx.setLineDash([])
     ctx.lineWidth = 1
     const label = PRICE_LABEL_KINDS.has(ln.kind)
@@ -194,10 +198,10 @@ function drawLines(c: DrawCtx, list: OverlayLine[]): void {
     const w = ctx.measureText(label).width
     const x = bounding.width - w - pad * 2 - 2
     ctx.fillStyle = 'rgba(255,255,255,0.85)'
-    ctx.fillRect(x, y - 15, w + pad * 2, 14)
+    ctx.fillRect(x, y + 2, w + pad * 2, 14)
     ctx.fillStyle = color
     ctx.textAlign = 'left'
-    ctx.fillText(label, x + pad, y - 4)
+    ctx.fillText(label, x + pad, y + 13)
   }
 }
 
@@ -225,6 +229,7 @@ function createOverlayIndicator(): OverlayStore {
   const touchesByTime = new Map<number, OverlayTouch[]>()
   const fillsByTime = new Map<number, OverlayFill[]>()
   let seriesList: SeriesDraw[] = []
+  let vis = allVisible()
   const name = `OVERLAY_${++overlaySeq2}`
   registerIndicator({
     name,
@@ -243,8 +248,10 @@ function createOverlayIndicator(): OverlayStore {
       ctx.font = '11px sans-serif'
       ctx.lineWidth = 1
 
-      drawSeries(c, seriesList) // 곡선을 먼저 — 수평선 아래에 깔린다
-      drawLines(c, lines)
+      // 'round' 는 필터 대상이 아니다(케이스 검사기 전용) — vis 에 없는 kind 는 항상 그린다.
+      const visOf = vis as Partial<Record<OverlayLine['kind'], boolean>>
+      if (vis.vwap) drawSeries(c, seriesList) // 곡선을 먼저 — 수평선 아래에 깔린다
+      drawLines(c, lines.filter((ln) => visOf[ln.kind] ?? true))
 
       ctx.textAlign = 'center'
       ctx.fillStyle = TOUCH_COLOR
@@ -253,7 +260,7 @@ function createOverlayIndicator(): OverlayStore {
       })
 
       // 체결 마커는 "실제로 체결됐을 지점"이라 차수 숫자까지 찍어 어느 분할인지 보이게 한다.
-      forEachBarMark(c, fillsByTime, (f, x) => {
+      if (vis.fills) forEachBarMark(c, fillsByTime, (f, x) => {
         const y = yAxis.convertToPixel(f.price)
         const buy = f.side === 'buy'
         const isStop = !buy && f.stage === 0 // stage 0 = 손절 체결
@@ -292,6 +299,9 @@ function createOverlayIndicator(): OverlayStore {
         color: s.color ?? VWAP_COLOR,
         byTime: new Map(s.points.map((p) => [dayTs(p.time), p.value])),
       }))
+    },
+    setVisibility(v) {
+      vis = v
     },
     clear() {
       lines = []
@@ -414,6 +424,8 @@ export type ProChartHandle = {
   /** 시뮬레이션 결과 그리기(null = 해제). 전략 오버레이와 달리 차트가 스스로 조회하지
    *  않는다 — 파라미터를 쥔 화면(③ 시뮬레이션)이 계산해서 넘긴다. */
   applySimulation: (sim: SimulationDraw | null) => void
+  /** 요소별 표시 필터 — 데이터 재적재 없이 다시 그리기만 한다(줌 유지). */
+  setSimVisibility: (v: SimVisibility) => void
 }
 
 export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref) {
@@ -502,6 +514,12 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
       }
       // Pro 가 지표 재계산 API 를 안 열어둬서 setSymbol 로 다시 그리게 한다(기존 방식과 동일).
       chartRef.current?.setSymbol(symbolRef.current)
+    },
+    setSimVisibility(v) {
+      overlayRef.current!.setVisibility(v)
+      // setSymbol(데이터 재적재·줌 초기화) 대신 window resize 를 쏜다 — Pro 가 이 이벤트에서
+      // chart.resize() 를 부르고, resize() 는 크기가 같아도 전체 페인트를 다시 탄다(소스 확인).
+      window.dispatchEvent(new Event('resize'))
     },
   }))
 

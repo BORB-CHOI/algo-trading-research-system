@@ -1138,7 +1138,16 @@ body {
   overflow: hidden;
   background: var(--hts-panel);
 }
-.sim-split .sim-chart > :first-child {
+/* 요소별 표시 필터 — 차트 위 한 줄 (오너 지시 2026-08-06) */
+.sim-split .sim-layers {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--hts-line);
+}
+.sim-split .sim-canvas {
   flex: 1;
   min-height: 0;
 }
