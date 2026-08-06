@@ -79,6 +79,11 @@
   - 파라미터 sr_prd/sr_channel_width_pct/sr_loopback/sr_min_strength/sr_max_channels —
     요청 데이터로만(ADR-0009). 화면 존 = 반투명 띠 + 중앙 점선
   - 목표가 스냅 = **존 중앙** (오너 확정 2026-08-06)
+- **전략 저장 회귀 + 캡슐화** — ② 입력칸 숨김 후 저장 검증만 옛 가정(입력 필수)에 남아 저장 불가.
+  전략 1호 정의를 `strategyOne.ts` 단일 정본으로 캡슐화(오너 지시), 화면·요청·검증이 공유 (6c7ae15)
+- **전략 패널 구조 리팩토링** (오너 승인: "컴포넌트화 + 파일 분할") — 1,522줄 StrategyPanel →
+  얇은 셸(141) + 화면별 Screen/Strategy/Sim/BacktestStep + `components/ui.tsx`(Card·KV·MsgLine·Chips).
+  동작 변경 제로 — 전후 스크린샷 픽셀 대조 diff 없음, 전 파일 800줄 규칙 준수 (812f8eb)
 - ② "차트에 적용"·"해제" 버튼 삭제 (오너 결정) — ②는 설정만, 확인은 ③에서.
   차트 탭 전략 오버레이 입구 폐기(bus.pickStrategy 생산자 없음, ChartPanel 리스너는 잔존)
 - **미해결(다음 세션 최우선)**
