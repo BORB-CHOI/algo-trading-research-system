@@ -113,7 +113,7 @@ class SurgeAnchor:
 
 @dataclass(frozen=True)
 class CycleLow:
-    """상승장 사이클의 시작 저점 — 피보나치 되돌림의 시작점 (ADR-0012).
+    """상승장 사이클의 시작 저점 — 피보나치 되돌림의 시작점 (ADR-0013).
 
     오너 정의(2026-08-06): "고점 대비 drop_pct 급 하락을 안 맞은 구간은 전부 한 상승장."
     사이클 경계는 drop_pct % 하락이고, 되돌림은 그 경계 직후의 바닥(Low)에서 긋는다.
@@ -334,7 +334,7 @@ def find_52w_high(
 
 
 def find_cycle_low(df: pd.DataFrame, *, drop_pct: float, as_of: AsOf = None) -> CycleLow:
-    """상승장 사이클이 시작된 저점 = 피보나치 되돌림의 시작점 (ADR-0012).
+    """상승장 사이클이 시작된 저점 = 피보나치 되돌림의 시작점 (ADR-0013).
 
     지그재그 상태기계 한 번 훑기 (대칭 임계값):
 

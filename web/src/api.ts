@@ -313,7 +313,7 @@ export type SimulateRequest = {
   end?: string
   window: number // 급등 판정 창(거래일)
   min_gain_pct: number // 급등 최소 상승률(%)
-  cycle_drop_pct: number // 사이클 하락 기준(%) — 피보 시작점 = 사이클 저점(ADR-0012)
+  cycle_drop_pct: number // 사이클 하락 기준(%) — 피보 시작점 = 사이클 저점(ADR-0013)
   buy: SimStagePayload[]
   sell: SimStagePayload[]
   sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high'
@@ -360,7 +360,7 @@ export type SimulateResponse = {
     gain_pct: number
     is_52w_high: boolean
   }
-  // 피보 시작점(ADR-0012). confirmed=false = 하락 기준 미충족 — 구간 최저가로 대신함.
+  // 피보 시작점(ADR-0013). confirmed=false = 하락 기준 미충족 — 구간 최저가로 대신함.
   cycle: {
     date: string
     price: number

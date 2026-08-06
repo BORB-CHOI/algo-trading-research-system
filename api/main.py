@@ -864,7 +864,7 @@ class SimulateRequest(BaseModel):
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     window: int  # 급등 판정 창(거래일)
     min_gain_pct: float  # 급등 최소 상승률(%)
-    cycle_drop_pct: float  # 사이클 하락 기준(%) — 이만큼 안 빠진 구간 = 한 상승장(ADR-0012)
+    cycle_drop_pct: float  # 사이클 하락 기준(%) — 이만큼 안 빠진 구간 = 한 상승장(ADR-0013)
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high
@@ -882,7 +882,7 @@ def api_simulate(req: SimulateRequest) -> dict:
     **시각화 전용 결정론 계산.** 주문 전송·매매 판단 없음(CLAUDE.md). 모든 전략 숫자는
     요청에서 받는다(ADR-0009). end 를 기준일로 주면 그 시점까지만 본다(look-ahead 방지).
 
-    피보나치 시작점은 급등 시작 시가가 아니라 **사이클 저점**이다(ADR-0012, 오너 확정
+    피보나치 시작점은 급등 시작 시가가 아니라 **사이클 저점**이다(ADR-0013, 오너 확정
     2026-08-06). 급등 앵커는 파동 식별·앵커 VWAP·손절 기준으로 계속 쓴다.
     """
     code = req.code.strip().zfill(6)
@@ -942,7 +942,7 @@ def api_simulate(req: SimulateRequest) -> dict:
     try:
         blevels = (
             buy_levels(
-                cycle.price,  # 피보 시작점 = 사이클 저점 (ADR-0012)
+                cycle.price,  # 피보 시작점 = 사이클 저점 (ADR-0013)
                 anchor.end_price,
                 ratios=[s.ratio for s in buys],
                 tolerance_pct=req.round_tolerance_pct,
@@ -1110,7 +1110,7 @@ def api_simulate(req: SimulateRequest) -> dict:
             "gain_pct": anchor.surge.gain_pct,
             "is_52w_high": anchor.is_52w_high,
         },
-        # 피보 시작점(ADR-0012). confirmed=False = 하락 기준 미충족 — 구간 최저가로 대신함.
+        # 피보 시작점(ADR-0013). confirmed=False = 하락 기준 미충족 — 구간 최저가로 대신함.
         "cycle": {
             "date": cycle.date.strftime("%Y-%m-%d"),
             "price": cycle.price,

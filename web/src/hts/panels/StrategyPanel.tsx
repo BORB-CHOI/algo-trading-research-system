@@ -57,7 +57,7 @@ const SIM_SYM = { code: '005930', name: '삼성전자', market: 'KOSPI' } as con
 const SIM_EXAMPLE = {
   window: 20,
   gainPct: 30,
-  cycleDropPct: 50, // 오너도 -50/-60 미확정 — 화면에서 조정하는 값이다(ADR-0012)
+  cycleDropPct: 50, // 오너도 -50/-60 미확정 — 화면에서 조정하는 값이다(ADR-0013)
   tolerancePct: 1.5,
   qtyShares: 100,
   buy: [
@@ -1119,7 +1119,7 @@ export function StrategyPanel() {
                   </span>
                 </div>
                 <p className="hint">
-                  이만큼 빠진 적 없는 구간은 한 상승장 — 그 시작 저점이 피보나치 시작점입니다(ADR-0012).
+                  이만큼 빠진 적 없는 구간은 한 상승장 — 그 시작 저점이 피보나치 시작점입니다(ADR-0013).
                 </p>
                 <div className="form-row" style={{ marginTop: 8 }}>
                   <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
