@@ -78,7 +78,7 @@
     다른 유일한 부분 — 원본들은 일괄 계산이라 look-ahead)
   - 파라미터 sr_prd/sr_channel_width_pct/sr_loopback/sr_min_strength/sr_max_channels —
     요청 데이터로만(ADR-0009). 화면 존 = 반투명 띠 + 중앙 점선
-  - 미결: 목표가 스냅 = 존 중앙(임시) vs 존 경계 — 오너 확정 대기
+  - 목표가 스냅 = **존 중앙** (오너 확정 2026-08-06)
 - ② "차트에 적용"·"해제" 버튼 삭제 (오너 결정) — ②는 설정만, 확인은 ③에서.
   차트 탭 전략 오버레이 입구 폐기(bus.pickStrategy 생산자 없음, ChartPanel 리스너는 잔존)
 - **미해결(다음 세션 최우선)**
