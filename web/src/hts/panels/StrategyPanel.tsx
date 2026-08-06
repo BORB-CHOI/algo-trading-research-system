@@ -13,7 +13,7 @@ import {
 } from '../../api'
 import { ProChart, type ProChartHandle } from '../../ProChart'
 import { allVisible, type OverlayVisibility } from '../../simVisibility'
-import { currentSymbol, onSymbolPick, pickSymbol, type SymbolPick } from '../bus'
+import { currentSymbol, onSymbolPick, pickStrategy, pickSymbol, type SymbolPick } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
 import { MiniCandles } from '../MiniCandles'
 import { BuyStages, SellStages, type ComputedPrices } from './SplitStages'
@@ -34,6 +34,7 @@ import {
   toDraft,
   toStrategy,
   type SavedCondition,
+  type SellBasis,
   type Strategies,
   type StrategyDraft,
 } from './strategyStore'
@@ -90,9 +91,7 @@ const PLACEHOLDER: Record<string, string> = {
   period: '20',
   days: '250',
   within: '3',
-  lookback: '250',
-  base_window: '20',
-  base_range: '8',
+  drop_pct: '50',
   near: '1.5',
 }
 
@@ -134,6 +133,26 @@ function summarizeCond(c: SavedCondition, def: ConditionDef | undefined): string
 }
 
 const SELL_BASIS_LABEL = { avg_entry: '매수 평단', lowest_fill: '최저 체결가', anchor_high: '사이클 고점' } as const
+
+// 매도 기준점 선택 — ②와 ③ 양쪽에 노출한다. ②에만 묻어두면 ③에서 반등률을 만지는
+// 동안 기준점이 뭔지 안 보여 "평단 +10%가 왜 사이클 고점 값이냐"가 재발한다(2026-08-06).
+function SellBasisPicker({ value, onChange }: { value: SellBasis; onChange: (b: SellBasis) => void }) {
+  return (
+    <div className="kv">
+      <span className="k">매도 기준점</span>
+      <span className="v">
+        <span className="radios" style={{ marginLeft: 'auto' }}>
+          {(Object.entries(SELL_BASIS_LABEL) as [SellBasis, string][]).map(([k, label]) => (
+            <label key={k}>
+              <input type="radio" checked={value === k} onChange={() => onChange(k)} />
+              {label}
+            </label>
+          ))}
+        </span>
+      </span>
+    </div>
+  )
+}
 
 // ③ 차트 하단 결과 스트립 — 사이클·지지선·매도 기준·최종 손익을 한 줄씩. 차트와 같이 읽는 용도.
 function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeof SELL_BASIS_LABEL }) {
@@ -927,6 +946,38 @@ export function StrategyPanel() {
                     values={draft.entryParams}
                     onChange={(k, v) => set('entryParams', { ...draft.entryParams, [k]: v })}
                   />
+                  {/* 차트 적용 버튼 — 화면 개편 때 pickStrategy 호출부가 통째로 사라져
+                      "설정해도 차트에 아무것도 안 뜨는" 상태였다 (오너 지적 2026-08-06 복원). */}
+                  <div className="form-row" style={{ marginTop: 8 }}>
+                    <button
+                      className="primary"
+                      onClick={() => {
+                        const r = parseParams(entryDef.params, draft.entryParams)
+                        if (!r.ok) {
+                          setEntryErr(r.error)
+                          return
+                        }
+                        setEntryErr('')
+                        pickStrategy({
+                          key: entryDef.key,
+                          params: r.value,
+                          signals: entryDef.signals,
+                          overlay: entryDef.overlay,
+                        })
+                        setMsg(`[${entryDef.name}] 적용 — 차트 탭에서 확인하세요.`)
+                      }}
+                    >
+                      차트에 적용
+                    </button>
+                    <button
+                      onClick={() => {
+                        pickStrategy(null)
+                        setMsg('차트 오버레이 해제')
+                      }}
+                    >
+                      해제
+                    </button>
+                  </div>
                 </>
               ) : (
                 <p className="hint">기법을 선택하면 파라미터 입력 폼이 나옵니다.</p>
@@ -939,25 +990,7 @@ export function StrategyPanel() {
             </Card>
 
             <Card title="분할 매도" sub="기준점 대비 반등률">
-              <div className="kv">
-                <span className="k">매도 기준점</span>
-                <span className="v">
-                  <span className="radios" style={{ marginLeft: 'auto' }}>
-                    {(
-                      [
-                        ['avg_entry', '매수 평단'],
-                        ['lowest_fill', '최저 체결가'],
-                        ['anchor_high', '사이클 고점'],
-                      ] as const
-                    ).map(([k, label]) => (
-                      <label key={k}>
-                        <input type="radio" checked={draft.sellBasis === k} onChange={() => set('sellBasis', k)} />
-                        {label}
-                      </label>
-                    ))}
-                  </span>
-                </span>
-              </div>
+              <SellBasisPicker value={draft.sellBasis} onChange={(b) => set('sellBasis', b)} />
               <SellStages stages={draft.sell} computed={computed} onChange={(s) => set('sell', s)} />
               <div className="kv" style={{ marginTop: 8 }}>
                 <span className="k">라운드 허용폭</span>
@@ -1233,7 +1266,8 @@ export function StrategyPanel() {
               <Card title="분할 매수" sub="②와 같은 값 — 여기서 고쳐도 됨">
                 <BuyStages stages={draft.buy} computed={computed} onChange={(b) => set('buy', b)} />
               </Card>
-              <Card title="분할 매도">
+              <Card title="분할 매도" sub={`기준점: ${SELL_BASIS_LABEL[draft.sellBasis]}`}>
+                <SellBasisPicker value={draft.sellBasis} onChange={(b) => set('sellBasis', b)} />
                 <SellStages stages={draft.sell} computed={computed} onChange={(s) => set('sell', s)} />
               </Card>
             </div>

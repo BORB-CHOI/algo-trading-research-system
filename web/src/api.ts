@@ -270,11 +270,11 @@ export type OverlaySeries = {
 }
 
 export type OverlayAnchors = {
-  base_start: string // 베이스(평평한 구간) 시작일
-  base_end: string // 베이스 끝일
-  swing_high: string // 신고가 날짜
-  base_price: number
+  low_date: string // 상승장 사이클 저점일 (ADR-0013)
+  high_date: string // 사이클 고점일 (저점 이후 최고 High)
+  low_price: number
   high_price: number
+  confirmed: boolean // false = 하락 기준 미충족 — 구간 최저가로 대신
 }
 
 export type OverlayRequest = {

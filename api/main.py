@@ -838,10 +838,17 @@ def api_overlay(req: OverlayRequest) -> dict:
     """
     strat = _get_strategy(req.strategy, need="overlay")
     params = _parse_params_or_400(strat, dict(req.params))
-    lookback = strat.lookback(params) if strat.lookback is not None else 1
-    end_ts = pd.Timestamp(req.end) if req.end else pd.Timestamp.now().normalize()
-    start = (end_ts - pd.Timedelta(days=lookback * 2 + 14)).strftime("%Y-%m-%d")
-    df = get_candles(req.code, start, req.end, adjust=True)
+    if strat.full_history:
+        # 사이클 정의(ADR-0013) — 저점이 수년 전 바닥일 수 있다. end 를 주면 그날까지만
+        # 잘라 look-ahead 를 막는다(왼쪽만 본다). 안 주면 기준일 = 최신 거래일.
+        df = full_history_adjusted(req.code)
+        if not df.empty and req.end:
+            df = df.loc[df["Date"] <= pd.Timestamp(req.end)].reset_index(drop=True)
+    else:
+        lookback = strat.lookback(params) if strat.lookback is not None else 1
+        end_ts = pd.Timestamp(req.end) if req.end else pd.Timestamp.now().normalize()
+        start = (end_ts - pd.Timedelta(days=lookback * 2 + 14)).strftime("%Y-%m-%d")
+        df = get_candles(req.code, start, req.end, adjust=True)
     if df.empty:
         raise HTTPException(
             status_code=404, detail=f"'{req.code.strip().zfill(6)}' 구간 데이터가 없습니다."

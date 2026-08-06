@@ -1,12 +1,15 @@
-"""전략 카탈로그(case_overlay)·피보나치 되돌림(fibonacci) 단위 테스트 (ADR-0009, BORB-42).
+"""전략 카탈로그(case_overlay)·피보나치 되돌림(fibonacci) 단위 테스트 (ADR-0013).
 
 합성 일봉만 쓰므로 실데이터 없이 항상 돈다. API 계약 스모크는 test_api.py(slow).
 
-합성 시나리오 기본형: 평평한 베이스 20일(10,000 고정) → 급등 10일(20,000 도달)
-→ 되돌림 6일. 베이스·앵커·레벨·라운드·touch 를 손계산 값과 대조한다.
+파동 = 상승장 사이클 (ADR-0013, 구 "베이스 탐지" 정의 폐기).
+기본 시나리오: 10,000 → 20,000 → 폭락 9,000(-55%) → 반등 확정 → 21,000 신고점 → 되돌림.
+drop_pct=50 기준 사이클 저점 = 9,000 바닥, 고점 = 21,000, 파동폭 12,000.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import pandas as pd
 import pytest
@@ -18,77 +21,98 @@ from src.layer3_strategy.case_overlay import (
     strategies_payload,
 )
 from src.layer3_strategy.fibonacci import (
-    BASE_NOT_FOUND_MSG,
     FIB_RATIOS,
     MAX_TOUCHES,
     _round_candidates,
+    _round_label,
     compute_overlay,
 )
 
+Bar = tuple[float, float, float, float]  # (Open, High, Low, Close)
+
+
+def flat_bar(price: float) -> Bar:
+    return (price, price, price, price)
+
+
+def rally_bar(open_: float, close: float) -> Bar:
+    """꼬리 없는 양봉 (고가=종가, 저가=시가) — 손계산이 쉬워진다."""
+    return (open_, close, open_, close)
+
+
+def drop_bar(open_: float, close: float) -> Bar:
+    return (open_, open_, close, close)
+
+
+def make_ohlc(bars: Sequence[Bar], *, start: str = "2026-01-05") -> pd.DataFrame:
+    idx = pd.bdate_range(start=start, periods=len(bars))
+    o, h, low, c = (list(x) for x in zip(*bars, strict=True))
+    return pd.DataFrame(
+        {"Date": idx, "Open": o, "High": h, "Low": low, "Close": c, "Volume": [1_000] * len(bars)}
+    )
+
 
 def make_df(closes: list[float], start: str = "2026-01-05") -> pd.DataFrame:
-    """종가 리스트 → 합성 일봉(영업일 달력). fibonacci/ma_cross 는 Date·Close 만 쓴다."""
+    """종가 리스트 → 합성 일봉. ma_cross 는 Date·Close 만 쓴다."""
     dates = pd.bdate_range(start=start, periods=len(closes))
     return pd.DataFrame({"Date": dates, "Close": [float(c) for c in closes]})
 
 
-# 기본 시나리오: 베이스 20일 @10,000 → 급등 10일(11,000..20,000) → 되돌림 6일.
-BASE = [10_000.0] * 20
-RALLY = [11_000, 12_000, 13_000, 14_000, 15_000, 16_000, 17_000, 18_000, 19_000, 20_000]
-RETRACE = [18_000, 16_000, 15_000, 14_000, 13_820, 14_500]
-SCENARIO = BASE + RALLY + RETRACE
+# 사이클: idx4 = -50% 확정 바닥(9,000), idx5 반등 확정(≥13,500), idx6 = 신고점 21,000.
+# 상승을 두 봉으로 쪼갠 이유: 한 봉의 저가가 자기 고가의 절반이면 같은 봉에서 하락이 확정된다
+# (KRX ±30% 상하한가에선 불가능한 합성 봉의 함정 — test_surge 와 동일).
+WAVE: list[Bar] = [
+    flat_bar(10_000),
+    rally_bar(10_000, 14_000),
+    rally_bar(14_000, 20_000),
+    drop_bar(20_000, 12_000),
+    drop_bar(12_000, 9_000),  # idx4 사이클 저점
+    rally_bar(9_000, 14_000),
+    rally_bar(14_000, 21_000),  # idx6 사이클 고점
+]
+RETRACE: list[Bar] = [
+    drop_bar(21_000, 16_300),  # 38.2% 레벨(16,416.4)의 0.71% 안 → touch
+    drop_bar(16_300, 15_000),  # 정확히 50% 레벨 → touch
+]
 
 # 파라미터는 테스트 데이터다 — 전략 하드코딩이 아니라 검증 입력값(ADR-0009와 무관).
-P = {"lookback": 100, "base_window": 5, "base_range": 1.0, "near": 1.0}
+P = {"drop_pct": 50, "near": 2.0}
 
 
 # ─────────────────────────────────────────────────────────────
-# 베이스 탐지·앵커
+# 앵커 (사이클 저점·고점)
 # ─────────────────────────────────────────────────────────────
 
 
-def test_base_and_anchors() -> None:
-    df = make_df(SCENARIO)
-    out = compute_overlay(df, P)
-    a = out["anchors"]
-    dates = df["Date"]
-    # 베이스 = 평평한 20일 전체, 저점 = 10,000
-    assert a["base_start"] == dates.iloc[0].strftime("%Y-%m-%d")
-    assert a["base_end"] == dates.iloc[19].strftime("%Y-%m-%d")
-    assert a["base_price"] == 10_000.0
-    # 신고가 = 베이스 이후 최고 종가 20,000 (급등 마지막 날 = 인덱스 29)
-    assert a["swing_high"] == dates.iloc[29].strftime("%Y-%m-%d")
-    assert a["high_price"] == 20_000.0
+def test_anchors_are_cycle_low_and_high() -> None:
+    df = make_ohlc(WAVE + RETRACE)
+    a = compute_overlay(df, P)["anchors"]
+    assert (a["low_date"], a["low_price"]) == (df["Date"].iloc[4].strftime("%Y-%m-%d"), 9_000.0)
+    assert (a["high_date"], a["high_price"]) == (df["Date"].iloc[6].strftime("%Y-%m-%d"), 21_000.0)
+    assert a["confirmed"] is True
 
 
-def test_most_recent_base_wins() -> None:
-    """평평한 구간이 둘이면(A→급등→B→급등) 가장 최근 B 가 베이스다."""
-    closes = (
-        [10_000.0] * 10  # 베이스 A
-        + [12_000, 14_000, 16_000, 18_000, 20_000]  # 급등 1
-        + [17_000]  # 되돌림
-        + [15_000.0] * 10  # 베이스 B
-        + [17_000, 20_000, 23_000, 25_000]  # 급등 2
-        + [22_000]  # 되돌림
-    )
-    out = compute_overlay(make_df(closes), P)
-    assert out["anchors"]["base_price"] == 15_000.0  # B 의 저점 (A 의 10,000 아님)
-    assert out["anchors"]["high_price"] == 25_000.0  # B 이후 신고가
+def test_left_of_cut_only() -> None:
+    """신고점 이전까지 잘라 넘기면 그 시점 고점(14,000)으로 긋는다 — look-ahead 금지
+    (오너 지적 2026-08-06). 잘린 오른쪽의 21,000 은 그 시점에 존재하지 않는 값이다."""
+    df = make_ohlc(WAVE)
+    a = compute_overlay(df.iloc[:6].reset_index(drop=True), P)["anchors"]
+    assert (a["low_price"], a["high_price"]) == (9_000.0, 14_000.0)
 
 
-def test_base_not_found_raises() -> None:
-    """꾸준히 오르기만 하면(하루 +3%) 평평한 구간이 없어 규정 메시지로 실패한다."""
-    closes = [10_000 * 1.03**i for i in range(60)]
-    with pytest.raises(ValueError, match="평평한 베이스"):
-        compute_overlay(make_df(closes), P)
-    # API 400 detail 로 그대로 나가는 문구가 계약 그대로인지도 고정한다.
-    assert "base_range" in BASE_NOT_FOUND_MSG and "base_window" in BASE_NOT_FOUND_MSG
+def test_no_drop_falls_back_to_range_min() -> None:
+    """drop_pct 하락이 없으면 구간 최저 Low + confirmed=False — 화면이 표시할 근거."""
+    df = make_ohlc([flat_bar(10_000), rally_bar(10_000, 14_000), rally_bar(14_000, 20_000)])
+    a = compute_overlay(df, P)["anchors"]
+    assert a["confirmed"] is False
+    assert (a["low_price"], a["high_price"]) == (10_000.0, 20_000.0)
 
 
-def test_too_few_rows_raises() -> None:
-    closes = [10_000.0] * 5
-    with pytest.raises(ValueError, match="거래일"):
-        compute_overlay(make_df(closes), {**P, "base_window": 10})
+def test_drop_pct_range_validated() -> None:
+    df = make_ohlc(WAVE)
+    for bad in (0, 100, -5):
+        with pytest.raises(ValueError, match="drop_pct"):
+            compute_overlay(df, {"drop_pct": bad, "near": 2})
 
 
 # ─────────────────────────────────────────────────────────────
@@ -97,35 +121,26 @@ def test_too_few_rows_raises() -> None:
 
 
 def test_fib_levels_exact() -> None:
-    """레벨가 = 신고가 − 비율 × (신고가 − 베이스 저점). 파동폭 10,000 이라 손계산이 쉽다."""
-    out = compute_overlay(make_df(SCENARIO), P)
-    fib = [(ln["label"], ln["price"]) for ln in out["lines"] if ln["kind"] == "fib"]
-    assert fib == [
-        ("23.6%", 17_640.0),
-        ("38.2%", 16_180.0),
-        ("50.0%", 15_000.0),
-        ("61.8%", 13_820.0),
-        ("78.6%", 12_140.0),
-    ]
+    """레벨가 = 고점 − 비율 × 파동폭(12,000)."""
+    out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
+    fib = {ln["label"]: ln["price"] for ln in out["lines"] if ln["kind"] == "fib"}
+    for ratio in FIB_RATIOS:
+        assert fib[f"{ratio * 100:.1f}%"] == pytest.approx(21_000 - ratio * 12_000)
     assert len(FIB_RATIOS) == 5  # 표준 비율 5개 (ADR-0009 §4)
 
 
 def test_anchor_lines_present() -> None:
-    out = compute_overlay(make_df(SCENARIO), P)
+    out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
     anchors = {ln["label"]: ln["price"] for ln in out["lines"] if ln["kind"] == "anchor"}
-    assert anchors == {"베이스": 10_000.0, "신고가": 20_000.0}
+    assert anchors == {"사이클 저점": 9_000.0, "사이클 고점": 21_000.0}
 
 
 def test_round_figures_near_filter() -> None:
-    """near=1% 면 50% 레벨(정확히 15,000)만 라운드로 잡힌다. near=2% 면 이웃 라운드도 들어온다."""
-    out = compute_overlay(make_df(SCENARIO), P)  # near=1.0
+    """near=2%: 23.6%레벨 18,168→18,000(0.92%✓), 50%레벨 15,000→자신(0%✓), 나머지는 밖.
+    오름차순 정렬·중복 제거까지 고정한다."""
+    out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
     rounds = [(ln["price"], ln["label"]) for ln in out["lines"] if ln["kind"] == "round"]
-    assert rounds == [(15_000.0, "15,000 라운드")]
-
-    out2 = compute_overlay(make_df(SCENARIO), {**P, "near": 2.0})
-    prices2 = [ln["price"] for ln in out2["lines"] if ln["kind"] == "round"]
-    # 16,180→16,000(1.11%), 13,820→14,000(1.30%), 12,140→12,000(1.15%) 이 추가. 오름차순 정렬.
-    assert prices2 == [12_000.0, 14_000.0, 15_000.0, 16_000.0]
+    assert rounds == [(15_000.0, "15,000 라운드"), (18_000.0, "18,000 라운드")]
 
 
 def test_round_candidates_rule() -> None:
@@ -134,6 +149,7 @@ def test_round_candidates_rule() -> None:
     assert _round_candidates(50_000) == [50_000.0]  # 이미 라운드면 후보 1개
     assert _round_candidates(9_870) == [9_800.0, 9_900.0]  # step = 100
     assert _round_candidates(0) == []
+    assert _round_label(312.5) == "312.5 라운드"  # 수정주가 보정 소수 단위
 
 
 # ─────────────────────────────────────────────────────────────
@@ -142,25 +158,24 @@ def test_round_candidates_rule() -> None:
 
 
 def test_touches_only_near_levels_after_high() -> None:
-    df = make_df(SCENARIO)
-    out = compute_overlay(df, P)  # near=1.0
+    df = make_ohlc(WAVE + RETRACE)
+    out = compute_overlay(df, P)
     dates = df["Date"]
-    # 되돌림 중 15,000(=50.0%)·13,820(=61.8%) 만 ±1% 안 — 인덱스 32, 34.
     assert out["touches"] == [
-        {"time": dates.iloc[32].strftime("%Y-%m-%d"), "price": 15_000.0, "label": "50.0% 근접"},
-        {"time": dates.iloc[34].strftime("%Y-%m-%d"), "price": 13_820.0, "label": "61.8% 근접"},
+        {"time": dates.iloc[7].strftime("%Y-%m-%d"), "price": 16_300.0, "label": "38.2% 근접"},
+        {"time": dates.iloc[8].strftime("%Y-%m-%d"), "price": 15_000.0, "label": "50.0% 근접"},
     ]
 
 
 def test_touches_capped_at_30_most_recent() -> None:
     """레벨 위에 40일 눌러앉으면 touch 는 최근 30개만 남는다(계약 상한)."""
-    closes = [10_000.0] * 10 + [12_000, 14_000, 16_000, 18_000, 20_000] + [15_000.0] * 40
-    df = make_df(closes)
+    bars = WAVE + [flat_bar(15_000)] * 40  # 15,000 = 정확히 50% 레벨
+    df = make_ohlc(bars)
     out = compute_overlay(df, {**P, "near": 0.5})
     assert len(out["touches"]) == MAX_TOUCHES == 30
-    # 40개 중 앞 10개가 잘리고 최근 30개(인덱스 25~54)가 남는다.
-    assert out["touches"][0]["time"] == df["Date"].iloc[25].strftime("%Y-%m-%d")
-    assert out["touches"][-1]["time"] == df["Date"].iloc[54].strftime("%Y-%m-%d")
+    # 40개 중 앞 10개가 잘리고 최근 30개(인덱스 17~46)가 남는다.
+    assert out["touches"][0]["time"] == df["Date"].iloc[17].strftime("%Y-%m-%d")
+    assert out["touches"][-1]["time"] == df["Date"].iloc[46].strftime("%Y-%m-%d")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -181,7 +196,7 @@ def test_catalog_payload_contract() -> None:
 
     fib = by_key["fib_retrace"]
     assert (fib["signals"], fib["overlay"]) == (False, True)
-    assert [p["key"] for p in fib["params"]] == ["lookback", "base_window", "base_range", "near"]
+    assert [p["key"] for p in fib["params"]] == ["drop_pct", "near"]  # 베이스 파라미터 폐기
     for s in payload["strategies"]:
         for p in s["params"]:
             assert set(p) == {"key", "label", "type", "unit", "required"}  # /api/conditions 와 동일
@@ -200,10 +215,10 @@ def test_parse_params_validation() -> None:
         parse_params(ma, {"short": 5, "long": 20, "extra": 1})
 
     fib = STRATEGIES["fib_retrace"]
-    with pytest.raises(ValueError, match="길어야"):
-        parse_params(fib, {"lookback": 5, "base_window": 10, "base_range": 3, "near": 1})
+    with pytest.raises(ValueError, match="0과 100 사이"):
+        parse_params(fib, {"drop_pct": 120, "near": 1})
     with pytest.raises(ValueError, match="0보다"):
-        parse_params(fib, {"lookback": 60, "base_window": 10, "base_range": -1, "near": 1})
+        parse_params(fib, {"drop_pct": 50, "near": -1})
 
 
 def test_ma_cross_parametrized_signal() -> None:

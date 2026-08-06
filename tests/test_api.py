@@ -108,7 +108,7 @@ def test_strategies_catalog_contract() -> None:
 
     fib = by_key["fib_retrace"]
     assert (fib["signals"], fib["overlay"]) == (False, True)
-    assert [p["key"] for p in fib["params"]] == ["lookback", "base_window", "base_range", "near"]
+    assert [p["key"] for p in fib["params"]] == ["drop_pct", "near"]  # 사이클 정의(ADR-0013)
     for s in by_key.values():
         assert set(s) == {"key", "name", "desc", "signals", "overlay", "params"}
         for p in s["params"]:
@@ -159,27 +159,24 @@ def test_signals_unknown_strategy_404() -> None:
 
 
 def test_overlay_contract() -> None:
-    """POST /api/overlay — 피보나치 되돌림. 실데이터라 베이스 존재를 보장할 수 없으므로
-    200(계약 형태) 또는 규정된 400 메시지 중 하나면 계약 준수다."""
+    """POST /api/overlay — 피보나치 되돌림 = 상승장 사이클 파동 (ADR-0013)."""
     r = client.post(
         "/api/overlay",
         json={
             "code": "005930",
             "strategy": "fib_retrace",
-            "params": {"lookback": 250, "base_window": 10, "base_range": 6, "near": 2},
+            "params": {"drop_pct": 50, "near": 2},
             "end": "2026-07-16",
         },
     )
-    if r.status_code == 400:
-        assert "평평한 베이스" in r.json()["detail"]
-        return
     assert r.status_code == 200
     j = r.json()
     assert set(j) == {"code", "strategy", "anchors", "lines", "touches"}
     assert j["code"] == "005930"
     assert j["strategy"] == "fib_retrace"
-    assert set(j["anchors"]) == {"base_start", "base_end", "swing_high", "base_price", "high_price"}
-    assert j["anchors"]["base_start"] <= j["anchors"]["base_end"] < j["anchors"]["swing_high"]
+    assert set(j["anchors"]) == {"low_date", "high_date", "low_price", "high_price", "confirmed"}
+    # look-ahead 금지 — 기준일(end) 오른쪽은 절대 안 본다 (오너 지적 2026-08-06).
+    assert j["anchors"]["low_date"] <= j["anchors"]["high_date"] <= "2026-07-16"
     kinds = {ln["kind"] for ln in j["lines"]}
     assert kinds <= {"fib", "round", "anchor"}
     fib_labels = [ln["label"] for ln in j["lines"] if ln["kind"] == "fib"]
@@ -189,6 +186,34 @@ def test_overlay_contract() -> None:
     assert len(j["touches"]) <= 30
     for t in j["touches"]:
         assert set(t) == {"time", "price", "label"}
+        assert t["time"] <= "2026-07-16"
+
+
+def test_simulate_looks_left_of_base_date_only() -> None:
+    """POST /api/simulate — 기준일 왼쪽만 본다 (오너 지적 2026-08-06 회귀 고정).
+
+    사이클 저점·고점·체결일 전부 기준일 이하여야 한다. 기준일을 당기면 그 시점에
+    존재하지 않던 고점이 사라져야 한다."""
+    body = {
+        "code": "005930",
+        "end": "2026-03-31",
+        "cycle_drop_pct": 50,
+        "buy": [{"id": "a", "ratio": 0.5, "weight": 100}],
+        "sell": [{"id": "s", "rebound_pct": 10, "weight": 100}],
+        "sell_basis": "avg_entry",
+        "round_tolerance_pct": 1.5,
+        "qty": 10,
+    }
+    r = client.post("/api/simulate", json=body)
+    assert r.status_code == 200
+    j = r.json()
+    assert j["cycle"]["low_date"] <= j["cycle"]["high_date"] <= "2026-03-31"
+    for f in j["fills"]:
+        assert f["time"] <= "2026-03-31"
+    # 기준일을 뒤로 옮기면 고점은 그대로거나 더 뒤 — 앞선 기준일 결과가 미래를 봤다면 모순.
+    r2 = client.post("/api/simulate", json={**body, "end": "2026-07-16"})
+    assert r2.status_code == 200
+    assert r2.json()["cycle"]["high_date"] >= j["cycle"]["high_date"]
 
 
 def test_overlay_signals_only_strategy_400() -> None:

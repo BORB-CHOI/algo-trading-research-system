@@ -17,6 +17,7 @@ export function ChartPanel({ panelApi }: { panelApi?: DockviewPanelApi }) {
   const ref = useRef<ProChartHandle>(null)
   const [hasOverlay, setHasOverlay] = useState(() => currentStrategy()?.overlay ?? false)
   const [vis, setVis] = useState<OverlayVisibility>(allVisible)
+  const [overlayErr, setOverlayErr] = useState<string | null>(null)
 
   function toggleLayer(k: keyof OverlayVisibility) {
     const next = { ...vis, [k]: !vis[k] }
@@ -71,10 +72,12 @@ export function ChartPanel({ panelApi }: { panelApi?: DockviewPanelApi }) {
               {label}
             </button>
           ))}
+          {/* 조회 실패를 화면에 — 콘솔에만 남기면 "왜 아무것도 안 뜨지"가 된다 (오너 지적) */}
+          {overlayErr && <span className="hint warn">{overlayErr}</span>}
         </div>
       )}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <ProChart ref={ref} />
+        <ProChart ref={ref} onOverlayError={setOverlayErr} />
       </div>
     </div>
   )

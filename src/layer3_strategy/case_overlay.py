@@ -47,6 +47,8 @@ class Strategy:
     lookback: Callable[[dict], int] | None = None
     # 파라미터 상호 검증 (short<long 등). 실패 시 ValueError(한국어 메시지).
     validate: Callable[[dict], None] | None = None
+    # 전체 이력이 필요한 전략 (사이클 정의, ADR-0013 — 저점이 수년 전 바닥일 수 있다).
+    full_history: bool = False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -92,10 +94,8 @@ def _check_ma_cross(p: dict) -> None:
 
 
 def _check_fib(p: dict) -> None:
-    if p["lookback"] <= p["base_window"]:
-        raise ValueError("탐색 구간(lookback)은 베이스 최소 길이(base_window)보다 길어야 합니다.")
-    if p["base_range"] <= 0:
-        raise ValueError("베이스 최대 변동폭(base_range)은 0보다 커야 합니다.")
+    if not 0 < p["drop_pct"] < 100:
+        raise ValueError("사이클 하락 기준(drop_pct)은 0과 100 사이(%)여야 합니다.")
     if p["near"] <= 0:
         raise ValueError("근접 판정(near)은 0보다 커야 합니다.")
 
@@ -121,18 +121,16 @@ _ALL = [
     Strategy(
         "fib_retrace",
         "피보나치 되돌림 (전략 1호)",
-        "베이스(평평한 구간)~신고가 피보나치 레벨 + 라운드 피겨",
+        "상승장 사이클(저점→고점) 피보나치 레벨 + 라운드 피겨 — ③ 시뮬레이션과 같은 파동 (ADR-0013)",
         signals=False,
         overlay=True,
         params=(
-            Param("lookback", "탐색 구간", "int", "일", required=True),
-            Param("base_window", "베이스 최소 길이", "int", "일", required=True),
-            Param("base_range", "베이스 최대 변동폭", "number", "%", required=True),
+            Param("drop_pct", "사이클 하락 기준", "number", "%", required=True),
             Param("near", "근접 판정", "number", "%", required=True),
         ),
         overlay_fn=fibonacci.compute_overlay,
-        lookback=lambda p: p["lookback"],
         validate=_check_fib,
+        full_history=True,
     ),
 ]
 

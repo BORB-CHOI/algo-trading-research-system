@@ -428,7 +428,13 @@ export type ProChartHandle = {
   setOverlayVisibility: (v: OverlayVisibility) => void
 }
 
-export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref) {
+type ProChartProps = {
+  /** 전략 오버레이 조회 실패(400/404 한국어 메시지)를 화면에 알릴 곳. 안 주면 콘솔만.
+   *  실패가 조용하면 "차트에 아무것도 안 뜨는데 왜?"가 된다 (오너 지적 2026-08-06). */
+  onOverlayError?: (msg: string | null) => void
+}
+
+export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProChart(props, ref) {
   const elRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<KLineChartPro | null>(null)
   // 이 차트 전용 신호·오버레이 저장소·지표 (인스턴스당 1회 생성)
@@ -458,6 +464,7 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
     const ov = overlayRef.current!
     sig.set([])
     ov.clear()
+    props.onOverlayError?.(null)
     if (payload) {
       const stale = () => symbolRef.current.ticker !== ticker || strategyRef.current !== payload
       try {
@@ -472,9 +479,11 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
           ov.set(res.lines, res.touches)
         }
       } catch (e) {
-        // 400(베이스 못 찾음 등)·404(종목 없음) — 이 종목엔 그릴 게 없다. 콘솔로만 남긴다.
+        // 400(파라미터·구간 오류)·404(종목 없음) — 이 종목엔 그릴 게 없다. 화면에 알린다.
         if (stale()) return
-        console.warn('[전략 조회 실패]', e instanceof Error ? e.message : e)
+        const msg = e instanceof Error ? e.message : '전략 조회 실패'
+        console.warn('[전략 조회 실패]', msg)
+        props.onOverlayError?.(msg)
       }
     }
     // Pro 는 지표 재계산 API 를 노출하지 않아 setSymbol 로 데이터 재적재를 유도한다.
