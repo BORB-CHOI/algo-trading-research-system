@@ -15,7 +15,7 @@ import {
 } from '../../api'
 import { ProChart, type ProChartHandle } from '../../ProChart'
 import { allVisible, type OverlayVisibility } from '../../simVisibility'
-import { currentSymbol, onSymbolPick, pickStrategy, pickSymbol, type SymbolPick } from '../bus'
+import { currentSymbol, onSymbolPick, pickSymbol, type SymbolPick } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
 import { MiniCandles } from '../MiniCandles'
 import { BuyStages, SellStages, type ComputedPrices } from './SplitStages'
@@ -425,7 +425,6 @@ export function StrategyPanel() {
   const [confirmDel, setConfirmDel] = useState(false)
   const [msg, setMsg] = useState('')
   const [draft, setDraft] = useState<StrategyDraft>(emptyDraft)
-  const [entryErr, setEntryErr] = useState('')
   const set = <K extends keyof StrategyDraft>(k: K, v: StrategyDraft[K]) =>
     setDraft((d) => ({ ...d, [k]: v }))
 
@@ -1039,7 +1038,6 @@ export function StrategyPanel() {
                     onChange={(e) => {
                       set('entryKey', e.target.value)
                       set('entryParams', {})
-                      setEntryErr('')
                     }}
                   >
                     <option value="">선택…</option>
@@ -1059,43 +1057,12 @@ export function StrategyPanel() {
                     values={draft.entryParams}
                     onChange={(k, v) => set('entryParams', { ...draft.entryParams, [k]: v })}
                   />
-                  {/* 차트 적용 버튼 — 화면 개편 때 pickStrategy 호출부가 통째로 사라져
-                      "설정해도 차트에 아무것도 안 뜨는" 상태였다 (오너 지적 2026-08-06 복원). */}
-                  <div className="form-row" style={{ marginTop: 8 }}>
-                    <button
-                      className="primary"
-                      onClick={() => {
-                        const r = parseParams(entryDef.params, draft.entryParams)
-                        if (!r.ok) {
-                          setEntryErr(r.error)
-                          return
-                        }
-                        setEntryErr('')
-                        pickStrategy({
-                          key: entryDef.key,
-                          params: r.value,
-                          signals: entryDef.signals,
-                          overlay: entryDef.overlay,
-                        })
-                        setMsg(`[${entryDef.name}] 적용 — 차트 탭에서 확인하세요.`)
-                      }}
-                    >
-                      차트에 적용
-                    </button>
-                    <button
-                      onClick={() => {
-                        pickStrategy(null)
-                        setMsg('차트 오버레이 해제')
-                      }}
-                    >
-                      해제
-                    </button>
-                  </div>
+                  {/* "차트에 적용" 버튼은 삭제 (오너 결정 2026-08-06) — ②는 설정만,
+                      눈으로 확인은 ③ 시뮬레이션에서. 차트 탭 오버레이 입구도 함께 폐기. */}
                 </>
               ) : (
                 <p className="hint">기법을 선택하면 파라미터 입력 폼이 나옵니다.</p>
               )}
-              {entryErr && <p className="hint warn">{entryErr}</p>}
             </Card>
 
             <Card title="분할 매수" sub="되돌림 레벨에서 가장 가까운 지지/저항선에 건다 (ADR-0014)">

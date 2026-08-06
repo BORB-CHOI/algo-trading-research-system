@@ -143,9 +143,10 @@ export function BuyStages(props: {
       )}
       <WeightSum stages={stages} of="매수 안 함(현금 대기)" />
       <div className="sstage-add">
-        {/* 되돌림 38.2 / 50 / 61.8 은 업계 표준 비율이라 버튼으로 꺼내 둔다.
+        {/* 차트에 그려지는 피보 5선(FIB_RATIOS)과 같은 목록 — 화면마다 레벨이 다르면
+            안 된다(오너 지적 2026-08-06). 0%·100%는 사이클 고점·저점 앵커라 제외.
             값은 추가된 뒤에도 자유롭게 고칠 수 있다 — 고정이 아니다. */}
-        {[38.2, 50, 61.8, 78.6].map((pct) => (
+        {[23.6, 38.2, 50, 61.8, 78.6].map((pct) => (
           <button
             key={pct}
             className="chip"

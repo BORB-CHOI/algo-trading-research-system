@@ -539,8 +539,10 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
         props.onOverlayError?.(msg)
       }
     }
-    // Pro 는 지표 재계산 API 를 노출하지 않아 setSymbol 로 데이터 재적재를 유도한다.
-    chartRef.current?.setSymbol(symbolRef.current)
+    // 다시 그리기는 window resize 로 — setSymbol(같은 객체 참조)은 Solid 시그널의 ===
+    // 비교에 걸려 no-op 이다(applySimulation 주석 참고). 종목 전환 리로드는 showSymbol 이
+    // 새 객체로 setSymbol 을 이미 불렀다 — 여기서는 받아온 신호·오버레이만 다시 그린다.
+    window.dispatchEvent(new Event('resize'))
   }
 
   useImperativeHandle(ref, () => ({
@@ -574,8 +576,12 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       } else {
         ov.clear()
       }
-      // Pro 가 지표 재계산 API 를 안 열어둬서 setSymbol 로 다시 그리게 한다(기존 방식과 동일).
-      chartRef.current?.setSymbol(symbolRef.current)
+      // 다시 그리기는 window resize 로 — setSymbol 은 Solid 시그널 setter 라 **같은 객체
+      // 참조를 넘기면 === 비교로 조용히 무시**된다(Pro 소스 확인 2026-08-06). 예전에 그려진
+      // 건 결과 요약이 차트 아래 나타나며 컨테이너가 줄어 리사이즈 리페인트가 우연히 탄
+      // 것 — 요약을 사이드로 옮기자 오버레이가 실종된 원인. resize 는 크기가 같아도 전체
+      // 페인트를 다시 타고(소스 확인), 데이터 재적재가 없어 줌도 유지된다.
+      window.dispatchEvent(new Event('resize'))
     },
     setOverlayVisibility(v) {
       overlayRef.current!.setVisibility(v)
