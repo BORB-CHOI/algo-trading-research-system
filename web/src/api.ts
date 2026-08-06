@@ -365,6 +365,7 @@ export type SimulateResponse = {
     is_52w_high: boolean
   }
   sell_basis_price: number | null // 매도 반등률의 기준가 — 화면에 명시한다(2026-08-06 오해 방지)
+  warnings: string[] // 못 건 목표가 등 — 그릴 수 있는 건 다 그리고 이유만 알린다
   computed: Record<string, number> // stage.id → 자동 계산 목표가
   lines: OverlayLine[]
   fills: OverlayFill[]

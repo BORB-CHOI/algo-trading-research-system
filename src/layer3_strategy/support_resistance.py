@@ -43,9 +43,9 @@ def find_levels(df: pd.DataFrame, *, span: int, cluster_pct: float, as_of: AsOf 
     빈 결과(피벗 없음)는 그대로 빈 리스트 — 목표가 계산부가 상황에 맞는 메시지를 낸다.
     """
     if not isinstance(span, int) or isinstance(span, bool) or span < 1:
-        raise ValueError(f"span 은 1 이상의 정수여야 합니다: {span!r}")
+        raise ValueError(f"고점·저점 기준(span)은 1 이상의 정수(거래일)여야 합니다: {span!r}")
     if cluster_pct <= 0:
-        raise ValueError(f"cluster_pct 는 0보다 커야 합니다: {cluster_pct!r}")
+        raise ValueError(f"같은 선 폭(cluster_pct)은 0보다 커야 합니다: {cluster_pct!r}")
 
     d, _ = _truncate(df, as_of)
     highs = d["High"].to_numpy(dtype=np.float64)

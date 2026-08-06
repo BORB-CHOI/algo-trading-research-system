@@ -358,7 +358,7 @@ def buy_targets_sr(
         if not 0.0 < ratio < 1.0:
             raise ValueError(f"되돌림 비율은 0 과 1 사이여야 한다(확장 비율 미지원): {ratio}")
     if not levels:
-        raise ValueError("지지/저항선이 없습니다 — 피벗 기준(일)을 줄이거나 군집 폭을 조정하세요.")
+        raise ValueError("지지/저항선이 없습니다 — 고점·저점 기준(일)을 줄이거나 같은 선 폭(%)을 늘려 보세요.")
 
     priced: list[tuple[int, float, int]] = []  # (지정가, 선 원값, 터치 수)
     for lv in levels:
@@ -406,7 +406,7 @@ def sell_targets_sr(
         if pct <= 0:
             raise ValueError(f"반등률은 0보다 커야 한다: {pct}")
     if not levels:
-        raise ValueError("지지/저항선이 없습니다 — 피벗 기준(일)을 줄이거나 군집 폭을 조정하세요.")
+        raise ValueError("지지/저항선이 없습니다 — 고점·저점 기준(일)을 줄이거나 같은 선 폭(%)을 늘려 보세요.")
 
     priced: list[tuple[int, float, int]] = []
     for lv in levels:

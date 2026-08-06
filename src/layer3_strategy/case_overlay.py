@@ -97,9 +97,9 @@ def _check_fib(p: dict) -> None:
     if not 0 < p["drop_pct"] < 100:
         raise ValueError("사이클 하락 기준(drop_pct)은 0과 100 사이(%)여야 합니다.")
     if p["sr_span"] < 1:
-        raise ValueError("피벗 기준(sr_span)은 1 이상의 거래일이어야 합니다.")
+        raise ValueError("고점·저점 기준(sr_span)은 1 이상의 거래일이어야 합니다.")
     if p["sr_cluster_pct"] <= 0:
-        raise ValueError("선 군집 폭(sr_cluster_pct)은 0보다 커야 합니다.")
+        raise ValueError("같은 선 폭(sr_cluster_pct)은 0보다 커야 합니다.")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -123,13 +123,15 @@ _ALL = [
     Strategy(
         "fib_retrace",
         "피보나치 되돌림 (전략 1호)",
-        "상승장 사이클(저점→고점) 피보나치 레벨 + 지지/저항선 — ③ 시뮬레이션과 같은 파동 (ADR-0013·0014)",
+        "상승장 사이클(저점→고점) 피보나치 + 지지/저항선. 고점·저점 기준 = 좌우 N일보다 "
+        "높은 고점/낮은 저점을 선으로 삼는다, 같은 선 폭 = 가격 차이가 이 % 안이면 한 선으로 "
+        "본다 — ③ 시뮬레이션과 같은 파동 (ADR-0013·0014)",
         signals=False,
         overlay=True,
         params=(
             Param("drop_pct", "사이클 하락 기준", "number", "%", required=True),
-            Param("sr_span", "피벗 기준", "int", "일", required=True),
-            Param("sr_cluster_pct", "선 군집 폭", "number", "%", required=True),
+            Param("sr_span", "고점·저점 기준", "int", "일", required=True),
+            Param("sr_cluster_pct", "같은 선 폭", "number", "%", required=True),
         ),
         overlay_fn=fibonacci.compute_overlay,
         validate=_check_fib,

@@ -33,6 +33,7 @@ from src.layer1_data.adjust import (
     apply_split_adjustment,
 )
 from src.layer1_data.dart import load_financials
+from src.layer1_data.derived import load_adjusted
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
 from src.layer1_data.marcap_loader import available_years, load_years
@@ -110,19 +111,37 @@ def _load_code_history(code: str, start_year: int, end_year: int, years: list[in
     return df.reset_index(drop=True)
 
 
+_FULL_COLS = ["Date", "Open", "High", "Low", "Close", "Volume", "Amount", "Stocks"]
+
+
 @lru_cache(maxsize=16)
 def full_history_adjusted(code: str) -> pd.DataFrame:
-    """한 종목의 전체 이력(수정주가) — 사이클 저점 탐색용(/api/simulate).
+    """한 종목의 전체 이력(수정주가) — 사이클 저점·지지저항 탐색용(/api/simulate·overlay).
 
-    연 단위 캐시(_load_year_slim)는 8개뿐이라 전체 이력을 매번 조립하면 파케이 30개를
-    다시 읽어 클릭마다 수십 초가 걸린다(실측 2026-08-06). 종목 단위로 접어 캐시한다.
-    최신 보충분은 프로세스 수명 동안 고정 — 시각화 도구라 허용(연 캐시도 이미 같은 성질).
+    **빠른 길(기본)**: 사전 계산본(`data/derived/adjusted`, build_adjusted.py) 38ms +
+    그 이후 꼬리만 이어붙인다. 이어붙인 전체에 apply_split_adjustment 를 한 번 더 태운다 —
+    분할 감지는 "주식수 급변 + 가격 역방향 점프" 둘 다 필요해서, 이미 보정돼 가격이 연속인
+    과거 구간은 재감지되지 않고 빌드 이후의 새 분할만 잡혀 전체가 새 계수로 접힌다.
+
+    **느린 길(폴백)**: 사전 계산본이 없는 종목(신규 상장 등)은 연 단위 파케이 32개를 조립
+    (실측 6.5초). 시뮬레이션이 느리면 `make data`(build_adjusted) 재실행이 답이다.
+
+    종목 단위 lru 캐시 — 최신 보충분은 프로세스 수명 동안 고정(시각화 도구라 허용).
     호출부는 반환값을 수정하지 말 것(캐시 공유본).
     """
     code = code.strip().zfill(6)
     years = available_years()
     if not years:
         raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
+    base = load_adjusted(code)
+    if base is not None and not base.empty:
+        last = pd.Timestamp(base["Date"].max())
+        tail = _load_code_history(code, max(last.year, years[0]), years[-1], years)
+        tail = tail.loc[tail["Date"] > last]
+        if tail.empty:
+            return base[_FULL_COLS].reset_index(drop=True)
+        merged = pd.concat([base[_FULL_COLS], tail[_FULL_COLS]], ignore_index=True)
+        return apply_split_adjustment(merged)
     df = _load_code_history(code, years[0], years[-1], years)
     if df.empty:
         return df
@@ -976,6 +995,9 @@ def api_simulate(req: SimulateRequest) -> dict:
     for lv_sr in sr:  # 지지/저항선 전부 — y축 밖은 차트가 알아서 안 그리고, 칩으로 끌 수 있다
         lines.append({"price": lv_sr.price, "label": f"지지저항 {lv_sr.touches}회", "kind": "sr"})
 
+    # 목표가를 못 걸어도 전체를 실패시키지 않는다 — 그릴 수 있는 것(사이클·피보·지지저항)은
+    # 다 그리고, 못 건 쪽만 경고로 알린다 (오너 지적 2026-08-06: "오류만 띄우면 뭘 고칠지 몰라").
+    warnings: list[str] = []
     try:
         blevels = (
             buy_targets_sr(
@@ -989,7 +1011,8 @@ def api_simulate(req: SimulateRequest) -> dict:
             else []
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        warnings.append(f"매수 목표가를 못 걸었습니다 — {e}")
+        buys, blevels = [], []
 
     # 체결 스캔은 사이클 고점 다음 날부터 — 고점 이전 하락은 이 전략의 눌림이 아니다.
     after = full.loc[full["Date"] > high_date].reset_index(drop=True)
@@ -1040,7 +1063,8 @@ def api_simulate(req: SimulateRequest) -> dict:
                     tick_offset=req.sell_tick_offset,
                 )
             except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e)) from e
+                warnings.append(f"매도 목표가를 못 걸었습니다 — {e}")
+                slevels, sells = [], []
             sell_scan = after if last_fill_date is None else after.loc[after["Date"] > last_fill_date]
             position = sum(t["shares"] for t in trade_buys)
             avg_cost = (
@@ -1150,6 +1174,7 @@ def api_simulate(req: SimulateRequest) -> dict:
             "is_52w_high": is_52w,
         },
         "sell_basis_price": sell_basis_price,
+        "warnings": warnings,  # 못 건 목표가 등 — 그릴 수 있는 건 다 그리고 이유만 알린다
         "computed": computed,
         "lines": lines,
         "fills": fills,

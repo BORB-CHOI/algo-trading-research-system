@@ -56,7 +56,7 @@ const SIM_SYM = { code: '005930', name: '삼성전자', market: 'KOSPI' } as con
 // "실행 버튼을 누르면 무조건 예시가 보여야 한다"(오너) — 빈 폼 때문에 실행을 막지 않는다.
 const SIM_EXAMPLE = {
   cycleDropPct: 50, // 오너도 -50/-60 미확정 — 화면에서 조정하는 값이다(ADR-0013)
-  srSpan: 10, // 지지/저항 피벗 기준(좌우 거래일, ADR-0014)
+  srSpan: 10, // 지지/저항 고점·저점 기준(좌우 거래일, ADR-0014)
   srClusterPct: 1,
   qtyShares: 100,
   buy: [
@@ -184,8 +184,9 @@ function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeo
         </p>
       )}
       <p>
-        <b>지지저항</b> 수평선 {srCount}개 (스윙 피벗+군집) — 매수·매도는 각 레벨에서 가장
-        가까운 선에 걸린다 · 사이클 저점 {fmtPrice(r.cycle.low_price)}
+        <b>지지저항</b> 수평선 {srCount}개 (좌우 며칠보다 튀어나온 고점·저점, 비슷한 가격은
+        한 선) — 매수·매도는 각 레벨에서 가장 가까운 선에 걸린다 · 사이클 저점{' '}
+        {fmtPrice(r.cycle.low_price)}
         {stopLine && <> · 손절선 {fmtPrice(stopLine.price)}</>}
       </p>
       {t && total != null ? (
@@ -558,12 +559,12 @@ export function StrategyPanel() {
     let srSpan = Number(ep['sr_span'])
     if (!(Number.isInteger(srSpan) && srSpan >= 1)) {
       srSpan = SIM_EXAMPLE.srSpan
-      filled.push(`피벗 기준 ${srSpan}일`)
+      filled.push(`고점·저점 기준 ${srSpan}일`)
     }
     let srCluster = Number(ep['sr_cluster_pct'])
     if (!(srCluster > 0)) {
       srCluster = SIM_EXAMPLE.srClusterPct
-      filled.push(`선 군집 폭 ${srCluster}%`)
+      filled.push(`같은 선 폭 ${srCluster}%`)
     }
     const buyOff = Number(draft.buyTickOffset || '0')
     const sellOff = Number(draft.sellTickOffset || '0')
@@ -606,7 +607,12 @@ export function StrategyPanel() {
       setSimResult(res)
       setComputed(res.computed)
       proRef.current?.applySimulation({ lines: res.lines, fills: res.fills, series: res.series })
-      setSimMsg(filled.length ? `예시값 사용: ${filled.join(' · ')}` : '')
+      // 경고(못 건 목표가 등)는 그려진 결과와 함께 보여준다 — 오류만 띄우고 빈 화면 ❌.
+      const notes = [
+        ...res.warnings,
+        ...(filled.length ? [`예시값 사용: ${filled.join(' · ')}`] : []),
+      ]
+      setSimMsg(notes.join(' / '))
     } catch (e) {
       setSimResult(null)
       proRef.current?.applySimulation(null)
@@ -1169,8 +1175,8 @@ export function StrategyPanel() {
                   <span className="k">파동·지지저항</span>
                   <span className="v">
                     사이클 -{Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['drop_pct'] : 0) || SIM_EXAMPLE.cycleDropPct}%
-                    · 피벗 {Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['sr_span'] : 0) || SIM_EXAMPLE.srSpan}일
-                    · 군집 {Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['sr_cluster_pct'] : 0) || SIM_EXAMPLE.srClusterPct}%
+                    · 고점·저점 {Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['sr_span'] : 0) || SIM_EXAMPLE.srSpan}일
+                    · 같은 선 폭 {Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['sr_cluster_pct'] : 0) || SIM_EXAMPLE.srClusterPct}%
                   </span>
                 </div>
                 <p className="hint">기준 수정은 ② 매매전략의 진입 기법(피보나치)에서 — 여기는 실행만.</p>
