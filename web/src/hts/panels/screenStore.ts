@@ -36,15 +36,3 @@ export function deleteScreen(all: Screens, name: string): Screens {
   localStorage.setItem(SCREEN_KEY, JSON.stringify(next))
   return next
 }
-
-/** 자주 쓰는 조건 — 값은 비워둔 채 폼만 열어준다(임계값 하드코딩 금지, ADR-0009). */
-export const QUICK_CONDITIONS: { key: string; label: string; hint?: string }[] = [
-  { key: 'marcap_range', label: '시가총액' },
-  { key: 'amount_range', label: '거래대금' },
-  { key: 'new_high', label: '52주 신고가', hint: '기간 250 = 약 52주' },
-  { key: 'price_range', label: '주가범위' },
-  { key: 'change_range', label: '당일등락률' },
-  { key: 'volume_range', label: '거래량' },
-  { key: 'above_ma', label: '이평 위' },
-  { key: 'golden_cross', label: '골든크로스' },
-]

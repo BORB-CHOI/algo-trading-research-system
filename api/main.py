@@ -51,7 +51,7 @@ from src.layer3_strategy.case_overlay import (
 )
 from src.layer3_strategy.entry_levels import average_entry, buy_levels, sell_levels
 from src.layer3_strategy.screening import ScreeningRule, screen
-from src.layer3_strategy.surge import build_anchor, find_cycle_low
+from src.layer3_strategy.surge import find_52w_high, find_cycle_low
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
@@ -108,6 +108,25 @@ def _load_code_history(code: str, start_year: int, end_year: int, years: list[in
     df = pd.concat(frames, ignore_index=True)
     df = df.dropna(subset=["Open", "High", "Low", "Close"]).sort_values("Date")
     return df.reset_index(drop=True)
+
+
+@lru_cache(maxsize=16)
+def full_history_adjusted(code: str) -> pd.DataFrame:
+    """한 종목의 전체 이력(수정주가) — 사이클 저점 탐색용(/api/simulate).
+
+    연 단위 캐시(_load_year_slim)는 8개뿐이라 전체 이력을 매번 조립하면 파케이 30개를
+    다시 읽어 클릭마다 수십 초가 걸린다(실측 2026-08-06). 종목 단위로 접어 캐시한다.
+    최신 보충분은 프로세스 수명 동안 고정 — 시각화 도구라 허용(연 캐시도 이미 같은 성질).
+    호출부는 반환값을 수정하지 말 것(캐시 공유본).
+    """
+    code = code.strip().zfill(6)
+    years = available_years()
+    if not years:
+        raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
+    df = _load_code_history(code, years[0], years[-1], years)
+    if df.empty:
+        return df
+    return apply_split_adjustment(df)
 
 
 def get_candles(code: str, start: str | None, end: str | None, adjust: bool = True) -> pd.DataFrame:
@@ -854,7 +873,7 @@ class SimStop(BaseModel):
     enabled: bool = False
     mode: str = "pct"  # pct(평단 -%) | support(지지저항 기준)
     pct: float | None = None  # mode=pct: 평단에서 몇 % 아래
-    source: str = "avwap"  # mode=support: avwap | anchor_start | cycle_low | custom
+    source: str = "avwap"  # mode=support: avwap | cycle_low | custom (anchor_start 는 옛 저장분)
     custom_price: float | None = None
     tick_offset: int = 0  # 지지저항에서 ±N호가 (음수 = 아래)
 
@@ -862,8 +881,6 @@ class SimStop(BaseModel):
 class SimulateRequest(BaseModel):
     code: str
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    window: int  # 급등 판정 창(거래일)
-    min_gain_pct: float  # 급등 최소 상승률(%)
     cycle_drop_pct: float  # 사이클 하락 기준(%) — 이만큼 안 빠진 구간 = 한 상승장(ADR-0013)
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
@@ -877,39 +894,41 @@ class SimulateRequest(BaseModel):
 
 @app.post("/api/simulate")
 def api_simulate(req: SimulateRequest) -> dict:
-    """전략 1호(급등 앵커 피보나치 + 분할) 시뮬레이션 — 앵커·목표가·체결 마커·앵커 VWAP.
+    """전략 1호(상승장 사이클 피보나치 + 분할) 시뮬레이션 — 사이클·목표가·체결 마커·앵커 VWAP.
 
     **시각화 전용 결정론 계산.** 주문 전송·매매 판단 없음(CLAUDE.md). 모든 전략 숫자는
     요청에서 받는다(ADR-0009). end 를 기준일로 주면 그 시점까지만 본다(look-ahead 방지).
 
-    피보나치 시작점은 급등 시작 시가가 아니라 **사이클 저점**이다(ADR-0013, 오너 확정
-    2026-08-06). 급등 앵커는 파동 식별·앵커 VWAP·손절 기준으로 계속 쓴다.
+    파동 = **상승장 사이클** 하나뿐이다(ADR-0013 개정, 오너 확정 2026-08-06 — "급등" 폐기).
+    저점 = 사이클 저점(find_cycle_low), 고점 = 저점 이후 최고 High. 되돌림 레벨·분할
+    목표가·앵커 VWAP·손절 전부 이 두 점에서 나온다.
     """
     code = req.code.strip().zfill(6)
-    end_ts = pd.Timestamp(req.end) if req.end else pd.Timestamp.now().normalize()
-    # 사이클 저점(피보 시작점)은 수년 전 바닥일 수 있다 — 이 종목의 전체 이력을 읽는다.
-    years = available_years()
-    full = get_candles(code, f"{years[0]}-01-01" if years else None, req.end, adjust=True)
+    # 사이클 저점은 수년 전 바닥일 수 있다 — 이 종목의 전체 이력을 읽는다(기준일까지).
+    full = full_history_adjusted(code)
     if full.empty:
         raise HTTPException(status_code=404, detail=f"'{code}' 데이터가 없습니다.")
-    # 급등 탐색·체결 스캔은 기존과 같은 2년 창 — 전체 이력을 주면 수년 전 파동이 잡힌다.
-    df = full.loc[full["Date"] >= end_ts - pd.Timedelta(days=365 * 2)].reset_index(drop=True)
-    if df.empty:
-        raise HTTPException(status_code=404, detail=f"'{code}' 기준일 2년 내 데이터가 없습니다.")
+    if req.end:
+        full = full.loc[full["Date"] <= pd.Timestamp(req.end)].reset_index(drop=True)
+        if full.empty:
+            raise HTTPException(status_code=404, detail=f"'{code}' {req.end} 까지 데이터가 없습니다.")
     try:
-        anchor = build_anchor(df, window=req.window, min_gain_pct=req.min_gain_pct)
-        # 사이클 저점은 파동 고점 이전에서만 찾는다 — 고점 뒤 하락은 이 파동의 눌림이다.
-        cycle = find_cycle_low(
-            full.loc[full["Date"] <= anchor.end_date], drop_pct=req.cycle_drop_pct
-        )
-    except ValueError as e:  # 급등 없음 — 메시지에 실제 최대 상승률 포함(한국어)
+        cycle = find_cycle_low(full, drop_pct=req.cycle_drop_pct)
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    fib_span = anchor.end_price - cycle.price
+    rise = full.loc[full["Date"] >= cycle.date].reset_index(drop=True)
+    hp = int(rise["High"].idxmax())  # 동률이면 가장 이른 날 (idxmax = 최초 발생)
+    high_date = pd.Timestamp(rise["Date"].iloc[hp])
+    high_price = float(rise["High"].iloc[hp])
+    fib_span = high_price - cycle.price
     if fib_span <= 0:
         raise HTTPException(
             status_code=400,
-            detail=f"사이클 저점({cycle.price:,.0f})이 파동 고점({anchor.end_price:,.0f}) 이상입니다 — 하락 기준을 조정하세요.",
+            detail=f"사이클 저점({cycle.price:,.0f})과 고점({high_price:,.0f})이 같습니다 — 하락 기준을 조정하세요.",
         )
+    # 참고 정보 — 사이클 고점이 52주 신고가인가 (시장 표준, 전략 판단은 호출부/오너 몫)
+    _, w52_price = find_52w_high(full)
+    is_52w = abs(high_price - w52_price) < 1e-9
 
     buys = sorted(
         (s for s in req.buy if s.enabled and s.ratio is not None and 0 < s.ratio < 1),
@@ -932,18 +951,17 @@ def api_simulate(req: SimulateRequest) -> dict:
     computed: dict[str, int] = {}
     lines: list[dict] = [
         {"price": cycle.price, "label": "사이클 저점", "kind": "anchor"},
-        {"price": anchor.start_price, "label": "급등 시작(시가)", "kind": "anchor"},
-        {"price": anchor.end_price, "label": "신고가" if anchor.is_52w_high else "파동 고점(52주 아님)", "kind": "anchor"},
+        {"price": high_price, "label": "사이클 고점(52주 신고가)" if is_52w else "사이클 고점", "kind": "anchor"},
     ]
     for s in buys:  # 되돌림 원값 — 목표가(라운드)와 근거 레벨을 함께 보여준다
-        lv = anchor.end_price - s.ratio * fib_span
+        lv = high_price - s.ratio * fib_span
         lines.append({"price": lv, "label": f"{s.ratio * 100:.1f}%", "kind": "fib"})
 
     try:
         blevels = (
             buy_levels(
-                cycle.price,  # 피보 시작점 = 사이클 저점 (ADR-0013)
-                anchor.end_price,
+                cycle.price,  # 피보 구간 = 사이클 저점 → 고점 (ADR-0013)
+                high_price,
                 ratios=[s.ratio for s in buys],
                 tolerance_pct=req.round_tolerance_pct,
             )
@@ -953,8 +971,8 @@ def api_simulate(req: SimulateRequest) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # 체결 스캔은 파동 고점 다음 날부터 — 고점 이전 하락은 이 전략의 눌림이 아니다.
-    after = df.loc[df["Date"] > anchor.end_date].reset_index(drop=True)
+    # 체결 스캔은 사이클 고점 다음 날부터 — 고점 이전 하락은 이 전략의 눌림이 아니다.
+    after = full.loc[full["Date"] > high_date].reset_index(drop=True)
     fills: list[dict] = []
     buy_fills: list[tuple[float, float]] = []  # (가격, 비중) — 평단 계산용
     lowest_fill: float | None = None
@@ -982,13 +1000,17 @@ def api_simulate(req: SimulateRequest) -> dict:
                     "shares": shares, "amount": shares * float(eff),
                 })
 
+    # 매도 기준가는 응답으로도 내보낸다 — 화면에 안 보이면 "평단 기준인 줄 알았다"가 반복된다
+    # (실측 2026-08-06: 기준점이 사이클 고점인 걸 모르고 매도가가 왜 40만이냐는 오해).
+    sell_basis_price: float | None = None
     if sells:
         if req.sell_basis == "anchor_high":
-            basis = anchor.end_price
+            basis = high_price
         elif req.sell_basis == "lowest_fill":
             basis = lowest_fill
         else:
             basis = average_entry(buy_fills) if buy_fills else None
+        sell_basis_price = basis
         if basis is not None:
             try:
                 slevels = sell_levels(
@@ -1024,7 +1046,7 @@ def api_simulate(req: SimulateRequest) -> dict:
                                     "pnl": (float(eff) - avg_cost) * shares,
                                 })
 
-    vw = anchored_vwap(df, anchor.start_date)
+    vw = anchored_vwap(full, cycle.date)
 
     # ── 손절 — 평단 -% 또는 지지저항 ±N호가. 첫 매수 체결일부터 Low ≤ 손절가 첫 날 발동 ──
     stop_price: int | None = None
@@ -1035,9 +1057,7 @@ def api_simulate(req: SimulateRequest) -> dict:
                 raise HTTPException(status_code=400, detail="손절 %는 0보다 커야 합니다.")
             stop_price = round_to_tick(average_entry(buy_fills) * (1 - s.pct / 100), "down")
         else:
-            if s.source == "anchor_start":
-                base_px = anchor.start_price
-            elif s.source == "cycle_low":
+            if s.source in ("cycle_low", "anchor_start"):  # anchor_start = 옛 저장분 호환
                 base_px = cycle.price
             elif s.source == "custom":
                 if not s.custom_price or s.custom_price <= 0:
@@ -1089,7 +1109,7 @@ def api_simulate(req: SimulateRequest) -> dict:
             sum(t["price"] * t["shares"] for t in trade_buys) / bought if bought else None
         )
         remain = bought - sold
-        last_close = float(df["Close"].iloc[-1])
+        last_close = float(full["Close"].iloc[-1])
         trades = {
             "buys": trade_buys,
             "sells": trade_sells,
@@ -1102,21 +1122,18 @@ def api_simulate(req: SimulateRequest) -> dict:
 
     return {
         "code": code,
-        "anchor": {
-            "start_date": anchor.start_date.strftime("%Y-%m-%d"),
-            "start_price": anchor.start_price,
-            "end_date": anchor.end_date.strftime("%Y-%m-%d"),
-            "end_price": anchor.end_price,
-            "gain_pct": anchor.surge.gain_pct,
-            "is_52w_high": anchor.is_52w_high,
-        },
-        # 피보 시작점(ADR-0013). confirmed=False = 하락 기준 미충족 — 구간 최저가로 대신함.
+        # 상승장 사이클 = 피보 구간. confirmed=False = 하락 기준 미충족 — 구간 최저가로 대신함.
         "cycle": {
-            "date": cycle.date.strftime("%Y-%m-%d"),
-            "price": cycle.price,
+            "low_date": cycle.date.strftime("%Y-%m-%d"),
+            "low_price": cycle.price,
+            "high_date": high_date.strftime("%Y-%m-%d"),
+            "high_price": high_price,
+            "gain_pct": (high_price / cycle.price - 1) * 100,
             "drop_pct": req.cycle_drop_pct,
             "confirmed": cycle.confirmed,
+            "is_52w_high": is_52w,
         },
+        "sell_basis_price": sell_basis_price,
         "computed": computed,
         "lines": lines,
         "fills": fills,

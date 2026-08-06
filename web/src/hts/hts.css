@@ -1138,6 +1138,14 @@ body {
   overflow: hidden;
   background: var(--hts-panel);
 }
+/* 전략 오버레이 요소별 필터 — 차트 탭 상단 한 줄 (오너 지시 2026-08-06) */
+.chart-layers {
+  flex: none;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--hts-line);
+  background: var(--hts-panel);
+}
+
 /* 요소별 표시 필터 — 차트 위 한 줄 (오너 지시 2026-08-06) */
 .sim-split .sim-layers {
   flex: none;

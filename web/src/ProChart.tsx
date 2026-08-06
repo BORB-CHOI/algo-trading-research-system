@@ -8,7 +8,7 @@ import {
 } from '@klinecharts/pro'
 import '@klinecharts/pro/dist/klinecharts-pro.css'
 import { registerKoreanLocale } from './locales'
-import { allVisible, type SimVisibility } from './simVisibility'
+import { allVisible, type OverlayVisibility } from './simVisibility'
 import {
   postOverlay,
   postSignals,
@@ -127,7 +127,7 @@ type OverlayStore = {
   set: (lines: OverlayLine[], touches: OverlayTouch[]) => void
   /** 시뮬레이션 결과 — 체결 마커와 곡선(앵커 VWAP). 없으면 빈 배열로 지운다. */
   setSim: (fills: OverlayFill[], series: OverlaySeries[]) => void
-  setVisibility: (v: SimVisibility) => void
+  setVisibility: (v: OverlayVisibility) => void
   clear: () => void
 }
 
@@ -255,7 +255,7 @@ function createOverlayIndicator(): OverlayStore {
 
       ctx.textAlign = 'center'
       ctx.fillStyle = TOUCH_COLOR
-      forEachBarMark(c, touchesByTime, (t, x) => {
+      if (vis.touch) forEachBarMark(c, touchesByTime, (t, x) => {
         ctx.fillText('◆', x, yAxis.convertToPixel(t.price) + 4)
       })
 
@@ -425,7 +425,7 @@ export type ProChartHandle = {
    *  않는다 — 파라미터를 쥔 화면(③ 시뮬레이션)이 계산해서 넘긴다. */
   applySimulation: (sim: SimulationDraw | null) => void
   /** 요소별 표시 필터 — 데이터 재적재 없이 다시 그리기만 한다(줌 유지). */
-  setSimVisibility: (v: SimVisibility) => void
+  setOverlayVisibility: (v: OverlayVisibility) => void
 }
 
 export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref) {
@@ -515,7 +515,7 @@ export const ProChart = forwardRef<ProChartHandle>(function ProChart(_props, ref
       // Pro 가 지표 재계산 API 를 안 열어둬서 setSymbol 로 다시 그리게 한다(기존 방식과 동일).
       chartRef.current?.setSymbol(symbolRef.current)
     },
-    setSimVisibility(v) {
+    setOverlayVisibility(v) {
       overlayRef.current!.setVisibility(v)
       // setSymbol(데이터 재적재·줌 초기화) 대신 window resize 를 쏜다 — Pro 가 이 이벤트에서
       // chart.resize() 를 부르고, resize() 는 크기가 같아도 전체 페인트를 다시 탄다(소스 확인).

@@ -12,13 +12,12 @@ import {
   type StrategyDef,
 } from '../../api'
 import { ProChart, type ProChartHandle } from '../../ProChart'
-import { allVisible, type SimVisibility } from '../../simVisibility'
+import { allVisible, type OverlayVisibility } from '../../simVisibility'
 import { currentSymbol, onSymbolPick, pickSymbol, type SymbolPick } from '../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
 import { MiniCandles } from '../MiniCandles'
 import { BuyStages, SellStages, type ComputedPrices } from './SplitStages'
 import {
-  QUICK_CONDITIONS,
   deleteScreen,
   loadScreens,
   saveScreen,
@@ -42,7 +41,7 @@ import {
 // 전략 화면은 3단계다.
 //  ① 종목선정 — 조건검색식을 여러 개 만들고 고친다 (저장소: hts-screens)
 //  ② 매매전략 — 그중 하나를 골라 분할 매수/매도·주문조건을 붙인다 (저장소: hts-strategies)
-//  ③ 시뮬레이션 — 고른 종목에 전략 1호(급등 앵커+분할)를 돌려 전용 차트로 확인 (오너 지시:
+//  ③ 시뮬레이션 — 대표 종목에 전략 1호(상승장 사이클+분할)를 돌려 전용 차트로 확인 (오너 지시:
 //    종목 차트 오버레이 ❌, 이 탭에서 본다)
 // 정량 값은 전부 이 화면에서 입력한다 (ADR-0009 — 전략 숫자 하드코딩 금지).
 
@@ -55,8 +54,6 @@ const SIM_SYM = { code: '005930', name: '삼성전자', market: 'KOSPI' } as con
 // 실행 시 **빈 항목만** 이 값으로 채우고, 채운 값은 전부 화면(분할 카드·메시지)에 보인다.
 // "실행 버튼을 누르면 무조건 예시가 보여야 한다"(오너) — 빈 폼 때문에 실행을 막지 않는다.
 const SIM_EXAMPLE = {
-  window: 20,
-  gainPct: 30,
   cycleDropPct: 50, // 오너도 -50/-60 미확정 — 화면에서 조정하는 값이다(ADR-0013)
   tolerancePct: 1.5,
   qtyShares: 100,
@@ -67,8 +64,16 @@ const SIM_EXAMPLE = {
   ],
 } as const
 
+/** date input 기본값 = 오늘 (오너 지시 2026-08-06 — 기준일은 오늘로 통일).
+ *  toISOString 은 UTC 라 KST 새벽에 전날이 나온다 — 로컬 달력으로 만든다.
+ *  서버는 기준일 이후 데이터를 안 보므로 휴장일이면 자동으로 직전 거래일 기준이 된다. */
+function todayStr(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 // ③ 차트 요소별 표시 필터 — 겹칠 때 하나씩 끄고 본다 (오너 지시 2026-08-06).
-const SIM_LAYERS: readonly (readonly [keyof SimVisibility, string])[] = [
+const SIM_LAYERS: readonly (readonly [keyof OverlayVisibility, string])[] = [
   ['anchor', '앵커'],
   ['fib', '피보나치'],
   ['buy', '매수'],
@@ -128,10 +133,13 @@ function summarizeCond(c: SavedCondition, def: ConditionDef | undefined): string
   return parts.length ? `${def.name} ${parts.join(' · ')}` : def.name
 }
 
-// ③ 차트 하단 결과 스트립 — 앵커 근거·지지선·최종 손익을 한 줄씩. 차트를 보면서 같이 읽는 용도.
-function SimFoot({ r }: { r: SimulateResponse }) {
+const SELL_BASIS_LABEL = { avg_entry: '매수 평단', lowest_fill: '최저 체결가', anchor_high: '사이클 고점' } as const
+
+// ③ 차트 하단 결과 스트립 — 사이클·지지선·매도 기준·최종 손익을 한 줄씩. 차트와 같이 읽는 용도.
+function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeof SELL_BASIS_LABEL }) {
   const avwapLast = r.series.find((s) => s.label.includes('VWAP'))?.points.at(-1)?.value
   const stopLine = r.lines.find((l) => l.kind === 'stop')
+  const sellLines = r.lines.filter((l) => l.kind === 'sell')
   const buys = r.fills.filter((f) => f.side === 'buy').length
   const sells = r.fills.filter((f) => f.side === 'sell').length
   const t = r.trades
@@ -139,20 +147,24 @@ function SimFoot({ r }: { r: SimulateResponse }) {
   return (
     <div className="sim-foot">
       <p>
-        <b>급등 파동</b> {r.anchor.start_date} {fmtPrice(r.anchor.start_price)} →{' '}
-        {r.anchor.end_date} {fmtPrice(r.anchor.end_price)} (+{r.anchor.gain_pct.toFixed(1)}%)
-        {r.anchor.is_52w_high ? ' · 52주 신고가' : ' · 52주 신고가 아님'}
-      </p>
-      <p>
-        <b>피보 구간</b> 사이클 저점 {r.cycle.date} {fmtPrice(r.cycle.price)} → 고점{' '}
-        {fmtPrice(r.anchor.end_price)}
+        <b>상승장</b> {r.cycle.low_date} {fmtPrice(r.cycle.low_price)} → {r.cycle.high_date}{' '}
+        {fmtPrice(r.cycle.high_price)} (+{r.cycle.gain_pct.toFixed(0)}%)
+        {r.cycle.is_52w_high ? ' · 고점 = 52주 신고가' : ''}
         {r.cycle.confirmed
-          ? ` (-${r.cycle.drop_pct}% 하락 후 바닥)`
-          : ` (-${r.cycle.drop_pct}% 하락 없음 — 구간 최저가로 대신)`}
+          ? ` · -${r.cycle.drop_pct}% 하락 후 바닥`
+          : ` · -${r.cycle.drop_pct}% 하락 없음 — 구간 최저가로 대신`}
       </p>
+      {/* 매도 기준가를 명시한다 — 안 보이면 "평단 기준인 줄 알았다"가 반복된다 (2026-08-06). */}
+      {sellLines.length > 0 && (
+        <p>
+          <b>매도 기준</b> {SELL_BASIS_LABEL[sellBasis]}
+          {r.sell_basis_price != null && <> {fmtPrice(r.sell_basis_price)}</>} 대비 반등 —{' '}
+          {sellLines.map((l) => `${l.label} ${fmtPrice(l.price)}`).join(' · ')}
+        </p>
+      )}
       <p>
-        <b>지지선 근거</b> 급등 시작가 {fmtPrice(r.anchor.start_price)}
-        {avwapLast != null && <> · 앵커 VWAP {fmtPrice(Math.round(avwapLast))} (급등에 올라탄 사람들의 평균 매수가)</>}
+        <b>지지선 근거</b> 사이클 저점 {fmtPrice(r.cycle.low_price)}
+        {avwapLast != null && <> · 앵커 VWAP {fmtPrice(Math.round(avwapLast))} (상승장 평균 매수가)</>}
         {stopLine && <> · 손절선 {fmtPrice(stopLine.price)}</>}
       </p>
       {t && total != null ? (
@@ -346,7 +358,7 @@ export function StrategyPanel() {
     setScreenMsg('새 검색식 — 조건을 추가하고 저장하세요.')
   }
 
-  const [date, setDate] = useState('')
+  const [date, setDate] = useState(todayStr) // 기준일 기본 = 오늘 (오너 지시 2026-08-06)
   const [result, setResult] = useState<ScreenResponse | null>(null)
   const [runMsg, setRunMsg] = useState('')
   const [running, setRunning] = useState(false)
@@ -451,47 +463,27 @@ export function StrategyPanel() {
     setConfirmDel(false)
   }
 
-  // ── ③ 시뮬레이션 — 전략 1호(급등 앵커 + 분할). 계산은 전부 파이썬(/api/simulate) ──
+  // ── ③ 시뮬레이션 — 전략 1호(상승장 사이클 + 분할). 계산은 전부 파이썬(/api/simulate) ──
   //
   // 종목은 **대표 종목(삼성전자) 고정**이다 — ① 에서 뭘 골랐는지와 무관 (오너 지시 2026-08-05:
   // "내가 설계한 전략이 어떻게 되는지만 보고 싶은 거"). 이 화면은 전략 설계를 눈으로
   // 확인하는 자리지 종목 검증 자리가 아니다. 실전 적용은 백테스트 러너(ADR-0007) 몫.
   //
-  // 입력은 **기준일 하나**다 (오너 지시). 급등 기준은 전략에 담긴 ① 검색식 조건에서 읽고,
-  // 나머지 빈 값은 예시값으로 채워서 실행이 절대 막히지 않게 한다 — 채운 값은 화면에 보인다.
+  // 파동 입력은 사이클 하락 기준 하나뿐이다 — "급등" 개념은 없다 (오너 확정 2026-08-06).
+  // 빈 값은 예시값으로 채워서 실행이 절대 막히지 않게 한다 — 채운 값은 화면에 보인다.
   const proRef = useRef<ProChartHandle>(null)
-  const [simDate, setSimDate] = useState('')
+  const [simDate, setSimDate] = useState(todayStr)
   const [simMsg, setSimMsg] = useState('')
   const [simRunning, setSimRunning] = useState(false)
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null)
   const [computed, setComputed] = useState<ComputedPrices>({})
-  const [simVis, setSimVis] = useState<SimVisibility>(allVisible)
+  const [simVis, setSimVis] = useState<OverlayVisibility>(allVisible)
 
-  function toggleLayer(k: keyof SimVisibility) {
+  function toggleLayer(k: keyof OverlayVisibility) {
     const next = { ...simVis, [k]: !simVis[k] }
     setSimVis(next)
-    proRef.current?.setSimVisibility(next)
+    proRef.current?.setOverlayVisibility(next)
   }
-
-  // 급등 기준 — ① 조건검색식 소관이다 (오너: "급등 퍼센테이지는 조건 검색식이지").
-  // 전략이 담고 있는 검색식 조건에서 읽는다. 없으면 예시값(화면에 예시임을 명시).
-  const surge = useMemo(() => {
-    const cum = draft.conditions.find(
-      (c) => c.key === 'cum_change' && c.params['days'] > 0 && c.params['min'] > 0,
-    )
-    if (cum) {
-      return {
-        window: cum.params['days'],
-        gainPct: cum.params['min'],
-        src: `검색식 조건에서 — ${cum.params['days']}일 누적등락률 +${cum.params['min']}% 이상`,
-      }
-    }
-    const day = draft.conditions.find((c) => c.key === 'change_range' && c.params['min'] > 0)
-    if (day) {
-      return { window: 1, gainPct: day.params['min'], src: `검색식 조건에서 — 당일등락률 +${day.params['min']}% 이상` }
-    }
-    return { window: SIM_EXAMPLE.window, gainPct: SIM_EXAMPLE.gainPct, src: '' }
-  }, [draft.conditions])
 
   // 최신 결과를 ref 로도 들고 있는다 — 탭 재진입 효과가 simResult 를 deps 에 넣으면
   // 실행할 때마다 showSymbol(데이터 재로드)이 돌아 줌이 풀리기 때문이다.
@@ -511,7 +503,7 @@ export function StrategyPanel() {
     const r = simResultRef.current
     if (r) proRef.current?.applySimulation({ lines: r.lines, fills: r.fills, series: r.series })
     // 차트가 새로 마운트되면 필터는 전체 표시로 초기화된다 — 이전 선택을 다시 입힌다.
-    proRef.current?.setSimVisibility(simVisRef.current)
+    proRef.current?.setOverlayVisibility(simVisRef.current)
   }, [step])
 
   async function runSimulation() {
@@ -558,8 +550,6 @@ export function StrategyPanel() {
       const res = await postSimulate({
         code: SIM_SYM.code,
         end: simDate || undefined,
-        window: surge.window,
-        min_gain_pct: surge.gainPct,
         cycle_drop_pct: cyc,
         buy: buy.map((b) => ({
           id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled, price_override: b.priceOverride,
@@ -624,51 +614,48 @@ export function StrategyPanel() {
           <div className="split">
             {/* ── 왼쪽: 조건을 만드는 작업대 ── */}
             <div className="split-a">
-              <Card title="조건 만들기" sub="고르고 값을 채운 뒤 추가">
-                <div className="chips" style={{ marginBottom: 10 }}>
-                  {QUICK_CONDITIONS.filter((q) => condMap.has(q.key)).map((q) => (
+              <Card title="조건 만들기" sub="카테고리 → 조건 → 값 입력">
+                {/* 증권사 조건검색처럼 한 계층씩 — 카테고리 줄, 그 카테고리의 조건 줄.
+                    빠른선택 칩 + 카테고리/조건 드롭다운의 이중 구조는 삭제 (오너 지적 2026-08-06). */}
+                <div className="chips" style={{ marginBottom: 8 }}>
+                  {condCats.map((c) => (
                     <button
-                      key={q.key}
-                      className={`chip ${condKey === q.key ? 'on' : ''}`}
-                      title={q.hint ?? condMap.get(q.key)?.desc}
-                      onClick={() => pickCondition(q.key)}
+                      key={c.key}
+                      className={`chip ${catKey === c.key ? 'on' : ''}`}
+                      onClick={() => {
+                        setCatKey(c.key)
+                        setCondKey('')
+                        setCondDraft({})
+                        setScreenErr('')
+                      }}
                     >
-                      {q.label}
+                      {c.name}
                     </button>
                   ))}
                 </div>
-
-                <div className="form-row">
-                  <select
-                    value={catKey}
-                    onChange={(e) => {
-                      setCatKey(e.target.value)
-                      setCondKey('')
-                      setCondDraft({})
-                    }}
-                  >
-                    <option value="">카테고리…</option>
-                    {condCats.map((c) => (
-                      <option key={c.key} value={c.key}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={condKey}
-                    onChange={(e) => {
-                      setCondKey(e.target.value)
-                      setCondDraft({})
-                      setScreenErr('')
-                    }}
-                  >
-                    <option value="">조건…</option>
-                    {catConds.map((c) => (
-                      <option key={c.key} value={c.key}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
+                <div className="chips" style={{ marginBottom: 10 }}>
+                  {catConds
+                    .filter((c) => c.key !== 'new_low')
+                    .map((c) => {
+                      // 신고가/신저가는 증권사처럼 한 항목 — 구분은 고른 뒤 라디오로 (오너 지시).
+                      const merged = c.key === 'new_high'
+                      const on = merged
+                        ? condKey === 'new_high' || condKey === 'new_low'
+                        : condKey === c.key
+                      return (
+                        <button
+                          key={c.key}
+                          className={`chip ${on ? 'on' : ''}`}
+                          title={c.desc}
+                          onClick={() => {
+                            if (!on) pickCondition(c.key)
+                          }}
+                        >
+                          {merged ? '신고가/신저가' : c.name}
+                        </button>
+                      )
+                    })}
+                  {catConds.length === 0 && <span className="hint">카테고리를 고르세요.</span>}
                 </div>
 
                 {/* 자리를 미리 잡아둔다 — 조건을 바꿔도 아래가 안 움직인다 */}
@@ -677,8 +664,34 @@ export function StrategyPanel() {
                     <>
                       <p className="hint">
                         {condDef.desc}
-                        {condKey === 'new_high' && ' · 52주 ≈ 250거래일 (기간+이내 ≤ 520)'}
+                        {(condKey === 'new_high' || condKey === 'new_low') &&
+                          ' · 52주 ≈ 250거래일 (기간+이내 ≤ 520)'}
                       </p>
+                      {(condKey === 'new_high' || condKey === 'new_low') && (
+                        <div className="kv">
+                          <span className="k">구분</span>
+                          <span className="v">
+                            <span className="radios" style={{ marginLeft: 'auto' }}>
+                              <label>
+                                <input
+                                  type="radio"
+                                  checked={condKey === 'new_high'}
+                                  onChange={() => setCondKey('new_high')}
+                                />
+                                신고가
+                              </label>
+                              <label>
+                                <input
+                                  type="radio"
+                                  checked={condKey === 'new_low'}
+                                  onChange={() => setCondKey('new_low')}
+                                />
+                                신저가
+                              </label>
+                            </span>
+                          </span>
+                        </div>
+                      )}
                       <ParamInputs
                         defs={condDef.params}
                         values={condDraft}
@@ -761,7 +774,7 @@ export function StrategyPanel() {
                     style={{ flex: 'none', width: 148 }}
                     value={date}
                     onChange={(e) => setDate(e.target.value)}
-                    title="기준일 (빈칸 = 최신 거래일)"
+                    title="기준일 (기본 = 오늘, 휴장일이면 직전 거래일 기준)"
                   />
                   <button className="primary" disabled={running} onClick={() => void run(conds, logic)}>
                     {running ? '조회 중…' : '검색'}
@@ -934,7 +947,7 @@ export function StrategyPanel() {
                       [
                         ['avg_entry', '매수 평단'],
                         ['lowest_fill', '최저 체결가'],
-                        ['anchor_high', '앵커 고점'],
+                        ['anchor_high', '사이클 고점'],
                       ] as const
                     ).map(([k, label]) => (
                       <label key={k}>
@@ -1006,11 +1019,10 @@ export function StrategyPanel() {
                             style={{ flex: 1 }}
                             value={draft.stopSource}
                             onChange={(e) =>
-                              set('stopSource', e.target.value as 'avwap' | 'anchor_start' | 'cycle_low' | 'custom')
+                              set('stopSource', e.target.value as 'avwap' | 'cycle_low' | 'custom')
                             }
                           >
                             <option value="avwap">앵커 VWAP (지지선)</option>
-                            <option value="anchor_start">급등 시작가</option>
                             <option value="cycle_low">사이클 저점 (피보 시작점)</option>
                             <option value="custom">직접 가격</option>
                           </select>
@@ -1064,8 +1076,7 @@ export function StrategyPanel() {
           <div className="sim-split">
             <div className="sim-side">
               <Card title="시뮬레이션" sub={`${SIM_SYM.name} 고정 — 전략 1호`}>
-                {/* 입력은 전략 선택 + 기준일뿐이다 (오너: "기준일만 넣어").
-                    급등 기준은 전략의 ① 검색식 조건에서 읽고, 빈 값은 예시로 채워 실행한다. */}
+                {/* 입력 = 전략 선택 + 기준일 + 사이클 하락 기준. 빈 값은 예시로 채워 실행한다. */}
                 <div className="kv">
                   <span className="k">전략</span>
                   <span className="v">
@@ -1094,18 +1105,10 @@ export function StrategyPanel() {
                       type="date"
                       value={simDate}
                       onChange={(e) => setSimDate(e.target.value)}
-                      title="빈칸 = 최신 거래일. 과거 날짜를 주면 그 시점을 재현한다."
+                      title="기본 = 오늘 (휴장일이면 직전 거래일 기준). 과거 날짜를 주면 그 시점을 재현한다."
                     />
                   </span>
                 </div>
-                <div className="kv">
-                  <span className="k">급등 기준</span>
-                  <span className="v">최근 {surge.window}거래일 +{surge.gainPct}%</span>
-                </div>
-                <p className="hint">
-                  {surge.src ||
-                    '검색식에 등락률 조건이 없어 예시값입니다. 급등 기준(며칠·몇 %)은 ① 조건검색식에서 정합니다.'}
-                </p>
                 <div className="kv">
                   <span className="k">사이클 하락 기준</span>
                   <span className="v">
@@ -1134,30 +1137,26 @@ export function StrategyPanel() {
                   <table className="grid">
                     <tbody>
                       <tr>
-                        <td className="flat">급등 파동</td>
+                        <td className="flat">상승장 저점</td>
                         <td className="num">
-                          {simResult.anchor.start_date} → {simResult.anchor.end_date} (+
-                          {simResult.anchor.gain_pct.toFixed(1)}%)
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="flat">피보 시작점</td>
-                        <td className="num">
-                          {simResult.cycle.date} {fmtPrice(simResult.cycle.price)}
+                          {simResult.cycle.low_date} {fmtPrice(simResult.cycle.low_price)}
                           {!simResult.cycle.confirmed && (
                             <small style={{ display: 'block' }}>-{simResult.cycle.drop_pct}% 하락 없음 — 구간 최저가</small>
                           )}
                         </td>
                       </tr>
                       <tr>
-                        <td className="flat">피보 구간</td>
+                        <td className="flat">상승장 고점</td>
                         <td className="num">
-                          {fmtPrice(simResult.cycle.price)} ~ {fmtPrice(simResult.anchor.end_price)}
+                          {simResult.cycle.high_date} {fmtPrice(simResult.cycle.high_price)}
+                          {simResult.cycle.is_52w_high ? ' (52주 신고가)' : ''}
                         </td>
                       </tr>
                       <tr>
-                        <td className="flat">52주 신고가</td>
-                        <td className="num">{simResult.anchor.is_52w_high ? '예' : '아니오 — 파동 고점이 52주 최고가 아님'}</td>
+                        <td className="flat">매도 기준가</td>
+                        <td className="num">
+                          {simResult.sell_basis_price != null ? fmtPrice(simResult.sell_basis_price) : '-'}
+                        </td>
                       </tr>
                       <tr>
                         <td className="flat">체결 마커</td>
@@ -1256,7 +1255,7 @@ export function StrategyPanel() {
                 <ProChart ref={proRef} />
               </div>
               {/* 하단 결과 스트립 — "결국 결과가 어떻게 될거다"까지 차트 밑에서 (오너 지시) */}
-              {simResult && <SimFoot r={simResult} />}
+              {simResult && <SimFoot r={simResult} sellBasis={draft.sellBasis} />}
             </div>
           </div>
         )}
