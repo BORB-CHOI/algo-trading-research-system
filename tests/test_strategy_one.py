@@ -54,14 +54,24 @@ def selection_hist() -> pd.DataFrame:
     )
 
 
+# 지지/저항 존 파라미터(ADR-0014 개정 — 채널 규격). 폭 1%면 피벗들이 안 묶여
+# 15,000·17,000·21,000 이 각각 존이 된다 — 구 방식과 같은 스냅 시나리오 유지.
+SR = {
+    "sr_prd": 1,
+    "sr_channel_width_pct": 1.0,
+    "sr_loopback": 290,
+    "sr_min_strength": 1,
+    "sr_max_channels": 5,
+}
+
+
 def run(right_bars, *, sell=None, stop=None, cost=NO_COST, **kw):
     return run_strategy_one(
         PRICE_COND,
         "and",
         "validate",
         cycle_drop_pct=50,
-        sr_span=1,
-        sr_cluster_pct=1.0,
+        sr=SR,
         buy=[{"ratio": 0.5, "weight": 100}],
         sell=sell if sell is not None else [{"rebound_pct": 10, "weight": 100}],
         stop=stop,
@@ -134,6 +144,28 @@ def test_open_position_marked_at_last_close() -> None:
     assert r["net_return"] == pytest.approx(16_000 / 15_000 - 1)
 
 
+def test_buy_targets_stay_inside_fib_range() -> None:
+    """목표가 후보는 피보 구간(78.6% 레벨~고점) 안만 (ADR-0014 개정 2 회귀 고정).
+
+    78.6% 목표가 11,568 에는 사이클 저점 존 9,000 이 더 가깝지만(거리 2,568 < 3,432),
+    존은 최근 구간 전체에서 나오므로 필터 없이는 사이클 밖 심저가에 지정가가 걸린다
+    (검증 에이전트 지적 2026-08-06). 구간 안 최근접 15,000 이 선택돼야 한다."""
+    out = run_strategy_one(
+        PRICE_COND,
+        "and",
+        "validate",
+        cycle_drop_pct=50,
+        sr=SR,
+        buy=[{"ratio": 0.786, "weight": 100}],
+        sell=[],
+        cost=NO_COST,
+        exclusions=None,
+        hist=selection_hist(),
+        loader=lambda code: daily(RIGHT_ROUND),
+    )
+    assert out["results"][0]["avg_entry"] == 15_000.0
+
+
 def test_test_split_requires_explicit_consent() -> None:
     with pytest.raises(ValueError, match="단 1회"):
         run_strategy_one(
@@ -141,8 +173,7 @@ def test_test_split_requires_explicit_consent() -> None:
             "and",
             "test",
             cycle_drop_pct=50,
-            sr_span=1,
-            sr_cluster_pct=1.0,
+            sr=SR,
             buy=[{"ratio": 0.5, "weight": 100}],
             sell=[],
             exclusions=None,

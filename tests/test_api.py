@@ -108,7 +108,14 @@ def test_strategies_catalog_contract() -> None:
 
     fib = by_key["fib_retrace"]
     assert (fib["signals"], fib["overlay"]) == (False, True)
-    assert [p["key"] for p in fib["params"]] == ["drop_pct", "sr_span", "sr_cluster_pct"]  # ADR-0013·0014
+    assert [p["key"] for p in fib["params"]] == [
+        "drop_pct",
+        "sr_prd",
+        "sr_channel_width_pct",
+        "sr_loopback",
+        "sr_min_strength",
+        "sr_max_channels",
+    ]  # ADR-0013·0014 개정(채널 규격)
     for s in by_key.values():
         assert set(s) == {"key", "name", "desc", "signals", "overlay", "params"}
         for p in s["params"]:
@@ -165,7 +172,14 @@ def test_overlay_contract() -> None:
         json={
             "code": "005930",
             "strategy": "fib_retrace",
-            "params": {"drop_pct": 50, "sr_span": 10, "sr_cluster_pct": 1},
+            "params": {
+                "drop_pct": 50,
+                "sr_prd": 10,
+                "sr_channel_width_pct": 5,
+                "sr_loopback": 290,
+                "sr_min_strength": 1,
+                "sr_max_channels": 5,
+            },
             "end": "2026-07-16",
         },
     )
@@ -179,11 +193,15 @@ def test_overlay_contract() -> None:
     assert j["anchors"]["low_date"] <= j["anchors"]["high_date"] <= "2026-07-16"
     kinds = {ln["kind"] for ln in j["lines"]}
     assert kinds <= {"fib", "sr", "anchor"}
-    assert any(ln["kind"] == "sr" for ln in j["lines"])  # 지지/저항선 (ADR-0014)
+    assert any(ln["kind"] == "sr" for ln in j["lines"])  # 지지/저항 존 (ADR-0014 개정)
     fib_labels = [ln["label"] for ln in j["lines"] if ln["kind"] == "fib"]
     assert fib_labels == ["23.6%", "38.2%", "50.0%", "61.8%", "78.6%"]
     for ln in j["lines"]:
-        assert set(ln) == {"price", "label", "kind"}
+        # sr 존은 top/bottom(띠 상단·하단)이 실린다 — 나머지 선은 price 하나.
+        expected = {"price", "label", "kind"} | ({"top", "bottom"} if ln["kind"] == "sr" else set())
+        assert set(ln) == expected
+        if ln["kind"] == "sr":
+            assert ln["bottom"] <= ln["price"] <= ln["top"]
     assert j["touches"] == []  # 근접 판정 폐기 — 계약 필드만 유지
 
 
@@ -196,8 +214,11 @@ def test_simulate_looks_left_of_base_date_only() -> None:
         "code": "005930",
         "end": "2026-03-31",
         "cycle_drop_pct": 50,
-        "sr_span": 10,
-        "sr_cluster_pct": 1,
+        "sr_prd": 10,
+        "sr_channel_width_pct": 5,
+        "sr_loopback": 290,
+        "sr_min_strength": 1,
+        "sr_max_channels": 5,
         "buy": [{"id": "a", "ratio": 0.5, "weight": 100}],
         "sell": [{"id": "s", "rebound_pct": 10, "weight": 100}],
         "sell_basis": "avg_entry",

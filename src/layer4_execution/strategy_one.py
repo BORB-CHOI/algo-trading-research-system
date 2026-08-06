@@ -32,7 +32,7 @@ from src.layer1_data.derived import load_adjusted
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy
 from src.layer3_strategy.entry_levels import buy_targets_sr, sell_targets_sr
 from src.layer3_strategy.fibonacci import FIB_RATIOS
-from src.layer3_strategy.support_resistance import find_levels
+from src.layer3_strategy.support_resistance import find_channels, sr_params_from
 from src.layer3_strategy.surge import find_cycle_low
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 from src.layer4_execution.backtest import SPLITS, Trade, slice_split
@@ -55,14 +55,17 @@ def _plan_buys(left: pd.DataFrame, p: dict) -> tuple[object, float, list]:
     span = high_price - cycle.price
     if span <= 0:
         raise ValueError("사이클 저점과 고점이 같습니다")
-    lo_i = int(left["Date"].searchsorted(cycle.date))
-    levels = find_levels(
-        left.iloc[max(0, lo_i - p["sr_span"]) :],
-        span=p["sr_span"],
-        cluster_pct=p["sr_cluster_pct"],
-    )
+    # 지지/저항 존 — TradingView Support Resistance Channels 포팅(ADR-0014 개정 2).
+    # 목표가 스냅 대표값은 존 중앙(to_level, 임시 정책 — 존 경계 vs 중앙은 오너 확정 대기).
+    # **목표가 후보는 피보 구간(78.6% 레벨~고점) 안만** — 존은 최근 loopback 봉 전체에서
+    # 나오므로, 필터 없이는 되돌림 목표가가 사이클 밖 존(수년 전 심저가 등)에 스냅될 수
+    # 있다(검증 에이전트 지적 2026-08-06). 화면 표시는 존 전체(≤max_channels)를 그대로 둔다.
     fib_floor = high_price - max(FIB_RATIOS) * span
-    levels = [lv for lv in levels if fib_floor <= lv.price <= high_price]
+    levels = [
+        lv
+        for lv in (ch.to_level() for ch in find_channels(left, sr_params_from(p)))
+        if fib_floor <= lv.price <= high_price
+    ]
     targets = buy_targets_sr(
         cycle.price,
         high_price,
@@ -184,8 +187,7 @@ def run_strategy_one(
     split: str,
     *,
     cycle_drop_pct: float,
-    sr_span: int,
-    sr_cluster_pct: float,
+    sr: dict,
     buy: list[dict],
     sell: list[dict],
     sell_basis: str = "avg_entry",
@@ -216,8 +218,8 @@ def run_strategy_one(
 
     p = {
         "cycle_drop_pct": cycle_drop_pct,
-        "sr_span": sr_span,
-        "sr_cluster_pct": sr_cluster_pct,
+        # 지지/저항 존 파라미터(sr_prd 등 sr_ 접두 평면 키) — sr_params_from 이 읽는다
+        **sr,
         "buy": sorted(buys, key=lambda b: b["ratio"]),
         "sell": sorted(
             (s for s in sell if s.get("rebound_pct", 0) > 0), key=lambda s: s["rebound_pct"]

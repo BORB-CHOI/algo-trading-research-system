@@ -227,6 +227,13 @@ function drawLines(c: DrawCtx, list: OverlayLine[]): void {
     const y = Math.round(yAxis.convertToPixel(ln.price)) + 0.5 // +0.5 = 1px 라인 선명하게
     if (y < 0 || y > bounding.height) continue
     const color = OVERLAY_COLORS[ln.kind]
+    // 지지저항 존(ADR-0014 개정) — top/bottom 이 오면 반투명 띠를 먼저 깔고 중앙선을 긋는다.
+    if (ln.top != null && ln.bottom != null && ln.top > ln.bottom) {
+      const yTop = yAxis.convertToPixel(ln.top)
+      const yBot = yAxis.convertToPixel(ln.bottom)
+      ctx.fillStyle = 'rgba(107,114,128,0.14)' // sr 회색 톤의 옅은 띠
+      ctx.fillRect(0, yTop, bounding.width, Math.max(1, yBot - yTop))
+    }
     const thick = THICK_KINDS.has(ln.kind)
     ctx.strokeStyle = color
     ctx.lineWidth = thick ? 2 : 1

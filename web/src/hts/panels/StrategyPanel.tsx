@@ -55,12 +55,26 @@ const SIM_SYM = { code: '000660', name: 'SK하이닉스', market: 'KOSPI' } as c
 
 // 전략 1호 파동·지지저항 **고정 정의** (오너 결정 2026-08-06 — "시작점·고점은 자동으로
 // 구하는 건데 입력값을 왜 내가 만지나" → ② 입력칸 제거, 정의로 내림).
-// 아직 임시값이다: 피보나치 시작점 새 정의("고점의 10% 컷 + 그 안에서 -30% 사이클")가
-// 확정되면 여기 한 곳만 바꾼다. 서버에는 여전히 요청 데이터로만 나간다(ADR-0009).
+// 지지저항 = TradingView "Support Resistance Channels" 포팅(ADR-0014 개정) — 값은 원본
+// 스크립트 기본값이다. 사이클 하락 기준은 임시값: 피보나치 시작점 새 정의("고점의 10% 컷
+// + 그 안에서 -30% 사이클")가 확정되면 여기 한 곳만 바꾼다. 서버에는 요청 데이터로만
+// 나간다(ADR-0009).
 const STRATEGY_ONE_WAVE = {
   cycleDropPct: 50, // 사이클 경계 — 고점 대비 이만큼 빠지면 사이클이 끊긴 것으로 본다(ADR-0013)
-  srSpan: 10, // 지지/저항 고점·저점 기준(좌우 거래일, ADR-0014)
-  srClusterPct: 1, // 같은 선 폭 — 이 % 안이면 한 선으로 합친다
+  srPrd: 10, // 피벗 기준(좌우 거래일) — 원본 Pivot Period
+  srChannelWidthPct: 5, // 존 최대 폭 — 최근 300일 가격폭 대비 % (원본 Maximum Channel Width)
+  srLoopback: 290, // 피벗 찾는 구간(거래일) — 원본 Loopback Period
+  srMinStrength: 1, // 최소 강도 — 원본 Minimum Strength
+  srMaxChannels: 5, // 존 개수(강도순) — 원본 Maximum Number of S/R
+} as const
+
+// 서버 요청용 평면 키 — Simulate/Backtest 공용(ADR-0014 개정 계약)
+const SR_PAYLOAD = {
+  sr_prd: STRATEGY_ONE_WAVE.srPrd,
+  sr_channel_width_pct: STRATEGY_ONE_WAVE.srChannelWidthPct,
+  sr_loopback: STRATEGY_ONE_WAVE.srLoopback,
+  sr_min_strength: STRATEGY_ONE_WAVE.srMinStrength,
+  sr_max_channels: STRATEGY_ONE_WAVE.srMaxChannels,
 } as const
 
 // ③ 예시 기본값 — 지위는 PLACEHOLDER 와 같다 (ADR-0009: 서버 하드코딩 금지, UI 예시는 허용).
@@ -103,8 +117,11 @@ const PLACEHOLDER: Record<string, string> = {
   within: '3',
   amount: '300',
   drop_pct: '50',
-  sr_span: '10',
-  sr_cluster_pct: '1',
+  sr_prd: '10',
+  sr_channel_width_pct: '5',
+  sr_loopback: '290',
+  sr_min_strength: '1',
+  sr_max_channels: '5',
 }
 
 type Step = 'screen' | 'strategy' | 'sim' | 'backtest'
@@ -205,7 +222,7 @@ function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeo
         </p>
       )}
       <p>
-        <b>지지저항</b> 피보 5선에 가장 가까운 선 {srCount}개 · 시작점{' '}
+        <b>지지저항</b> 여러 번 닿은 가격대(존) {srCount}개 — 강한 순 · 시작점{' '}
         {fmtPrice(r.cycle.low_price)}
         {stopLine && <> · 손절선 {fmtPrice(stopLine.price)}</>}
       </p>
@@ -551,7 +568,6 @@ export function StrategyPanel() {
       filled.push('분할 매수 3차(38.2/50/61.8%)')
     }
     // 파동·지지저항은 전략 1호 고정 정의 — 화면 입력 없음 (오너 결정 2026-08-06)
-    const { cycleDropPct: cyc, srSpan, srClusterPct: srCluster } = STRATEGY_ONE_WAVE
     const buyOff = Number(draft.buyTickOffset || '0')
     const sellOff = Number(draft.sellTickOffset || '0')
     setBtRunning(true)
@@ -561,9 +577,8 @@ export function StrategyPanel() {
         split: btSplit,
         conditions: scr.conditions,
         logic: scr.logic,
-        cycle_drop_pct: cyc,
-        sr_span: srSpan,
-        sr_cluster_pct: srCluster,
+        cycle_drop_pct: STRATEGY_ONE_WAVE.cycleDropPct,
+        ...SR_PAYLOAD,
         buy: buy.map((b) => ({ id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled })),
         sell: draft.sell.map((s) => ({
           id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled,
@@ -636,7 +651,6 @@ export function StrategyPanel() {
 
     // 파동·지지저항은 전략 1호 고정 정의 — 화면 입력 없음 (오너 결정 2026-08-06:
     // "시작점·고점은 자동으로 구하는 건데 입력값을 왜 내가 만지나")
-    const { cycleDropPct: cyc, srSpan, srClusterPct: srCluster } = STRATEGY_ONE_WAVE
     const buyOff = Number(draft.buyTickOffset || '0')
     const sellOff = Number(draft.sellTickOffset || '0')
 
@@ -650,9 +664,8 @@ export function StrategyPanel() {
       const res = await postSimulate({
         code: SIM_SYM.code,
         end: simDate || undefined,
-        cycle_drop_pct: cyc,
-        sr_span: srSpan,
-        sr_cluster_pct: srCluster,
+        cycle_drop_pct: STRATEGY_ONE_WAVE.cycleDropPct,
+        ...SR_PAYLOAD,
         buy: buy.map((b) => ({
           id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled, price_override: b.priceOverride,
         })),
@@ -1035,8 +1048,9 @@ export function StrategyPanel() {
                       내가 만지나"). 값 변경은 STRATEGY_ONE_WAVE 정의에서. 다른 기법은 그대로. */}
                   {entryDef.key === 'fib_retrace' ? (
                     <p className="hint">
-                      시작점(사이클 저점)·고점은 자동 탐지 — 정의: 사이클 -{STRATEGY_ONE_WAVE.cycleDropPct}%
-                      · 고점·저점 {STRATEGY_ONE_WAVE.srSpan}일 · 같은 선 폭 {STRATEGY_ONE_WAVE.srClusterPct}%
+                      시작점(사이클 저점)·고점·지지저항 전부 자동 탐지 — 정의: 사이클 -{STRATEGY_ONE_WAVE.cycleDropPct}%
+                      · 지지저항은 트레이딩뷰 표준(Support Resistance Channels) 방식으로
+                      강한 존 최대 {STRATEGY_ONE_WAVE.srMaxChannels}개
                     </p>
                   ) : (
                     <ParamInputs
@@ -1225,8 +1239,7 @@ export function StrategyPanel() {
                   <span className="k">파동·지지저항</span>
                   <span className="v">
                     사이클 -{STRATEGY_ONE_WAVE.cycleDropPct}%
-                    · 고점·저점 {STRATEGY_ONE_WAVE.srSpan}일
-                    · 같은 선 폭 {STRATEGY_ONE_WAVE.srClusterPct}%
+                    · 지지저항 = 트레이딩뷰 표준 존 최대 {STRATEGY_ONE_WAVE.srMaxChannels}개
                   </span>
                 </div>
                 <p className="hint">전략 1호 고정 정의 — 시작점·고점은 자동 탐지. 정의가 바뀌면 화면이 아니라 정의를 고친다.</p>

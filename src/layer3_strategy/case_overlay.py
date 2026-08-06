@@ -96,10 +96,16 @@ def _check_ma_cross(p: dict) -> None:
 def _check_fib(p: dict) -> None:
     if not 0 < p["drop_pct"] < 100:
         raise ValueError("사이클 하락 기준(drop_pct)은 0과 100 사이(%)여야 합니다.")
-    if p["sr_span"] < 1:
-        raise ValueError("고점·저점 기준(sr_span)은 1 이상의 거래일이어야 합니다.")
-    if p["sr_cluster_pct"] <= 0:
-        raise ValueError("같은 선 폭(sr_cluster_pct)은 0보다 커야 합니다.")
+    if p["sr_prd"] < 1:
+        raise ValueError("고점·저점 기준(sr_prd)은 1 이상의 거래일이어야 합니다.")
+    if p["sr_channel_width_pct"] <= 0:
+        raise ValueError("존 최대 폭(sr_channel_width_pct)은 0보다 커야 합니다.")
+    if p["sr_loopback"] < 1:
+        raise ValueError("피벗 탐색 구간(sr_loopback)은 1 이상이어야 합니다.")
+    if p["sr_min_strength"] < 1:
+        raise ValueError("최소 강도(sr_min_strength)는 1 이상이어야 합니다.")
+    if p["sr_max_channels"] < 1:
+        raise ValueError("존 수(sr_max_channels)는 1 이상이어야 합니다.")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -123,15 +129,18 @@ _ALL = [
     Strategy(
         "fib_retrace",
         "피보나치 되돌림 (전략 1호)",
-        "상승장 사이클(저점→고점) 피보나치 + 지지/저항선. 고점·저점 기준 = 좌우 N일보다 "
-        "높은 고점/낮은 저점을 선으로 삼는다, 같은 선 폭 = 가격 차이가 이 % 안이면 한 선으로 "
-        "본다 — ③ 시뮬레이션과 같은 파동 (ADR-0013·0014)",
+        "상승장 사이클(저점→고점) 피보나치 + 지지/저항 존(트레이딩뷰 Support Resistance "
+        "Channels 방식 — 고점·저점을 최근 가격폭 비례 폭의 띠로 묶고, 여러 번 닿은 강한 "
+        "띠만 남긴다) — ③ 시뮬레이션과 같은 파동 (ADR-0013·0014 개정)",
         signals=False,
         overlay=True,
         params=(
             Param("drop_pct", "사이클 하락 기준", "number", "%", required=True),
-            Param("sr_span", "고점·저점 기준", "int", "일", required=True),
-            Param("sr_cluster_pct", "같은 선 폭", "number", "%", required=True),
+            Param("sr_prd", "고점·저점 기준", "int", "일", required=True),
+            Param("sr_channel_width_pct", "존 최대 폭", "number", "%", required=True),
+            Param("sr_loopback", "피벗 찾는 구간", "int", "일", required=True),
+            Param("sr_min_strength", "최소 강도", "int", "", required=True),
+            Param("sr_max_channels", "존 개수", "int", "개", required=True),
         ),
         overlay_fn=fibonacci.compute_overlay,
         validate=_check_fib,

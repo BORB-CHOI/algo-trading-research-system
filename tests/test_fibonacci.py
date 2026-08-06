@@ -70,7 +70,14 @@ RETRACE: list[Bar] = [
 ]
 
 # 파라미터는 테스트 데이터다 — 전략 하드코딩이 아니라 검증 입력값(ADR-0009와 무관).
-P = {"drop_pct": 50, "sr_span": 1, "sr_cluster_pct": 1.0}
+P = {
+    "drop_pct": 50,
+    "sr_prd": 1,
+    "sr_channel_width_pct": 1.0,
+    "sr_loopback": 290,
+    "sr_min_strength": 1,
+    "sr_max_channels": 5,
+}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -107,7 +114,7 @@ def test_drop_pct_range_validated() -> None:
     df = make_ohlc(WAVE)
     for bad in (0, 100, -5):
         with pytest.raises(ValueError, match="drop_pct"):
-            compute_overlay(df, {"drop_pct": bad, "sr_span": 1, "sr_cluster_pct": 1.0})
+            compute_overlay(df, {**P, "drop_pct": bad})
 
 
 # ─────────────────────────────────────────────────────────────
@@ -130,18 +137,20 @@ def test_anchor_lines_present() -> None:
     assert anchors == {"사이클 저점": 9_000.0, "사이클 고점": 21_000.0}
 
 
-def test_sr_lines_are_nearest_to_fib_levels() -> None:
-    """지지/저항선 = 스윙 피벗 중 **피보 5선에 가장 가까운 것만** (오너 지시 2026-08-06).
+def test_sr_zones_follow_channel_spec() -> None:
+    """지지/저항 존 = TradingView Support Resistance Channels 규격 (ADR-0014 개정).
 
-    피벗 탐색은 이번 사이클 안(저점 idx4 앞에 span 봉 하나)만 본다 — 사이클 이전의
-    20,000 피벗은 후보에서 빠진다. 남은 후보 9,000·21,000 중 각 피보 레벨의 최근접:
-    78.6%(11,568)·61.8%(13,584)·50%(15,000, 동점→낮은 쪽) → 9,000,
-    38.2%(16,416)·23.6%(18,168) → 21,000. 결과 2개(≤5).
+    확정 피벗은 20,000(idx2 고점)·9,000(idx4 저점)·21,000(idx6 고점). 존 폭 한도
+    (21,000−9,000)×1% = 120원이라 서로 안 묶여 존 3개, 각각 피벗 1개(강도 20+터치 2).
+    구 방식과 달리 사이클로 자르지 않으므로 사이클 이전 20,000 피벗도 존이 된다
+    (원본 규격 = 최근 loopback 봉 전체).
     """
     out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
-    sr = [(ln["price"], ln["label"]) for ln in out["lines"] if ln["kind"] == "sr"]
-    assert sr == [(9_000.0, "지지저항 1회"), (21_000.0, "지지저항 1회")]
-    assert len(sr) <= len(FIB_RATIOS)
+    sr = [ln for ln in out["lines"] if ln["kind"] == "sr"]
+    assert {ln["price"] for ln in sr} == {9_000.0, 20_000.0, 21_000.0}
+    assert all(ln["label"] == "지지저항 (고점·저점 1개)" for ln in sr)
+    # 존이라 top/bottom 이 실린다 — 피벗 1개짜리 존은 폭 0(top == bottom == mid).
+    assert all(ln["top"] == ln["bottom"] == ln["price"] for ln in sr)
 
 
 def test_line_kinds_and_no_touches() -> None:
@@ -169,7 +178,14 @@ def test_catalog_payload_contract() -> None:
 
     fib = by_key["fib_retrace"]
     assert (fib["signals"], fib["overlay"]) == (False, True)
-    assert [p["key"] for p in fib["params"]] == ["drop_pct", "sr_span", "sr_cluster_pct"]  # 근접 판정 폐기
+    assert [p["key"] for p in fib["params"]] == [
+        "drop_pct",
+        "sr_prd",
+        "sr_channel_width_pct",
+        "sr_loopback",
+        "sr_min_strength",
+        "sr_max_channels",
+    ]  # ADR-0014 개정 — 채널 규격
     for s in payload["strategies"]:
         for p in s["params"]:
             assert set(p) == {"key", "label", "type", "unit", "required"}  # /api/conditions 와 동일
@@ -188,12 +204,22 @@ def test_parse_params_validation() -> None:
         parse_params(ma, {"short": 5, "long": 20, "extra": 1})
 
     fib = STRATEGIES["fib_retrace"]
+    fib_ok = {
+        "drop_pct": 50,
+        "sr_prd": 10,
+        "sr_channel_width_pct": 5,
+        "sr_loopback": 290,
+        "sr_min_strength": 1,
+        "sr_max_channels": 5,
+    }
     with pytest.raises(ValueError, match="0과 100 사이"):
-        parse_params(fib, {"drop_pct": 120, "sr_span": 10, "sr_cluster_pct": 1})
-    with pytest.raises(ValueError, match="sr_span"):
-        parse_params(fib, {"drop_pct": 50, "sr_span": 0, "sr_cluster_pct": 1})
+        parse_params(fib, {**fib_ok, "drop_pct": 120})
+    with pytest.raises(ValueError, match="sr_prd"):
+        parse_params(fib, {**fib_ok, "sr_prd": 0})
     with pytest.raises(ValueError, match="0보다"):
-        parse_params(fib, {"drop_pct": 50, "sr_span": 10, "sr_cluster_pct": -1})
+        parse_params(fib, {**fib_ok, "sr_channel_width_pct": -1})
+    with pytest.raises(ValueError, match="sr_loopback"):
+        parse_params(fib, {**fib_ok, "sr_loopback": 0})
 
 
 def test_ma_cross_parametrized_signal() -> None:

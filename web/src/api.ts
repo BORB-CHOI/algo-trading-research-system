@@ -242,10 +242,14 @@ export async function postSignals(req: SignalsRequest): Promise<SignalsResponse>
 // 계산은 전부 파이썬 — 프런트는 받은 선·마커를 그리기만 한다(시각 전용, 매매 판단 아님).
 export type OverlayLine = {
   price: number
-  label: string // "38.2%" / "지지저항 3회" / "사이클 저점" 등 우측 라벨
+  label: string // "38.2%" / "지지저항 (고점·저점 3개)" / "사이클 저점" 등 우측 라벨
   // buy/sell/stop 은 시뮬레이션(POST /api/simulate)이 내는 매매 목표가·손절가다.
   // 시각 전용이라는 점은 같지만 선 굵기·색을 달리해 "판단 대상"임을 구분한다.
   kind: 'fib' | 'sr' | 'anchor' | 'buy' | 'sell' | 'stop'
+  // sr 존(ADR-0014 개정 — TradingView Support Resistance Channels)은 폭 있는 띠라
+  // 상단/하단이 같이 온다. 있으면 반투명 띠 + 중앙선으로 그린다.
+  top?: number
+  bottom?: number
 }
 
 export type OverlayTouch = {
@@ -312,8 +316,12 @@ export type SimulateRequest = {
   code: string
   end?: string
   cycle_drop_pct: number // 사이클 하락 기준(%) — 파동 = 상승장 사이클 하나뿐(ADR-0013)
-  sr_span: number // 지지/저항 피벗 기준(좌우 N거래일, ADR-0014)
-  sr_cluster_pct: number // 지지/저항 선 군집 폭(%)
+  // 지지/저항 존 — TradingView Support Resistance Channels 포팅(ADR-0014 개정)
+  sr_prd: number // 피벗 기준(좌우 N거래일)
+  sr_channel_width_pct: number // 존 최대 폭 — 최근 300봉 가격폭 대비 %
+  sr_loopback: number // 피벗 탐색 구간(봉)
+  sr_min_strength: number // 최소 강도
+  sr_max_channels: number // 남길 존 수(강도순)
   buy: SimStagePayload[]
   sell: SimStagePayload[]
   sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high' // anchor_high = 사이클 고점
@@ -384,8 +392,11 @@ export type BacktestRequest = {
   conditions: { key: string; params: Record<string, number> }[]
   logic: 'and' | 'or'
   cycle_drop_pct: number
-  sr_span: number
-  sr_cluster_pct: number
+  sr_prd: number
+  sr_channel_width_pct: number
+  sr_loopback: number
+  sr_min_strength: number
+  sr_max_channels: number
   buy: SimStagePayload[]
   sell: SimStagePayload[]
   sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high'

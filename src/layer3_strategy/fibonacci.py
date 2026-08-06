@@ -4,12 +4,13 @@
 사이클 경계), 고점 = 저점 이후 최고 High. `/api/simulate` 와 **같은 정의**다 — 화면마다
 파동이 다르면 오너가 어느 쪽을 믿을지 알 수 없다.
 
-되돌림 레벨과 함께 **지지/저항 수평선**(스윙 피벗+군집, `support_resistance.find_levels`)을
-그린다 — 매수/매도 목표가가 이 선들 위에 걸리므로(ADR-0014) 같은 선이 화면에 보여야 한다.
-구 "베이스 탐지"·라운드 피겨 근접·터치 마커는 오너가 거부해 폐기했다(근접 판정 입력 삭제).
+되돌림 레벨과 함께 **지지/저항 존**(TradingView Support Resistance Channels 포팅,
+`support_resistance.find_channels`)을 그린다 — 매수/매도 목표가가 이 존들 위에
+걸리므로(ADR-0014 개정) 같은 존이 화면에 보여야 한다.
+구 "베이스 탐지"·라운드 피겨 근접·터치 마커·자체 %군집은 오너가 거부해 폐기했다.
 
 **시각화 전용 결정론 계산** — BUY/SELL·주문 판단 없음(CLAUDE.md), LLM/MCP 개입 없음.
-정량 파라미터(drop_pct·sr_span·sr_cluster_pct)는 호출 시 데이터로 받는다(ADR-0009).
+정량 파라미터(drop_pct·sr_*)는 호출 시 데이터로 받는다(ADR-0009).
 `FIB_RATIOS` = 0.236/0.382/0.5/0.618/0.786 — 업계 표준 되돌림 비율(ADR-0009 §4 예외 상수).
 
 ## look-ahead
@@ -24,7 +25,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.layer3_strategy.support_resistance import find_levels, nearest_per_target
+from src.layer3_strategy.support_resistance import find_channels, sr_params_from
 from src.layer3_strategy.surge import find_cycle_low
 
 # 업계 표준 피보나치 되돌림 비율 — "계산 방법의 일부"로 허용된 상수(ADR-0009 §4).
@@ -70,14 +71,17 @@ def compute_overlay(df: pd.DataFrame, p: dict) -> dict:
     for ratio, price in zip(FIB_RATIOS, fib_prices, strict=True):
         # 되돌림: 고점에서 파동폭 × 비율만큼 내려온 가격
         lines.append({"price": float(price), "label": f"{ratio * 100:.1f}%", "kind": "fib"})
-    # 피벗 탐색 구간은 ③ 시뮬레이션과 같다 — 이번 사이클 안(앞에 span 봉을 남겨 저점 피벗도 확정).
-    # 그리는 선은 피보 5선에 가장 가까운 것만 (오너 지시 2026-08-06).
-    lo_i = int(d["Date"].searchsorted(cycle.date))
-    sr_span = int(p["sr_span"])
-    levels = find_levels(
-        d.iloc[max(0, lo_i - sr_span) :], span=sr_span, cluster_pct=float(p["sr_cluster_pct"])
-    )
-    for lv in nearest_per_target(levels, fib_prices):
-        lines.append({"price": lv.price, "label": f"지지저항 {lv.touches}회", "kind": "sr"})
+    # 지지/저항 존 — 원본 지표 규격(최근 loopback 봉 피벗, 강도순 최대 max_channels 개).
+    # ③ 시뮬레이션과 같은 계산이라 화면마다 존이 다르지 않다.
+    for ch in find_channels(d, sr_params_from(p)):
+        lines.append(
+            {
+                "price": ch.mid,
+                "label": f"지지저항 (고점·저점 {ch.pivots}개)",
+                "kind": "sr",
+                "top": ch.top,
+                "bottom": ch.bottom,
+            }
+        )
 
     return {"anchors": anchors, "lines": lines, "touches": []}

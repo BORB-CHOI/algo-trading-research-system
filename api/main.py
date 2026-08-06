@@ -52,7 +52,7 @@ from src.layer3_strategy.case_overlay import (
 from src.layer3_strategy.entry_levels import average_entry, buy_targets_sr, sell_targets_sr
 from src.layer3_strategy.fibonacci import FIB_RATIOS
 from src.layer3_strategy.screening import ScreeningRule, screen
-from src.layer3_strategy.support_resistance import find_levels, nearest_per_target
+from src.layer3_strategy.support_resistance import SRParams, find_channels
 from src.layer3_strategy.surge import find_52w_high, find_cycle_low
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 from src.layer4_execution.strategy_one import run_strategy_one
@@ -910,8 +910,12 @@ class SimulateRequest(BaseModel):
     code: str
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     cycle_drop_pct: float  # 사이클 하락 기준(%) — 이만큼 안 빠진 구간 = 한 상승장(ADR-0013)
-    sr_span: int  # 지지/저항 피벗 기준(좌우 N거래일) — ADR-0014
-    sr_cluster_pct: float  # 지지/저항 선 군집 폭(%)
+    # 지지/저항 존 — TradingView Support Resistance Channels 포팅(ADR-0014 개정)
+    sr_prd: int  # 피벗 기준(좌우 N거래일)
+    sr_channel_width_pct: float  # 존 최대 폭 — 최근 300봉 가격폭 대비 %
+    sr_loopback: int  # 피벗 탐색 구간(봉)
+    sr_min_strength: int  # 최소 강도(피벗 20점 단위)
+    sr_max_channels: int  # 남길 존 수(강도순)
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high(사이클 고점)
@@ -968,23 +972,34 @@ def api_simulate(req: SimulateRequest) -> dict:
             "그렸습니다. 바닥은 반등이 확인돼야 저점으로 갱신됩니다."
         )
 
-    # 지지/저항 수평선 — 오너가 손으로 긋는 그 선(ADR-0014).
-    # 이번 피보나치 구간(사이클 저점 이후)에서 만들어진 선만 찾고, 가격도 피보나치 구간
-    # (78.6% 레벨 ~ 고점) 안만 남긴다 — "너무 과거의 지지저항까지 다 보여주니까 선이
-    # 너무 많아" (오너 2026-08-06). 슬라이스 앞에 span 봉을 남겨 사이클 저점 피벗도 확정.
-    lo_i = int(full["Date"].searchsorted(cycle.date))
+    # 지지/저항 존 — TradingView "Support Resistance Channels" 포팅(ADR-0014 개정,
+    # 오너 지시 2026-08-06: 자체 계산식 폐기·표준 채택). 최근 loopback 봉의 피벗을
+    # 최근 가격폭 비례 폭의 존으로 묶고, 강도순 최대 max_channels 개만 남긴다 —
+    # 원본 규격 자체가 개수를 줄여 주므로 별도의 표시용 선별이 필요 없다.
     fib_prices = [high_price - ratio * fib_span for ratio in FIB_RATIOS]
-    fib_floor = min(fib_prices)
     try:
-        sr = find_levels(
-            full.iloc[max(0, lo_i - req.sr_span) :], span=req.sr_span, cluster_pct=req.sr_cluster_pct
+        channels = find_channels(
+            full,
+            SRParams(
+                prd=req.sr_prd,
+                channel_width_pct=req.sr_channel_width_pct,
+                loopback=req.sr_loopback,
+                min_strength=req.sr_min_strength,
+                max_channels=req.sr_max_channels,
+            ),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    sr = [lv for lv in sr if fib_floor <= lv.price <= high_price]
-    # 그리는 선은 피보 5선에 각각 가장 가까운 것만 = 최대 5개 (오너 지시 2026-08-06).
-    # 목표가가 걸릴 후보(sr)는 줄이지 않는다 — 화면을 정리하려다 주문 가격이 바뀌면 안 된다.
-    sr_shown = nearest_per_target(sr, fib_prices)
+    # 목표가 스냅 대표값 = 존 중앙(임시 정책 — 존 경계 vs 중앙은 오너 확정 대기).
+    # **목표가 후보는 피보 구간(78.6% 레벨~고점) 안만** — 존은 최근 loopback 봉 전체에서
+    # 나오므로, 필터 없이는 되돌림 목표가가 사이클 밖 존에 스냅될 수 있다(검증 지적).
+    # 화면 표시(lines)는 존 전체를 그대로 그린다 — 표준 규격이 이미 ≤max_channels 개.
+    fib_floor = min(fib_prices)
+    sr = [
+        lv
+        for lv in (ch.to_level() for ch in channels)
+        if fib_floor <= lv.price <= high_price
+    ]
 
     buys = sorted(
         (s for s in req.buy if s.enabled and s.ratio is not None and 0 < s.ratio < 1),
@@ -1017,8 +1032,16 @@ def api_simulate(req: SimulateRequest) -> dict:
     ]
     for ratio, fib_price in zip(FIB_RATIOS, fib_prices, strict=True):
         lines.append({"price": fib_price, "label": f"{ratio * 100:.1f}%", "kind": "fib"})
-    for lv_sr in sr_shown:  # 피보 5선에 가장 가까운 선만 — 칩으로 끌 수 있다
-        lines.append({"price": lv_sr.price, "label": f"지지저항 {lv_sr.touches}회", "kind": "sr"})
+    for ch in channels:  # 존(띠)으로 그린다 — top/bottom 이 있으면 프런트가 띠+중앙선
+        lines.append(
+            {
+                "price": ch.mid,
+                "label": f"지지저항 (고점·저점 {ch.pivots}개)",
+                "kind": "sr",
+                "top": ch.top,
+                "bottom": ch.bottom,
+            }
+        )
 
     # 목표가를 못 걸어도 전체를 실패시키지 않는다 — 그릴 수 있는 것(사이클·피보·지지저항)은
     # 다 그리고, 못 건 쪽만 경고로 알린다 (오너 지적 2026-08-06: "오류만 띄우면 뭘 고칠지 몰라").
@@ -1218,8 +1241,12 @@ class BacktestRequest(BaseModel):
     conditions: list[dict] = Field(default_factory=list)  # POST /api/screen/run 과 동일 형식
     logic: str = "and"
     cycle_drop_pct: float
-    sr_span: int
-    sr_cluster_pct: float
+    # 지지/저항 존 파라미터 — SimulateRequest 와 동일(ADR-0014 개정)
+    sr_prd: int
+    sr_channel_width_pct: float
+    sr_loopback: int
+    sr_min_strength: int
+    sr_max_channels: int
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"
@@ -1266,8 +1293,13 @@ def api_backtest(req: BacktestRequest) -> dict:
             req.logic,
             req.split,
             cycle_drop_pct=req.cycle_drop_pct,
-            sr_span=req.sr_span,
-            sr_cluster_pct=req.sr_cluster_pct,
+            sr={
+                "sr_prd": req.sr_prd,
+                "sr_channel_width_pct": req.sr_channel_width_pct,
+                "sr_loopback": req.sr_loopback,
+                "sr_min_strength": req.sr_min_strength,
+                "sr_max_channels": req.sr_max_channels,
+            },
             buy=buys,
             sell=sells,
             sell_basis=req.sell_basis,
