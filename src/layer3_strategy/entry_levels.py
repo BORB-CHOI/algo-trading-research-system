@@ -50,10 +50,12 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from src.layer3_strategy.fibonacci import FIB_RATIOS
+from src.layer3_strategy.support_resistance import SRLevel
 from src.layer3_strategy.tick_size import (
     InstrumentKind,
     round_figures_near,
     round_to_tick,
+    shift_ticks,
 )
 
 
@@ -308,3 +310,123 @@ def average_entry(fills: Iterable[tuple[float, float]]) -> float:
         total_cost += price * qty
         total_qty += qty
     return total_cost / total_qty
+
+
+# ─────────────────────────────────────────────────────────────
+# 지지/저항 기반 목표가 (ADR-0014) — 라운드 피겨 방식(buy_levels/sell_levels)을 대체.
+# 오너 확정(2026-08-06): "피보나치 각 단계에 가까운 지지/저항선에 ±호가로 매수 매도."
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SRTarget:
+    """지지/저항선에 건 분할 목표가 한 차수.
+
+    - `tranche`: 차수. 매수는 가격 높은 쪽이 1차, 매도는 낮은 쪽이 1차(체결 순서).
+    - `price`: 실제로 걸 지정가(유효 호가) = 선택된 지지/저항선 ± 호가 오프셋.
+    - `level_price`: 근거가 된 지지/저항선 원값. 화면이 "왜 이 가격인가"를 보여줄 근거다.
+    - `touches`: 그 선을 만든 피벗 수 — 여러 번 확인된 선일수록 크다.
+    """
+
+    tranche: int
+    price: int
+    level_price: float
+    touches: int
+
+
+def buy_targets_sr(
+    low: float,
+    high: float,
+    *,
+    ratios: Sequence[float],
+    levels: Sequence["SRLevel"],
+    tick_offset: int = 0,
+    kind: InstrumentKind = "stock",
+) -> list[SRTarget]:
+    """분할 매수 = 각 되돌림 레벨에서 **가장 가까운 지지/저항선** ± tick_offset 호가.
+
+    차수는 가격 내림차순을 강제한다(ADR-0011 §2 원칙 유지) — 두 되돌림이 같은 선을
+    고르면 다음 차수는 그 아래 선으로 내려간다. 내려갈 선이 없으면 ValueError —
+    지지/저항선이 부족하다는 뜻이고, 조용히 차수를 지우면 오너가 건 분할이 사라진다.
+
+    호가 반올림은 체결이 덜 되는 쪽(내림), 같은 거리면 낮은 선 — 백테스트가 낙관으로
+    기울지 않게 한다. 신고가(high) 이상 가격은 후보에서 뺀다(추격 매수 방지).
+    """
+    _validate_wave(low, high)
+    ordered = _ordered_params(ratios, "ratios")
+    for ratio in ordered:
+        if not 0.0 < ratio < 1.0:
+            raise ValueError(f"되돌림 비율은 0 과 1 사이여야 한다(확장 비율 미지원): {ratio}")
+    if not levels:
+        raise ValueError("지지/저항선이 없습니다 — 피벗 기준(일)을 줄이거나 군집 폭을 조정하세요.")
+
+    priced: list[tuple[int, float, int]] = []  # (지정가, 선 원값, 터치 수)
+    for lv in levels:
+        try:
+            px = shift_ticks(round_to_tick(lv.price, "down", kind), tick_offset, kind)
+        except ValueError:
+            continue  # 오프셋이 가격을 0 이하로 밀어낸 극단 — 그 선만 제외
+        if 0 < px < high:
+            priced.append((px, lv.price, lv.touches))
+
+    out: list[SRTarget] = []
+    ceiling = float("inf")
+    for tranche, ratio in enumerate(ordered, start=1):
+        target = _retracement(low, high, ratio)
+        cands = [c for c in priced if c[0] < ceiling]
+        if not cands:
+            raise ValueError(
+                f"매수 {tranche}차에 걸 지지/저항선이 없습니다 — 앞 차수 아래 선이 부족합니다."
+            )
+        # 가장 가까운 선, 같은 거리면 낮은 선(보수 방향).
+        best = min(cands, key=lambda c: (abs(c[1] - target), c[0]))
+        out.append(SRTarget(tranche=tranche, price=best[0], level_price=best[1], touches=best[2]))
+        ceiling = best[0]
+    return out
+
+
+def sell_targets_sr(
+    basis: float,
+    *,
+    rebound_pcts: Sequence[float],
+    levels: Sequence["SRLevel"],
+    tick_offset: int = 0,
+    kind: InstrumentKind = "stock",
+) -> list[SRTarget]:
+    """분할 매도 = 각 반등 목표가(기준가 × (1+반등률))에서 가장 가까운 **기준가 위**
+    지지/저항선 ± tick_offset 호가. 차수는 가격 오름차순 강제(반등하며 닿는 순서).
+
+    기준가 이하 선은 후보에서 뺀다 — 반등 매도 자리에 손절 가격대가 끼는 것을 막는다.
+    호가 반올림은 올림, 같은 거리면 높은 선(체결이 덜 되는 보수 방향).
+    """
+    if basis <= 0:
+        raise ValueError(f"매도 기준가는 0보다 커야 한다: {basis}")
+    ordered = _ordered_params(rebound_pcts, "rebound_pcts")
+    for pct in ordered:
+        if pct <= 0:
+            raise ValueError(f"반등률은 0보다 커야 한다: {pct}")
+    if not levels:
+        raise ValueError("지지/저항선이 없습니다 — 피벗 기준(일)을 줄이거나 군집 폭을 조정하세요.")
+
+    priced: list[tuple[int, float, int]] = []
+    for lv in levels:
+        try:
+            px = shift_ticks(round_to_tick(lv.price, "up", kind), tick_offset, kind)
+        except ValueError:
+            continue
+        if px > basis:
+            priced.append((px, lv.price, lv.touches))
+
+    out: list[SRTarget] = []
+    floor = 0.0
+    for tranche, pct in enumerate(ordered, start=1):
+        target = basis * (1.0 + pct / 100.0)
+        cands = [c for c in priced if c[0] > floor]
+        if not cands:
+            raise ValueError(
+                f"매도 {tranche}차에 걸 지지/저항선이 없습니다 — 기준가 위 선이 부족합니다."
+            )
+        best = min(cands, key=lambda c: (abs(c[1] - target), -c[0]))
+        out.append(SRTarget(tranche=tranche, price=best[0], level_price=best[1], touches=best[2]))
+        floor = best[0]
+    return out

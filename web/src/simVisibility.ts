@@ -6,25 +6,13 @@
 export type OverlayVisibility = {
   anchor: boolean // 사이클 저점·고점 기준선
   fib: boolean // 되돌림 레벨선
-  round: boolean // 라운드 피겨선 (전략 오버레이)
+  sr: boolean // 지지/저항 수평선 (ADR-0014)
   buy: boolean
   sell: boolean
   stop: boolean
-  vwap: boolean // 앵커 VWAP 곡선
   fills: boolean // 체결 ▲▼ 마커
-  touch: boolean // 레벨 근접 ◆ 마커 (전략 오버레이)
 }
 
 export function allVisible(): OverlayVisibility {
-  return {
-    anchor: true,
-    fib: true,
-    round: true,
-    buy: true,
-    sell: true,
-    stop: true,
-    vwap: true,
-    fills: true,
-    touch: true,
-  }
+  return { anchor: true, fib: true, sr: true, buy: true, sell: true, stop: true, fills: true }
 }

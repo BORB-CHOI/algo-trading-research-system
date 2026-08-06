@@ -108,7 +108,7 @@ def test_strategies_catalog_contract() -> None:
 
     fib = by_key["fib_retrace"]
     assert (fib["signals"], fib["overlay"]) == (False, True)
-    assert [p["key"] for p in fib["params"]] == ["drop_pct", "near"]  # 사이클 정의(ADR-0013)
+    assert [p["key"] for p in fib["params"]] == ["drop_pct", "sr_span", "sr_cluster_pct"]  # ADR-0013·0014
     for s in by_key.values():
         assert set(s) == {"key", "name", "desc", "signals", "overlay", "params"}
         for p in s["params"]:
@@ -165,7 +165,7 @@ def test_overlay_contract() -> None:
         json={
             "code": "005930",
             "strategy": "fib_retrace",
-            "params": {"drop_pct": 50, "near": 2},
+            "params": {"drop_pct": 50, "sr_span": 10, "sr_cluster_pct": 1},
             "end": "2026-07-16",
         },
     )
@@ -178,15 +178,13 @@ def test_overlay_contract() -> None:
     # look-ahead 금지 — 기준일(end) 오른쪽은 절대 안 본다 (오너 지적 2026-08-06).
     assert j["anchors"]["low_date"] <= j["anchors"]["high_date"] <= "2026-07-16"
     kinds = {ln["kind"] for ln in j["lines"]}
-    assert kinds <= {"fib", "round", "anchor"}
+    assert kinds <= {"fib", "sr", "anchor"}
+    assert any(ln["kind"] == "sr" for ln in j["lines"])  # 지지/저항선 (ADR-0014)
     fib_labels = [ln["label"] for ln in j["lines"] if ln["kind"] == "fib"]
     assert fib_labels == ["23.6%", "38.2%", "50.0%", "61.8%", "78.6%"]
     for ln in j["lines"]:
         assert set(ln) == {"price", "label", "kind"}
-    assert len(j["touches"]) <= 30
-    for t in j["touches"]:
-        assert set(t) == {"time", "price", "label"}
-        assert t["time"] <= "2026-07-16"
+    assert j["touches"] == []  # 근접 판정 폐기 — 계약 필드만 유지
 
 
 def test_simulate_looks_left_of_base_date_only() -> None:
@@ -198,10 +196,11 @@ def test_simulate_looks_left_of_base_date_only() -> None:
         "code": "005930",
         "end": "2026-03-31",
         "cycle_drop_pct": 50,
+        "sr_span": 10,
+        "sr_cluster_pct": 1,
         "buy": [{"id": "a", "ratio": 0.5, "weight": 100}],
         "sell": [{"id": "s", "rebound_pct": 10, "weight": 100}],
         "sell_basis": "avg_entry",
-        "round_tolerance_pct": 1.5,
         "qty": 10,
     }
     r = client.post("/api/simulate", json=body)

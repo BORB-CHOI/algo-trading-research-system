@@ -242,10 +242,10 @@ export async function postSignals(req: SignalsRequest): Promise<SignalsResponse>
 // 계산은 전부 파이썬 — 프런트는 받은 선·마커를 그리기만 한다(시각 전용, 매매 판단 아님).
 export type OverlayLine = {
   price: number
-  label: string // "38.2%" / "50,000 라운드" / "베이스" 등 우측 라벨
+  label: string // "38.2%" / "지지저항 3회" / "사이클 저점" 등 우측 라벨
   // buy/sell/stop 은 시뮬레이션(POST /api/simulate)이 내는 매매 목표가·손절가다.
   // 시각 전용이라는 점은 같지만 선 굵기·색을 달리해 "판단 대상"임을 구분한다.
-  kind: 'fib' | 'round' | 'anchor' | 'buy' | 'sell' | 'stop'
+  kind: 'fib' | 'sr' | 'anchor' | 'buy' | 'sell' | 'stop'
 }
 
 export type OverlayTouch = {
@@ -312,19 +312,22 @@ export type SimulateRequest = {
   code: string
   end?: string
   cycle_drop_pct: number // 사이클 하락 기준(%) — 파동 = 상승장 사이클 하나뿐(ADR-0013)
+  sr_span: number // 지지/저항 피벗 기준(좌우 N거래일, ADR-0014)
+  sr_cluster_pct: number // 지지/저항 선 군집 폭(%)
   buy: SimStagePayload[]
   sell: SimStagePayload[]
   sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high' // anchor_high = 사이클 고점
-  round_tolerance_pct: number
+  buy_tick_offset?: number // 매수 = 선택된 지지/저항선 ±N호가
+  sell_tick_offset?: number
   qty?: number // ② 주문수량 — 주면 체결 내역(수량·손익)까지 온다
   qty_type?: 'shares' | 'amount'
   stop?: {
     enabled: boolean
     mode: 'pct' | 'support'
     pct?: number
-    source?: 'avwap' | 'cycle_low' | 'custom'
+    source?: 'cycle_low' | 'custom'
     custom_price?: number
-    tick_offset?: number // 지지저항 ±N호가
+    tick_offset?: number // 기준선 ±N호가
   }
 }
 

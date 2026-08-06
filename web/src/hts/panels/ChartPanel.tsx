@@ -8,8 +8,7 @@ import { currentStrategy, currentSymbol, onStrategyPick, onSymbolPick } from '..
 const OVERLAY_LAYERS: readonly (readonly [keyof OverlayVisibility, string])[] = [
   ['anchor', '앵커'],
   ['fib', '피보나치'],
-  ['round', '라운드'],
-  ['touch', '터치'],
+  ['sr', '지지저항'],
 ] as const
 
 // 차트 패널 — KLineChart Pro 재사용. 종목 선택/전략 이벤트를 구독한다.

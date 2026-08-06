@@ -56,7 +56,8 @@ const SIM_SYM = { code: '005930', name: '삼성전자', market: 'KOSPI' } as con
 // "실행 버튼을 누르면 무조건 예시가 보여야 한다"(오너) — 빈 폼 때문에 실행을 막지 않는다.
 const SIM_EXAMPLE = {
   cycleDropPct: 50, // 오너도 -50/-60 미확정 — 화면에서 조정하는 값이다(ADR-0013)
-  tolerancePct: 1.5,
+  srSpan: 10, // 지지/저항 피벗 기준(좌우 거래일, ADR-0014)
+  srClusterPct: 1,
   qtyShares: 100,
   buy: [
     { ratio: 0.382, weight: 33 },
@@ -77,10 +78,10 @@ function todayStr(): string {
 const SIM_LAYERS: readonly (readonly [keyof OverlayVisibility, string])[] = [
   ['anchor', '앵커'],
   ['fib', '피보나치'],
+  ['sr', '지지저항'],
   ['buy', '매수'],
   ['sell', '매도'],
   ['stop', '손절'],
-  ['vwap', 'VWAP'],
   ['fills', '체결'],
 ] as const
 
@@ -92,7 +93,8 @@ const PLACEHOLDER: Record<string, string> = {
   days: '250',
   within: '3',
   drop_pct: '50',
-  near: '1.5',
+  sr_span: '10',
+  sr_cluster_pct: '1',
 }
 
 type Step = 'screen' | 'strategy' | 'sim'
@@ -156,8 +158,8 @@ function SellBasisPicker({ value, onChange }: { value: SellBasis; onChange: (b: 
 
 // ③ 차트 하단 결과 스트립 — 사이클·지지선·매도 기준·최종 손익을 한 줄씩. 차트와 같이 읽는 용도.
 function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeof SELL_BASIS_LABEL }) {
-  const avwapLast = r.series.find((s) => s.label.includes('VWAP'))?.points.at(-1)?.value
   const stopLine = r.lines.find((l) => l.kind === 'stop')
+  const srCount = r.lines.filter((l) => l.kind === 'sr').length
   const sellLines = r.lines.filter((l) => l.kind === 'sell')
   const buys = r.fills.filter((f) => f.side === 'buy').length
   const sells = r.fills.filter((f) => f.side === 'sell').length
@@ -182,8 +184,8 @@ function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeo
         </p>
       )}
       <p>
-        <b>지지선 근거</b> 사이클 저점 {fmtPrice(r.cycle.low_price)}
-        {avwapLast != null && <> · 앵커 VWAP {fmtPrice(Math.round(avwapLast))} (상승장 평균 매수가)</>}
+        <b>지지저항</b> 수평선 {srCount}개 (스윙 피벗+군집) — 매수·매도는 각 레벨에서 가장
+        가까운 선에 걸린다 · 사이클 저점 {fmtPrice(r.cycle.low_price)}
         {stopLine && <> · 손절선 {fmtPrice(stopLine.price)}</>}
       </p>
       {t && total != null ? (
@@ -545,19 +547,26 @@ export function StrategyPanel() {
       filled.push(`비중 균등 ${each}%씩`)
     }
 
-    let tol = Number(draft.roundTolerancePct)
-    if (!(tol > 0)) {
-      tol = SIM_EXAMPLE.tolerancePct
-      set('roundTolerancePct', String(tol))
-      filled.push(`라운드 허용폭 ${tol}%`)
-    }
-
-    let cyc = Number(draft.cycleDropPct)
+    // 파동·지지저항 기준은 ② 진입 기법(피보나치)의 파라미터다 (오너: "피보나치에만
+    // 해당되는 거잖아, 옮겨"). 비었으면 예시값으로 돌리고 채운 사실을 알린다.
+    const ep = draft.entryKey === 'fib_retrace' ? draft.entryParams : {}
+    let cyc = Number(ep['drop_pct'])
     if (!(cyc > 0 && cyc < 100)) {
       cyc = SIM_EXAMPLE.cycleDropPct
-      set('cycleDropPct', String(cyc))
       filled.push(`사이클 하락 기준 ${cyc}%`)
     }
+    let srSpan = Number(ep['sr_span'])
+    if (!(Number.isInteger(srSpan) && srSpan >= 1)) {
+      srSpan = SIM_EXAMPLE.srSpan
+      filled.push(`피벗 기준 ${srSpan}일`)
+    }
+    let srCluster = Number(ep['sr_cluster_pct'])
+    if (!(srCluster > 0)) {
+      srCluster = SIM_EXAMPLE.srClusterPct
+      filled.push(`선 군집 폭 ${srCluster}%`)
+    }
+    const buyOff = Number(draft.buyTickOffset || '0')
+    const sellOff = Number(draft.sellTickOffset || '0')
 
     const hasQty = Number(draft.qty) > 0
     const qty = hasQty ? Number(draft.qty) : SIM_EXAMPLE.qtyShares
@@ -570,6 +579,8 @@ export function StrategyPanel() {
         code: SIM_SYM.code,
         end: simDate || undefined,
         cycle_drop_pct: cyc,
+        sr_span: srSpan,
+        sr_cluster_pct: srCluster,
         buy: buy.map((b) => ({
           id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled, price_override: b.priceOverride,
         })),
@@ -577,7 +588,8 @@ export function StrategyPanel() {
           id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled, price_override: s.priceOverride,
         })),
         sell_basis: draft.sellBasis,
-        round_tolerance_pct: tol,
+        buy_tick_offset: Number.isInteger(buyOff) ? buyOff : 0,
+        sell_tick_offset: Number.isInteger(sellOff) ? sellOff : 0,
         qty,
         qty_type: hasQty ? draft.qtyType : 'shares',
         stop: draft.stopEnabled
@@ -985,25 +997,39 @@ export function StrategyPanel() {
               {entryErr && <p className="hint warn">{entryErr}</p>}
             </Card>
 
-            <Card title="분할 매수" sub="되돌림 레벨의 라운드 피겨에 건다 (ADR-0011)">
+            <Card title="분할 매수" sub="되돌림 레벨에서 가장 가까운 지지/저항선에 건다 (ADR-0014)">
               <BuyStages stages={draft.buy} computed={computed} onChange={(b) => set('buy', b)} />
+              <div className="kv" style={{ marginTop: 8 }}>
+                <span className="k">호가 오프셋</span>
+                <span className="v">
+                  <input
+                    className="amt"
+                    placeholder="0"
+                    value={draft.buyTickOffset}
+                    onChange={(e) => set('buyTickOffset', e.target.value)}
+                  />
+                  <span className="unit">호가</span>
+                </span>
+              </div>
+              <p className="hint">선택된 지지/저항선에서 몇 호가 위(+)/아래(−)에 걸지. 0 = 선 그대로.</p>
             </Card>
 
             <Card title="분할 매도" sub="기준점 대비 반등률">
               <SellBasisPicker value={draft.sellBasis} onChange={(b) => set('sellBasis', b)} />
               <SellStages stages={draft.sell} computed={computed} onChange={(s) => set('sell', s)} />
               <div className="kv" style={{ marginTop: 8 }}>
-                <span className="k">라운드 허용폭</span>
+                <span className="k">호가 오프셋</span>
                 <span className="v">
                   <input
                     className="amt"
-                    placeholder="1.5"
-                    value={draft.roundTolerancePct}
-                    onChange={(e) => set('roundTolerancePct', e.target.value)}
+                    placeholder="0"
+                    value={draft.sellTickOffset}
+                    onChange={(e) => set('sellTickOffset', e.target.value)}
                   />
-                  <span className="unit">%</span>
+                  <span className="unit">호가</span>
                 </span>
               </div>
+              <p className="hint">반등 목표가에서 가장 가까운 기준가 위 지지/저항선 ± 오프셋에 건다.</p>
             </Card>
 
             <Card title="손절" sub="평단 -% 또는 지지저항 ±N호가">
@@ -1051,11 +1077,8 @@ export function StrategyPanel() {
                           <select
                             style={{ flex: 1 }}
                             value={draft.stopSource}
-                            onChange={(e) =>
-                              set('stopSource', e.target.value as 'avwap' | 'cycle_low' | 'custom')
-                            }
+                            onChange={(e) => set('stopSource', e.target.value as 'cycle_low' | 'custom')}
                           >
-                            <option value="avwap">앵커 VWAP (지지선)</option>
                             <option value="cycle_low">사이클 저점 (피보 시작점)</option>
                             <option value="custom">직접 가격</option>
                           </select>
@@ -1143,20 +1166,14 @@ export function StrategyPanel() {
                   </span>
                 </div>
                 <div className="kv">
-                  <span className="k">사이클 하락 기준</span>
+                  <span className="k">파동·지지저항</span>
                   <span className="v">
-                    <input
-                      className="amt"
-                      placeholder={String(SIM_EXAMPLE.cycleDropPct)}
-                      value={draft.cycleDropPct}
-                      onChange={(e) => set('cycleDropPct', e.target.value)}
-                    />
-                    <span className="unit">%</span>
+                    사이클 -{Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['drop_pct'] : 0) || SIM_EXAMPLE.cycleDropPct}%
+                    · 피벗 {Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['sr_span'] : 0) || SIM_EXAMPLE.srSpan}일
+                    · 군집 {Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['sr_cluster_pct'] : 0) || SIM_EXAMPLE.srClusterPct}%
                   </span>
                 </div>
-                <p className="hint">
-                  이만큼 빠진 적 없는 구간은 한 상승장 — 그 시작 저점이 피보나치 시작점입니다(ADR-0013).
-                </p>
+                <p className="hint">기준 수정은 ② 매매전략의 진입 기법(피보나치)에서 — 여기는 실행만.</p>
                 <div className="form-row" style={{ marginTop: 8 }}>
                   <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
                     {simRunning ? '계산 중…' : '시뮬레이션 실행'}
@@ -1263,13 +1280,8 @@ export function StrategyPanel() {
                 </Card>
               )}
 
-              <Card title="분할 매수" sub="②와 같은 값 — 여기서 고쳐도 됨">
-                <BuyStages stages={draft.buy} computed={computed} onChange={(b) => set('buy', b)} />
-              </Card>
-              <Card title="분할 매도" sub={`기준점: ${SELL_BASIS_LABEL[draft.sellBasis]}`}>
-                <SellBasisPicker value={draft.sellBasis} onChange={(b) => set('sellBasis', b)} />
-                <SellStages stages={draft.sell} computed={computed} onChange={(s) => set('sell', s)} />
-              </Card>
+              {/* 분할 매수/매도 카드는 ③에서 삭제 (오너 지시 2026-08-06) —
+                  "차트만 잘 보여주면 돼. 요약 정보와 체결 내역만 있으면 돼." 설정은 ②에서. */}
             </div>
             <div className="sim-chart">
               {/* 요소별 필터 — 겹칠 때 하나씩 끄고 본다 (오너 지시 2026-08-06). 줌은 유지된다. */}

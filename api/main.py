@@ -42,15 +42,15 @@ from src.layer1_data.quotes_rt import realtime_quotes
 from src.layer1_data.recent import merge_with_marcap, recent_meta
 from src.layer1_data.themes import theme_map
 from src.layer3_strategy import conditions as cond_registry
-from src.layer3_strategy.avwap import anchored_vwap
 from src.layer3_strategy.case_overlay import (
     STRATEGIES,
     Strategy,
     parse_params,
     strategies_payload,
 )
-from src.layer3_strategy.entry_levels import average_entry, buy_levels, sell_levels
+from src.layer3_strategy.entry_levels import average_entry, buy_targets_sr, sell_targets_sr
 from src.layer3_strategy.screening import ScreeningRule, screen
+from src.layer3_strategy.support_resistance import find_levels
 from src.layer3_strategy.surge import find_52w_high, find_cycle_low
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 
@@ -875,24 +875,27 @@ class SimStage(BaseModel):
 
 
 class SimStop(BaseModel):
-    """손절 정의 — 평단 대비 % 또는 지지저항(±N호가). 전부 데이터(ADR-0009)."""
+    """손절 정의 — 평단 대비 % 또는 기준선(±N호가). 전부 데이터(ADR-0009)."""
 
     enabled: bool = False
-    mode: str = "pct"  # pct(평단 -%) | support(지지저항 기준)
+    mode: str = "pct"  # pct(평단 -%) | support(기준선)
     pct: float | None = None  # mode=pct: 평단에서 몇 % 아래
-    source: str = "avwap"  # mode=support: avwap | cycle_low | custom (anchor_start 는 옛 저장분)
+    source: str = "cycle_low"  # cycle_low | custom (avwap·anchor_start 는 옛 저장분 → cycle_low)
     custom_price: float | None = None
-    tick_offset: int = 0  # 지지저항에서 ±N호가 (음수 = 아래)
+    tick_offset: int = 0  # 기준선에서 ±N호가 (음수 = 아래)
 
 
 class SimulateRequest(BaseModel):
     code: str
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     cycle_drop_pct: float  # 사이클 하락 기준(%) — 이만큼 안 빠진 구간 = 한 상승장(ADR-0013)
+    sr_span: int  # 지지/저항 피벗 기준(좌우 N거래일) — ADR-0014
+    sr_cluster_pct: float  # 지지/저항 선 군집 폭(%)
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
-    sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high
-    round_tolerance_pct: float
+    sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high(사이클 고점)
+    buy_tick_offset: int = 0  # 매수 = 선택된 지지/저항선 ±N호가
+    sell_tick_offset: int = 0
     # ② 주문수량 — 주면 체결 내역에 수량·금액·손익까지 계산한다 (표시 전용, 비용 미포함)
     qty: float | None = None
     qty_type: str = "shares"  # shares(주) | amount(원)
@@ -907,8 +910,8 @@ def api_simulate(req: SimulateRequest) -> dict:
     요청에서 받는다(ADR-0009). end 를 기준일로 주면 그 시점까지만 본다(look-ahead 방지).
 
     파동 = **상승장 사이클** 하나뿐이다(ADR-0013 개정, 오너 확정 2026-08-06 — "급등" 폐기).
-    저점 = 사이클 저점(find_cycle_low), 고점 = 저점 이후 최고 High. 되돌림 레벨·분할
-    목표가·앵커 VWAP·손절 전부 이 두 점에서 나온다.
+    분할 목표가 = 각 되돌림 레벨에서 가장 가까운 **지지/저항선 ±N호가**(ADR-0014) —
+    라운드 피겨·앵커 VWAP 방식은 폐기했다.
     """
     code = req.code.strip().zfill(6)
     # 사이클 저점은 수년 전 바닥일 수 있다 — 이 종목의 전체 이력을 읽는다(기준일까지).
@@ -937,6 +940,13 @@ def api_simulate(req: SimulateRequest) -> dict:
     _, w52_price = find_52w_high(full)
     is_52w = abs(high_price - w52_price) < 1e-9
 
+    # 지지/저항 수평선 — 오너가 손으로 긋는 그 선(스윙 피벗+군집, ADR-0014).
+    # full 은 이미 기준일까지 잘려 있고, 피벗은 우측 span 봉이 있어야 확정 → look-ahead 없음.
+    try:
+        sr = find_levels(full, span=req.sr_span, cluster_pct=req.sr_cluster_pct)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     buys = sorted(
         (s for s in req.buy if s.enabled and s.ratio is not None and 0 < s.ratio < 1),
         key=lambda s: s.ratio,
@@ -960,17 +970,20 @@ def api_simulate(req: SimulateRequest) -> dict:
         {"price": cycle.price, "label": "사이클 저점", "kind": "anchor"},
         {"price": high_price, "label": "사이클 고점(52주 신고가)" if is_52w else "사이클 고점", "kind": "anchor"},
     ]
-    for s in buys:  # 되돌림 원값 — 목표가(라운드)와 근거 레벨을 함께 보여준다
+    for s in buys:  # 되돌림 원값 — 목표가(지지/저항선)와 근거 레벨을 함께 보여준다
         lv = high_price - s.ratio * fib_span
         lines.append({"price": lv, "label": f"{s.ratio * 100:.1f}%", "kind": "fib"})
+    for lv_sr in sr:  # 지지/저항선 전부 — y축 밖은 차트가 알아서 안 그리고, 칩으로 끌 수 있다
+        lines.append({"price": lv_sr.price, "label": f"지지저항 {lv_sr.touches}회", "kind": "sr"})
 
     try:
         blevels = (
-            buy_levels(
+            buy_targets_sr(
                 cycle.price,  # 피보 구간 = 사이클 저점 → 고점 (ADR-0013)
                 high_price,
                 ratios=[s.ratio for s in buys],
-                tolerance_pct=req.round_tolerance_pct,
+                levels=sr,
+                tick_offset=req.buy_tick_offset,
             )
             if buys
             else []
@@ -1020,10 +1033,11 @@ def api_simulate(req: SimulateRequest) -> dict:
         sell_basis_price = basis
         if basis is not None:
             try:
-                slevels = sell_levels(
+                slevels = sell_targets_sr(
                     basis,
                     rebound_pcts=[s.rebound_pct for s in sells],
-                    tolerance_pct=req.round_tolerance_pct,
+                    levels=sr,
+                    tick_offset=req.sell_tick_offset,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
@@ -1053,9 +1067,7 @@ def api_simulate(req: SimulateRequest) -> dict:
                                     "pnl": (float(eff) - avg_cost) * shares,
                                 })
 
-    vw = anchored_vwap(full, cycle.date)
-
-    # ── 손절 — 평단 -% 또는 지지저항 ±N호가. 첫 매수 체결일부터 Low ≤ 손절가 첫 날 발동 ──
+    # ── 손절 — 평단 -% 또는 기준선 ±N호가. 첫 매수 체결일부터 Low ≤ 손절가 첫 날 발동 ──
     stop_price: int | None = None
     if req.stop and req.stop.enabled and buy_fills:
         s = req.stop
@@ -1064,14 +1076,12 @@ def api_simulate(req: SimulateRequest) -> dict:
                 raise HTTPException(status_code=400, detail="손절 %는 0보다 커야 합니다.")
             stop_price = round_to_tick(average_entry(buy_fills) * (1 - s.pct / 100), "down")
         else:
-            if s.source in ("cycle_low", "anchor_start"):  # anchor_start = 옛 저장분 호환
-                base_px = cycle.price
-            elif s.source == "custom":
+            if s.source == "custom":
                 if not s.custom_price or s.custom_price <= 0:
                     raise HTTPException(status_code=400, detail="손절 기준 가격을 입력하세요.")
                 base_px = s.custom_price
-            else:  # avwap — 기준일의 앵커 VWAP 값
-                base_px = float(vw.dropna().iloc[-1])
+            else:  # cycle_low (avwap·anchor_start 옛 저장분도 여기로 — VWAP 폐기, ADR-0014)
+                base_px = cycle.price
             stop_price = shift_ticks(base_px, s.tick_offset)
         lines.append({"price": stop_price, "label": "손절", "kind": "stop"})
 
@@ -1102,10 +1112,9 @@ def api_simulate(req: SimulateRequest) -> dict:
                     "pnl": (float(stop_price) - avg0) * held,
                 })
 
-    series = [{
-        "label": "앵커 VWAP",
-        "points": [{"time": ts.strftime("%Y-%m-%d"), "value": float(v)} for ts, v in vw.items() if pd.notna(v)],
-    }]
+    # 곡선 없음 — 앵커 VWAP 은 폐기(ADR-0014, 오너: "지지저항 그게 아닌 거 같은데").
+    # 계약(series 필드)은 유지한다 — 프런트가 빈 배열이면 아무것도 안 그린다.
+    series: list[dict] = []
 
     # 체결 요약 — 평단·실현손익·잔여 평가(기준일 종가). 비용·슬리피지 미포함(ADR-0004 소관).
     trades = None

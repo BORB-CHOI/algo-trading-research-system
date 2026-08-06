@@ -20,13 +20,7 @@ from src.layer3_strategy.case_overlay import (
     parse_params,
     strategies_payload,
 )
-from src.layer3_strategy.fibonacci import (
-    FIB_RATIOS,
-    MAX_TOUCHES,
-    _round_candidates,
-    _round_label,
-    compute_overlay,
-)
+from src.layer3_strategy.fibonacci import FIB_RATIOS, compute_overlay
 
 Bar = tuple[float, float, float, float]  # (Open, High, Low, Close)
 
@@ -76,7 +70,7 @@ RETRACE: list[Bar] = [
 ]
 
 # 파라미터는 테스트 데이터다 — 전략 하드코딩이 아니라 검증 입력값(ADR-0009와 무관).
-P = {"drop_pct": 50, "near": 2.0}
+P = {"drop_pct": 50, "sr_span": 1, "sr_cluster_pct": 1.0}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -112,7 +106,7 @@ def test_drop_pct_range_validated() -> None:
     df = make_ohlc(WAVE)
     for bad in (0, 100, -5):
         with pytest.raises(ValueError, match="drop_pct"):
-            compute_overlay(df, {"drop_pct": bad, "near": 2})
+            compute_overlay(df, {"drop_pct": bad, "sr_span": 1, "sr_cluster_pct": 1.0})
 
 
 # ─────────────────────────────────────────────────────────────
@@ -135,47 +129,22 @@ def test_anchor_lines_present() -> None:
     assert anchors == {"사이클 저점": 9_000.0, "사이클 고점": 21_000.0}
 
 
-def test_round_figures_near_filter() -> None:
-    """near=2%: 23.6%레벨 18,168→18,000(0.92%✓), 50%레벨 15,000→자신(0%✓), 나머지는 밖.
-    오름차순 정렬·중복 제거까지 고정한다."""
+def test_sr_lines_are_swing_pivots() -> None:
+    """지지/저항선 = 스윙 피벗 (ADR-0014). span=1 손계산: 고점 20,000·21,000, 저점 9,000."""
     out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
-    rounds = [(ln["price"], ln["label"]) for ln in out["lines"] if ln["kind"] == "round"]
-    assert rounds == [(15_000.0, "15,000 라운드"), (18_000.0, "18,000 라운드")]
-
-
-def test_round_candidates_rule() -> None:
-    """라운드 = 유효숫자 상위 두 자리 이하가 0 (스펙 예시 53,000·50,000)."""
-    assert _round_candidates(53_400) == [53_000.0, 54_000.0]
-    assert _round_candidates(50_000) == [50_000.0]  # 이미 라운드면 후보 1개
-    assert _round_candidates(9_870) == [9_800.0, 9_900.0]  # step = 100
-    assert _round_candidates(0) == []
-    assert _round_label(312.5) == "312.5 라운드"  # 수정주가 보정 소수 단위
-
-
-# ─────────────────────────────────────────────────────────────
-# touches
-# ─────────────────────────────────────────────────────────────
-
-
-def test_touches_only_near_levels_after_high() -> None:
-    df = make_ohlc(WAVE + RETRACE)
-    out = compute_overlay(df, P)
-    dates = df["Date"]
-    assert out["touches"] == [
-        {"time": dates.iloc[7].strftime("%Y-%m-%d"), "price": 16_300.0, "label": "38.2% 근접"},
-        {"time": dates.iloc[8].strftime("%Y-%m-%d"), "price": 15_000.0, "label": "50.0% 근접"},
+    sr = [(ln["price"], ln["label"]) for ln in out["lines"] if ln["kind"] == "sr"]
+    assert sr == [
+        (9_000.0, "지지저항 1회"),
+        (20_000.0, "지지저항 1회"),
+        (21_000.0, "지지저항 1회"),
     ]
 
 
-def test_touches_capped_at_30_most_recent() -> None:
-    """레벨 위에 40일 눌러앉으면 touch 는 최근 30개만 남는다(계약 상한)."""
-    bars = WAVE + [flat_bar(15_000)] * 40  # 15,000 = 정확히 50% 레벨
-    df = make_ohlc(bars)
-    out = compute_overlay(df, {**P, "near": 0.5})
-    assert len(out["touches"]) == MAX_TOUCHES == 30
-    # 40개 중 앞 10개가 잘리고 최근 30개(인덱스 17~46)가 남는다.
-    assert out["touches"][0]["time"] == df["Date"].iloc[17].strftime("%Y-%m-%d")
-    assert out["touches"][-1]["time"] == df["Date"].iloc[46].strftime("%Y-%m-%d")
+def test_line_kinds_and_no_touches() -> None:
+    """라운드 피겨·터치는 폐기(근접 판정 입력 삭제) — anchor/fib/sr 만 나온다."""
+    out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
+    assert {ln["kind"] for ln in out["lines"]} == {"anchor", "fib", "sr"}
+    assert out["touches"] == []
 
 
 # ─────────────────────────────────────────────────────────────
@@ -196,7 +165,7 @@ def test_catalog_payload_contract() -> None:
 
     fib = by_key["fib_retrace"]
     assert (fib["signals"], fib["overlay"]) == (False, True)
-    assert [p["key"] for p in fib["params"]] == ["drop_pct", "near"]  # 베이스 파라미터 폐기
+    assert [p["key"] for p in fib["params"]] == ["drop_pct", "sr_span", "sr_cluster_pct"]  # 근접 판정 폐기
     for s in payload["strategies"]:
         for p in s["params"]:
             assert set(p) == {"key", "label", "type", "unit", "required"}  # /api/conditions 와 동일
@@ -216,9 +185,11 @@ def test_parse_params_validation() -> None:
 
     fib = STRATEGIES["fib_retrace"]
     with pytest.raises(ValueError, match="0과 100 사이"):
-        parse_params(fib, {"drop_pct": 120, "near": 1})
+        parse_params(fib, {"drop_pct": 120, "sr_span": 10, "sr_cluster_pct": 1})
+    with pytest.raises(ValueError, match="sr_span"):
+        parse_params(fib, {"drop_pct": 50, "sr_span": 0, "sr_cluster_pct": 1})
     with pytest.raises(ValueError, match="0보다"):
-        parse_params(fib, {"drop_pct": 50, "near": -1})
+        parse_params(fib, {"drop_pct": 50, "sr_span": 10, "sr_cluster_pct": -1})
 
 
 def test_ma_cross_parametrized_signal() -> None:

@@ -108,11 +108,11 @@ function createSignalIndicator(): SignalStore {
 // ── 전략 오버레이 지표 — 차트 인스턴스별 (신호 지표와 같은 per-instance 패턴) ──
 // 피보나치 레벨·라운드 피겨·베이스/신고가 수평선은 전부 파이썬(/api/overlay)이 계산한다.
 // 여기는 받은 선·터치 마커를 그리기만 한다 — 시각 전용, 매매 판단 아님.
-// 라이트 테마 대비색: fib 주황 실선 / round 회색 점선 / anchor 파랑 점선.
+// 라이트 테마 대비색: fib 주황 실선 / sr 회색 점선 / anchor 파랑 점선.
 const OVERLAY_COLORS: Record<OverlayLine['kind'], string> = {
   fib: '#d97706', // 피보나치 레벨 — 실선
-  round: '#6b7280', // 라운드 피겨(호가 눈금) — 점선
-  anchor: '#2f6fed', // 베이스/신고가 기준선 — 점선
+  sr: '#6b7280', // 지지/저항 수평선 (ADR-0014) — 점선
+  anchor: '#2f6fed', // 사이클 저점/고점 기준선 — 점선
   buy: '#dd3c44', // 분할 매수 목표가 — 한국식 상승색(빨강)과 맞춘다
   sell: '#0062df', // 분할 매도 목표가 — 하락색(파랑)
   stop: '#111827', // 손절선 — 매매선과 확실히 구분되는 진회색
@@ -168,8 +168,8 @@ function drawSeries(c: DrawCtx, list: SeriesDraw[]): void {
 }
 
 // 가격을 라벨에 병기할 선 종류 — "매수, 매도 지점 가로선으로 가격과 함께" (오너 지시).
-// fib/round 는 서버 라벨에 이미 비율·라운드값이 있어 붙이면 중복이다.
-const PRICE_LABEL_KINDS = new Set<OverlayLine['kind']>(['buy', 'sell', 'stop', 'anchor'])
+// fib 는 서버 라벨(비율)만으로 충분 — 원값 병기는 중복이다.
+const PRICE_LABEL_KINDS = new Set<OverlayLine['kind']>(['buy', 'sell', 'stop', 'anchor', 'sr'])
 
 /** 수평선 + 우측 라벨. y축 범위 밖 레벨은 건너뛴다. */
 function drawLines(c: DrawCtx, list: OverlayLine[]): void {
@@ -248,14 +248,13 @@ function createOverlayIndicator(): OverlayStore {
       ctx.font = '11px sans-serif'
       ctx.lineWidth = 1
 
-      // 'round' 는 필터 대상이 아니다(케이스 검사기 전용) — vis 에 없는 kind 는 항상 그린다.
       const visOf = vis as Partial<Record<OverlayLine['kind'], boolean>>
-      if (vis.vwap) drawSeries(c, seriesList) // 곡선을 먼저 — 수평선 아래에 깔린다
+      drawSeries(c, seriesList) // 곡선을 먼저 — 수평선 아래에 깔린다 (현재 시뮬은 곡선 없음)
       drawLines(c, lines.filter((ln) => visOf[ln.kind] ?? true))
 
       ctx.textAlign = 'center'
       ctx.fillStyle = TOUCH_COLOR
-      if (vis.touch) forEachBarMark(c, touchesByTime, (t, x) => {
+      forEachBarMark(c, touchesByTime, (t, x) => {
         ctx.fillText('◆', x, yAxis.convertToPixel(t.price) + 4)
       })
 

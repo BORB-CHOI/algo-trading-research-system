@@ -48,16 +48,16 @@ export type SellStage = {
 /** 매도 반등률의 기준점. 오너가 "반등 몇 %"라 했을 때 무엇 대비인지가 갈려서 고르게 둔다. */
 export type SellBasis = 'avg_entry' | 'lowest_fill' | 'anchor_high'
 
-/** 손절 — 평단 대비 % 또는 지지저항(앵커 VWAP·사이클 저점·직접 가격) ±N호가.
- *  'anchor_start'(급등 시작가)는 급등 개념 폐기(ADR-0013 개정)로 삭제 — 옛 저장분은
- *  toDraft 에서 사이클 저점으로 이관한다. */
+/** 손절 — 평단 대비 % 또는 기준선(사이클 저점·직접 가격) ±N호가.
+ *  'anchor_start'(급등 폐기, ADR-0013 개정)·'avwap'(VWAP 폐기, ADR-0014)은 삭제 —
+ *  옛 저장분은 toDraft 에서 사이클 저점으로 이관한다. */
 export type StopRule = {
   enabled: boolean
   mode: 'pct' | 'support'
   pct?: number // mode=pct: 평단에서 몇 % 아래
-  source: 'avwap' | 'cycle_low' | 'custom' // mode=support 기준선
+  source: 'cycle_low' | 'custom' // mode=support 기준선
   customPrice?: number
-  tickOffset: number // 지지저항에서 ±N호가 (음수 = 아래)
+  tickOffset: number // 기준선에서 ±N호가 (음수 = 아래)
 }
 
 export type Strategy = {
@@ -65,18 +65,19 @@ export type Strategy = {
   screen: { name?: string; logic: ScreenLogic; conditions: SavedCondition[] }
   /** 진입 기법(케이스 검사기 오버레이용). 전략 1호 시뮬레이션은 안 쓴다 — 선택 사항. */
   entry?: { key: string; params: Record<string, number> }
-  /** 분할 매수·매도 설계. 가격은 여기 없다 — 기법 파라미터와 종목에서 계산된다. */
+  /** 분할 매수·매도 설계. 가격은 여기 없다 — 기법 파라미터와 종목에서 계산된다.
+   *  목표가 = 각 레벨에서 가장 가까운 지지/저항선 ± 호가 오프셋(ADR-0014).
+   *  roundTolerancePct 는 라운드 피겨 방식 폐기로 옛 저장본 호환용으로만 남는다. */
   split: {
     buy: BuyStage[]
     sell: SellStage[]
     sellBasis: SellBasis
-    /** 레벨에서 ±몇 % 안의 라운드 피겨를 목표가로 삼을지. 비우면 실행 시 예시값. */
+    buyTickOffset?: number // 지지/저항선에서 ±N호가 (음수 = 아래)
+    sellTickOffset?: number
     roundTolerancePct?: number
   }
   /** 손절. 없으면(옛 저장본) 손절 미사용으로 연다. */
   stop?: StopRule
-  /** 사이클 하락 기준(%) — 피보 시작점 = 사이클 저점(ADR-0013). 비우면 실행 시 예시값. */
-  cycleDropPct?: number
   /** 주문조건 — 주문조건 카드 삭제(2026-08-05)로 새 저장본에는 없다. 옛 저장본 호환용. */
   order?: {
     priceType: PriceType
@@ -131,12 +132,12 @@ export type StrategyDraft = {
   buy: BuyStage[]
   sell: SellStage[]
   sellBasis: SellBasis
-  roundTolerancePct: string
-  cycleDropPct: string
+  buyTickOffset: string // 지지/저항선에서 ±N호가 (음수 = 아래)
+  sellTickOffset: string
   stopEnabled: boolean
   stopMode: 'pct' | 'support'
   stopPct: string
-  stopSource: 'avwap' | 'cycle_low' | 'custom'
+  stopSource: 'cycle_low' | 'custom'
   stopCustom: string
   stopTicks: string // ±N호가 (음수 = 아래)
   priceType: PriceType
@@ -171,12 +172,12 @@ export function emptyDraft(): StrategyDraft {
     buy: [],
     sell: [],
     sellBasis: 'avg_entry',
-    roundTolerancePct: '',
-    cycleDropPct: '',
+    buyTickOffset: '0',
+    sellTickOffset: '0',
     stopEnabled: false,
     stopMode: 'pct',
     stopPct: '',
-    stopSource: 'avwap',
+    stopSource: 'cycle_low',
     stopCustom: '',
     stopTicks: '0',
     priceType: 'limit',
@@ -199,14 +200,13 @@ export function toDraft(s: Strategy): StrategyDraft {
     buy: (s.split?.buy ?? []).map((b) => ({ ...b })),
     sell: (s.split?.sell ?? []).map((x) => ({ ...x })),
     sellBasis: s.split?.sellBasis ?? 'avg_entry',
-    roundTolerancePct: s.split?.roundTolerancePct == null ? '' : String(s.split.roundTolerancePct),
-    cycleDropPct: s.cycleDropPct == null ? '' : String(s.cycleDropPct),
+    buyTickOffset: String(s.split?.buyTickOffset ?? 0),
+    sellTickOffset: String(s.split?.sellTickOffset ?? 0),
     stopEnabled: s.stop?.enabled ?? false,
     stopMode: s.stop?.mode ?? 'pct',
     stopPct: s.stop?.pct == null ? '' : String(s.stop.pct),
-    // 옛 저장분의 'anchor_start'(급등 시작가)는 사이클 저점으로 이관 (급등 폐기, ADR-0013 개정)
-    stopSource:
-      (s.stop?.source as string) === 'anchor_start' ? 'cycle_low' : (s.stop?.source ?? 'avwap'),
+    // 옛 저장분의 'anchor_start'(급등 폐기)·'avwap'(VWAP 폐기)은 사이클 저점으로 이관.
+    stopSource: s.stop?.source === 'custom' ? 'custom' : 'cycle_low',
     stopCustom: s.stop?.customPrice == null ? '' : String(s.stop.customPrice),
     stopTicks: String(s.stop?.tickOffset ?? 0),
     priceType: s.order?.priceType ?? 'limit',
@@ -301,20 +301,11 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
   const stages = checkStages(d)
   if (!stages.ok) return stages
 
-  let tolValue: number | undefined
-  if (d.roundTolerancePct.trim()) {
-    const tol = toNum('라운드 피겨 허용폭', d.roundTolerancePct, false)
-    if (!tol.ok) return tol
-    tolValue = tol.value
-  }
-
-  let cycleValue: number | undefined
-  if (d.cycleDropPct.trim()) {
-    const cyc = toNum('사이클 하락 기준', d.cycleDropPct, false)
-    if (!cyc.ok) return cyc
-    if (cyc.value >= 100) return { ok: false, error: '[사이클 하락 기준] 100% 미만이어야 합니다.' }
-    cycleValue = cyc.value
-  }
+  // 호가 오프셋은 0·음수도 유효하다 (0 = 지지/저항선 그대로, 음수 = 아래).
+  const buyOff = Number(d.buyTickOffset || '0')
+  if (!Number.isInteger(buyOff)) return { ok: false, error: '[매수 호가 오프셋] 정수를 입력하세요.' }
+  const sellOff = Number(d.sellTickOffset || '0')
+  if (!Number.isInteger(sellOff)) return { ok: false, error: '[매도 호가 오프셋] 정수를 입력하세요.' }
 
   let stop: StopRule | undefined
   if (d.stopEnabled) {
@@ -345,12 +336,12 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
       },
       ...(entry ? { entry } : {}),
       ...(stop ? { stop } : {}),
-      ...(cycleValue != null ? { cycleDropPct: cycleValue } : {}),
       split: {
         buy: d.buy.map((b) => ({ ...b })),
         sell: d.sell.map((s) => ({ ...s })),
         sellBasis: d.sellBasis,
-        ...(tolValue != null ? { roundTolerancePct: tolValue } : {}),
+        buyTickOffset: buyOff,
+        sellTickOffset: sellOff,
       },
       ...(order ? { order } : {}),
     },
