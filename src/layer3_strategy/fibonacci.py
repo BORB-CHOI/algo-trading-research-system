@@ -24,7 +24,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.layer3_strategy.support_resistance import find_levels
+from src.layer3_strategy.support_resistance import find_levels, nearest_per_target
 from src.layer3_strategy.surge import find_cycle_low
 
 # 업계 표준 피보나치 되돌림 비율 — "계산 방법의 일부"로 허용된 상수(ADR-0009 §4).
@@ -66,10 +66,18 @@ def compute_overlay(df: pd.DataFrame, p: dict) -> dict:
         {"price": cycle.price, "label": "사이클 저점", "kind": "anchor"},
         {"price": high_price, "label": "사이클 고점", "kind": "anchor"},
     ]
-    for ratio in FIB_RATIOS:
-        price = high_price - ratio * span  # 되돌림: 고점에서 파동폭 × 비율만큼 내려온 가격
+    fib_prices = [high_price - ratio * span for ratio in FIB_RATIOS]
+    for ratio, price in zip(FIB_RATIOS, fib_prices, strict=True):
+        # 되돌림: 고점에서 파동폭 × 비율만큼 내려온 가격
         lines.append({"price": float(price), "label": f"{ratio * 100:.1f}%", "kind": "fib"})
-    for lv in find_levels(df, span=int(p["sr_span"]), cluster_pct=float(p["sr_cluster_pct"])):
+    # 피벗 탐색 구간은 ③ 시뮬레이션과 같다 — 이번 사이클 안(앞에 span 봉을 남겨 저점 피벗도 확정).
+    # 그리는 선은 피보 5선에 가장 가까운 것만 (오너 지시 2026-08-06).
+    lo_i = int(d["Date"].searchsorted(cycle.date))
+    sr_span = int(p["sr_span"])
+    levels = find_levels(
+        d.iloc[max(0, lo_i - sr_span) :], span=sr_span, cluster_pct=float(p["sr_cluster_pct"])
+    )
+    for lv in nearest_per_target(levels, fib_prices):
         lines.append({"price": lv.price, "label": f"지지저항 {lv.touches}회", "kind": "sr"})
 
     return {"anchors": anchors, "lines": lines, "touches": []}

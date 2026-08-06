@@ -74,3 +74,26 @@ def find_levels(df: pd.DataFrame, *, span: int, cluster_pct: float, as_of: AsOf 
             cluster = [px]
     levels.append(SRLevel(price=float(np.mean(cluster)), touches=len(cluster)))
     return levels
+
+
+def nearest_per_target(levels: list[SRLevel], targets: list[float]) -> list[SRLevel]:
+    """목표가마다 가장 가까운 선 하나씩 — 중복 제거, 가격 오름차순 (오너 지시 2026-08-06).
+
+    화면에 그릴 지지/저항을 고르는 용도다. 구간 안 선을 전부 그리면 피보 5선 사이가
+    선으로 뒤덮여 어디에 주문이 걸리는지 안 보인다. 피보 레벨 5개에 각각 가장 가까운
+    선만 남기면 최대 5개다(둘 이상이 같은 선을 고르면 그만큼 줄어든다).
+
+    **목표가 스냅용 후보는 줄이지 않는다** — 여기서 고른 건 표시용이고, 매수/매도가
+    걸릴 선은 `entry_levels` 가 전체 목록에서 찾는다. 둘을 같이 줄이면 화면을 정리하려다
+    주문 가격이 바뀐다.
+
+    동점(양쪽 선이 정확히 같은 거리)이면 **낮은 가격** — 결정론.
+    """
+    picked: list[SRLevel] = []
+    for t in targets:
+        if not levels:
+            break
+        best = min(levels, key=lambda lv: (abs(lv.price - t), lv.price))
+        if best not in picked:
+            picked.append(best)
+    return sorted(picked, key=lambda lv: lv.price)

@@ -130,15 +130,18 @@ def test_anchor_lines_present() -> None:
     assert anchors == {"사이클 저점": 9_000.0, "사이클 고점": 21_000.0}
 
 
-def test_sr_lines_are_swing_pivots() -> None:
-    """지지/저항선 = 스윙 피벗 (ADR-0014). span=1 손계산: 고점 20,000·21,000, 저점 9,000."""
+def test_sr_lines_are_nearest_to_fib_levels() -> None:
+    """지지/저항선 = 스윙 피벗 중 **피보 5선에 가장 가까운 것만** (오너 지시 2026-08-06).
+
+    피벗 탐색은 이번 사이클 안(저점 idx4 앞에 span 봉 하나)만 본다 — 사이클 이전의
+    20,000 피벗은 후보에서 빠진다. 남은 후보 9,000·21,000 중 각 피보 레벨의 최근접:
+    78.6%(11,568)·61.8%(13,584)·50%(15,000, 동점→낮은 쪽) → 9,000,
+    38.2%(16,416)·23.6%(18,168) → 21,000. 결과 2개(≤5).
+    """
     out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
     sr = [(ln["price"], ln["label"]) for ln in out["lines"] if ln["kind"] == "sr"]
-    assert sr == [
-        (9_000.0, "지지저항 1회"),
-        (20_000.0, "지지저항 1회"),
-        (21_000.0, "지지저항 1회"),
-    ]
+    assert sr == [(9_000.0, "지지저항 1회"), (21_000.0, "지지저항 1회")]
+    assert len(sr) <= len(FIB_RATIOS)
 
 
 def test_line_kinds_and_no_touches() -> None:

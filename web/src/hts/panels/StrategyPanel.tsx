@@ -167,7 +167,10 @@ function SellBasisPicker({ value, onChange }: { value: SellBasis; onChange: (b: 
   )
 }
 
-// ③ 차트 하단 결과 스트립 — 사이클·지지선·매도 기준·최종 손익을 한 줄씩. 차트와 같이 읽는 용도.
+// ③ 결과 요약 — 구간·지지선·매도 기준·최종 손익을 한 줄씩. 왼쪽 사이드에 둔다
+// (오너 지시 2026-08-06: 차트 위아래 띠를 전부 사이드로 넘기고 차트를 키운다).
+// 이름은 "피보나치 구간" — '상승장'은 폐기했다(한 번도 -50% 를 안 맞은 종목은 시작점이
+// 수십 년 전이 되어 상승장이라는 말과 안 맞는다, 오너 2026-08-06).
 function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeof SELL_BASIS_LABEL }) {
   const stopLine = r.lines.find((l) => l.kind === 'stop')
   const srCount = r.lines.filter((l) => l.kind === 'sr').length
@@ -179,7 +182,7 @@ function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeo
   return (
     <div className="sim-foot">
       <p>
-        <b>상승장</b> {r.cycle.low_date} {fmtPrice(r.cycle.low_price)} → {r.cycle.high_date}{' '}
+        <b>피보나치 구간</b> {r.cycle.low_date} {fmtPrice(r.cycle.low_price)} → {r.cycle.high_date}{' '}
         {fmtPrice(r.cycle.high_price)} (+{r.cycle.gain_pct.toFixed(0)}%)
         {r.cycle.is_52w_high ? ' · 고점 = 52주 신고가' : ''}
         {r.cycle.confirmed
@@ -195,8 +198,7 @@ function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeo
         </p>
       )}
       <p>
-        <b>지지저항</b> 수평선 {srCount}개 (좌우 며칠보다 튀어나온 고점·저점, 비슷한 가격은
-        한 선) — 매수·매도는 각 레벨에서 가장 가까운 선에 걸린다 · 사이클 저점{' '}
+        <b>지지저항</b> 피보 5선에 가장 가까운 선 {srCount}개 · 시작점{' '}
         {fmtPrice(r.cycle.low_price)}
         {stopLine && <> · 손절선 {fmtPrice(stopLine.price)}</>}
       </p>
@@ -1282,41 +1284,21 @@ export function StrategyPanel() {
                   </button>
                 </div>
                 <p className={`msgline ${simMsg ? 'warn' : ''}`}>{simMsg || ' '}</p>
-                {simResult && (
-                  <table className="grid">
-                    <tbody>
-                      <tr>
-                        <td className="flat">상승장 저점</td>
-                        <td className="num">
-                          {simResult.cycle.low_date} {fmtPrice(simResult.cycle.low_price)}
-                          {!simResult.cycle.confirmed && (
-                            <small style={{ display: 'block' }}>-{simResult.cycle.drop_pct}% 하락 없음 — 구간 최저가</small>
-                          )}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="flat">상승장 고점</td>
-                        <td className="num">
-                          {simResult.cycle.high_date} {fmtPrice(simResult.cycle.high_price)}
-                          {simResult.cycle.is_52w_high ? ' (52주 신고가)' : ''}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="flat">매도 기준가</td>
-                        <td className="num">
-                          {simResult.sell_basis_price != null ? fmtPrice(simResult.sell_basis_price) : '-'}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="flat">체결 마커</td>
-                        <td className="num">
-                          매수 {simResult.fills.filter((f) => f.side === 'buy').length} · 매도{' '}
-                          {simResult.fills.filter((f) => f.side === 'sell').length}
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                )}
+                {/* 요소별 표시 필터 — 겹칠 때 하나씩 끄고 본다. 줌은 유지된다. */}
+                <div className="chips sim-layers">
+                  {SIM_LAYERS.map(([k, label]) => (
+                    <button
+                      key={k}
+                      className={`chip ${simVis[k] ? 'on' : ''}`}
+                      title={simVis[k] ? '숨기기' : '표시'}
+                      onClick={() => toggleLayer(k)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {/* 결과 요약 — 옛 표(저점/고점/매도 기준가/체결 마커)는 이 요약과 같은 내용이라 지웠다. */}
+                {simResult && <SimFoot r={simResult} sellBasis={draft.sellBasis} />}
               </Card>
 
               {simResult && (
@@ -1382,25 +1364,12 @@ export function StrategyPanel() {
               {/* 분할 매수/매도 카드는 ③에서 삭제 (오너 지시 2026-08-06) —
                   "차트만 잘 보여주면 돼. 요약 정보와 체결 내역만 있으면 돼." 설정은 ②에서. */}
             </div>
+            {/* 차트는 패널 전체를 쓴다 — 필터 칩·결과 요약은 왼쪽 사이드로 옮겼다
+                (오너 지시 2026-08-06: "전부 왼쪽 사이드 탭으로 넘겨, 차트 크기 키우자") */}
             <div className="sim-chart">
-              {/* 요소별 필터 — 겹칠 때 하나씩 끄고 본다 (오너 지시 2026-08-06). 줌은 유지된다. */}
-              <div className="chips sim-layers">
-                {SIM_LAYERS.map(([k, label]) => (
-                  <button
-                    key={k}
-                    className={`chip ${simVis[k] ? 'on' : ''}`}
-                    title={simVis[k] ? '숨기기' : '표시'}
-                    onClick={() => toggleLayer(k)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
               <div className="sim-canvas">
                 <ProChart ref={proRef} initialSymbol={SIM_SYM} />
               </div>
-              {/* 하단 결과 스트립 — "결국 결과가 어떻게 될거다"까지 차트 밑에서 (오너 지시) */}
-              {simResult && <SimFoot r={simResult} sellBasis={draft.sellBasis} />}
             </div>
           </div>
         )}

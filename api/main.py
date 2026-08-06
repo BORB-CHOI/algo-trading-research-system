@@ -52,7 +52,7 @@ from src.layer3_strategy.case_overlay import (
 from src.layer3_strategy.entry_levels import average_entry, buy_targets_sr, sell_targets_sr
 from src.layer3_strategy.fibonacci import FIB_RATIOS
 from src.layer3_strategy.screening import ScreeningRule, screen
-from src.layer3_strategy.support_resistance import find_levels
+from src.layer3_strategy.support_resistance import find_levels, nearest_per_target
 from src.layer3_strategy.surge import find_52w_high, find_cycle_low
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 from src.layer4_execution.strategy_one import run_strategy_one
@@ -969,11 +969,12 @@ def api_simulate(req: SimulateRequest) -> dict:
         )
 
     # 지지/저항 수평선 — 오너가 손으로 긋는 그 선(ADR-0014).
-    # 이번 상승장(사이클 저점 이후)에서 만들어진 선만 찾고, 가격도 피보나치 구간
+    # 이번 피보나치 구간(사이클 저점 이후)에서 만들어진 선만 찾고, 가격도 피보나치 구간
     # (78.6% 레벨 ~ 고점) 안만 남긴다 — "너무 과거의 지지저항까지 다 보여주니까 선이
     # 너무 많아" (오너 2026-08-06). 슬라이스 앞에 span 봉을 남겨 사이클 저점 피벗도 확정.
     lo_i = int(full["Date"].searchsorted(cycle.date))
-    fib_floor = high_price - max(FIB_RATIOS) * fib_span
+    fib_prices = [high_price - ratio * fib_span for ratio in FIB_RATIOS]
+    fib_floor = min(fib_prices)
     try:
         sr = find_levels(
             full.iloc[max(0, lo_i - req.sr_span) :], span=req.sr_span, cluster_pct=req.sr_cluster_pct
@@ -981,6 +982,9 @@ def api_simulate(req: SimulateRequest) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     sr = [lv for lv in sr if fib_floor <= lv.price <= high_price]
+    # 그리는 선은 피보 5선에 각각 가장 가까운 것만 = 최대 5개 (오너 지시 2026-08-06).
+    # 목표가가 걸릴 후보(sr)는 줄이지 않는다 — 화면을 정리하려다 주문 가격이 바뀌면 안 된다.
+    sr_shown = nearest_per_target(sr, fib_prices)
 
     buys = sorted(
         (s for s in req.buy if s.enabled and s.ratio is not None and 0 < s.ratio < 1),
@@ -1011,9 +1015,9 @@ def api_simulate(req: SimulateRequest) -> dict:
             "kind": "anchor",
         },
     ]
-    for ratio in FIB_RATIOS:
-        lines.append({"price": high_price - ratio * fib_span, "label": f"{ratio * 100:.1f}%", "kind": "fib"})
-    for lv_sr in sr:  # 지지/저항선 전부 — y축 밖은 차트가 알아서 안 그리고, 칩으로 끌 수 있다
+    for ratio, fib_price in zip(FIB_RATIOS, fib_prices, strict=True):
+        lines.append({"price": fib_price, "label": f"{ratio * 100:.1f}%", "kind": "fib"})
+    for lv_sr in sr_shown:  # 피보 5선에 가장 가까운 선만 — 칩으로 끌 수 있다
         lines.append({"price": lv_sr.price, "label": f"지지저항 {lv_sr.touches}회", "kind": "sr"})
 
     # 목표가를 못 걸어도 전체를 실패시키지 않는다 — 그릴 수 있는 것(사이클·피보·지지저항)은

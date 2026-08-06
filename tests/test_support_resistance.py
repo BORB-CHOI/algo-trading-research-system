@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from src.layer3_strategy.entry_levels import buy_targets_sr, sell_targets_sr
-from src.layer3_strategy.support_resistance import SRLevel, find_levels
+from src.layer3_strategy.support_resistance import SRLevel, find_levels, nearest_per_target
 
 Bar = tuple[float, float, float, float]
 
@@ -135,3 +135,26 @@ class TestSellTargetsSr:
     def test_위쪽_선이_부족하면_거부(self) -> None:
         with pytest.raises(ValueError, match="위 선이 부족"):
             sell_targets_sr(14_000, rebound_pcts=[10, 20], levels=[SRLevel(15_000.0, 1)])
+
+
+class TestNearestPerTarget:
+    """화면에 그릴 선 고르기 — 피보 5선에 각각 가장 가까운 것만 (오너 지시 2026-08-06)."""
+
+    def test_목표가마다_최근접_하나씩(self) -> None:
+        out = nearest_per_target(LEVELS, [9_100, 13_400, 16_400])
+        assert [lv.price for lv in out] == [9_000, 13_500, 16_500]
+
+    def test_중복은_한_번만_그리고_가격_오름차순(self) -> None:
+        out = nearest_per_target(LEVELS, [16_400, 15_100, 15_000])
+        assert [lv.price for lv in out] == [15_000, 16_500]
+
+    def test_개수는_목표가_개수를_넘지_않는다(self) -> None:
+        out = nearest_per_target(LEVELS, [9_100, 9_200])
+        assert len(out) == 1  # 둘 다 9,000 을 고른다
+
+    def test_같은_거리면_낮은_선(self) -> None:
+        levels = [SRLevel(price=14_000.0, touches=1), SRLevel(price=16_000.0, touches=1)]
+        assert nearest_per_target(levels, [15_000])[0].price == 14_000
+
+    def test_후보가_없으면_빈_목록(self) -> None:
+        assert nearest_per_target([], [15_000]) == []

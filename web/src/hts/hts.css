@@ -1141,10 +1141,11 @@ body {
   white-space: nowrap;
 }
 
-/* ③ 시뮬레이션 — 왼쪽 컨트롤 + 오른쪽 전용 차트 */
+/* ③ 시뮬레이션 — 왼쪽 컨트롤(입력·필터·요약) + 오른쪽 차트만. 차트 위아래 띠를 전부
+   사이드로 옮겨 차트가 패널 높이를 다 쓴다 (오너 지시 2026-08-06). */
 .sim-split {
   display: grid;
-  grid-template-columns: minmax(300px, 360px) 1fr;
+  grid-template-columns: minmax(288px, 330px) 1fr;
   grid-template-rows: minmax(0, 1fr);
   gap: 12px;
   align-items: stretch;
@@ -1153,6 +1154,8 @@ body {
 /* 왼쪽 컨트롤만 안에서 스크롤 — 차트는 항상 패널 높이 그대로 (100vh 계산 ❌: 도크 패널
    안에서 어긋나 차트가 짓눌렸다, 오너 보고 2026-08-06) */
 .sim-split .sim-side { min-height: 0; overflow-y: auto; }
+/* 차트 컨테이너 구조는 건드리지 않는다 — flex 컬럼 + .sim-canvas(flex:1) 조합이 아니면
+   klinecharts 가 오버레이(피보·지지저항·매수선)를 그리지 못한다 (실측 2026-08-06). */
 .sim-split .sim-chart {
   display: flex;
   flex-direction: column;
@@ -1171,32 +1174,30 @@ body {
   background: var(--hts-panel);
 }
 
-/* 요소별 표시 필터 — 차트 위 한 줄 (오너 지시 2026-08-06) */
-.sim-split .sim-layers {
-  flex: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--hts-line);
-}
 .sim-split .sim-canvas {
   flex: 1;
   min-height: 0;
 }
-/* 차트 하단 결과 스트립 — 앵커·지지선 근거·최종 손익 요약 */
-.sim-foot {
-  flex: none;
-  padding: 8px 12px;
+/* 요소별 표시 필터 — 사이드 카드 안 한 줄 */
+.sim-side .sim-layers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 0;
+}
+/* 결과 요약 — 구간·지지선 근거·최종 손익. 좁은 사이드라 항목명은 줄바꿈해 앞에 세운다. */
+.sim-side .sim-foot {
+  margin-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid var(--hts-line);
-  font-size: 12px;
-  line-height: 1.7;
+  font-size: 11.5px;
+  line-height: 1.55;
 }
 .sim-foot p { margin: 0; }
+.sim-foot p + p { margin-top: 6px; }
 .sim-foot b { font-weight: 600; }
 .sim-foot p > b:first-child {
-  display: inline-block;
-  min-width: 64px;
+  display: block;
   color: var(--hts-dim, #6b7280);
   font-weight: 500;
 }
