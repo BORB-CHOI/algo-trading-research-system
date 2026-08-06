@@ -1,5 +1,10 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
-import { dispose as disposeKLineChart, registerIndicator, type KLineData } from 'klinecharts'
+import {
+  dispose as disposeKLineChart,
+  registerIndicator,
+  registerOverlay,
+  type KLineData,
+} from 'klinecharts'
 import {
   KLineChartPro,
   type Datafeed,
@@ -45,6 +50,50 @@ function ensureIndicators(): void {
     shortName: '거래대금',
     figures: [{ key: 'turnover', title: '거래대금: ', type: 'bar' }],
     calc: (dataList) => dataList.map((d) => ({ turnover: (d.turnover as number | undefined) ?? 0 })),
+  })
+
+  // ── 그리기 도구 '선분' 라벨 강화 — 트레이딩뷰처럼 양 끝점에 가격·날짜, 끝점엔 변화율까지
+  // (오너 지시 2026-08-06). registerOverlay 는 같은 이름을 조용히 덮어쓴다(klinecharts 소스
+  // 확인) — 내장 segment 정의(두 점 선)에 텍스트 도형만 얹어 재등록한다.
+  const day = (ts?: number) => (ts ? new Date(ts).toISOString().slice(2, 10) : '')
+  registerOverlay({
+    name: 'segment',
+    totalStep: 3,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true,
+    createPointFigures: ({ coordinates, overlay }) => {
+      if (coordinates.length !== 2) return []
+      const pts = overlay.points
+      const texts = coordinates.map((c, i) => {
+        const v = pts[i]?.value
+        if (v == null) return null
+        let text = `${Math.round(v).toLocaleString('ko-KR')}`
+        const v0 = pts[0]?.value
+        if (i === 1 && v0) text += ` (${(((v - v0) / v0) * 100).toFixed(1)}%)`
+        const d = day(pts[i]?.timestamp)
+        if (d) text += ` · ${d}`
+        return {
+          type: 'text',
+          ignoreEvent: true,
+          attrs: { x: c.x + 6, y: c.y - 6, text, baseline: 'bottom' },
+          styles: {
+            color: '#1668d0',
+            size: 11,
+            backgroundColor: 'rgba(255,255,255,0.9)',
+            paddingLeft: 4,
+            paddingRight: 4,
+            paddingTop: 2,
+            paddingBottom: 2,
+            borderRadius: 2,
+          },
+        }
+      })
+      return [
+        { type: 'line', attrs: { coordinates } },
+        ...texts.filter((t): t is NonNullable<typeof t> => t != null),
+      ]
+    },
   })
 }
 
