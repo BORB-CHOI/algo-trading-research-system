@@ -59,6 +59,7 @@ def compute_overlay(df: pd.DataFrame, p: dict) -> dict:
         "low_price": cycle.price,
         "high_price": high_price,
         "confirmed": cycle.confirmed,
+        "falling": cycle.falling,
     }
 
     lines: list[dict] = [

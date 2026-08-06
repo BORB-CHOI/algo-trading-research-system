@@ -174,7 +174,7 @@ def test_overlay_contract() -> None:
     assert set(j) == {"code", "strategy", "anchors", "lines", "touches"}
     assert j["code"] == "005930"
     assert j["strategy"] == "fib_retrace"
-    assert set(j["anchors"]) == {"low_date", "high_date", "low_price", "high_price", "confirmed"}
+    assert set(j["anchors"]) == {"low_date", "high_date", "low_price", "high_price", "confirmed", "falling"}
     # look-ahead 금지 — 기준일(end) 오른쪽은 절대 안 본다 (오너 지적 2026-08-06).
     assert j["anchors"]["low_date"] <= j["anchors"]["high_date"] <= "2026-07-16"
     kinds = {ln["kind"] for ln in j["lines"]}

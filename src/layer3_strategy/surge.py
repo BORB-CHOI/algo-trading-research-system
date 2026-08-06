@@ -119,14 +119,19 @@ class CycleLow:
     사이클 경계는 drop_pct % 하락이고, 되돌림은 그 경계 직후의 바닥(Low)에서 긋는다.
     급등 시작일 시가(ADR-0011)보다 훨씬 아래 — 파동 전체에 긋는 실제 관찰 방식이다.
 
-    `confirmed` = drop_pct 하락이 데이터 안에서 실제로 관측됐는가. False 면 구간 전체가
-    한 상승장이라 **구간 최저 Low** 로 대신했다는 뜻 — 화면이 이 사실을 알려야 한다
-    (데이터를 더 길게 주면 진짜 경계가 나올 수 있다).
+    `confirmed` = 사이클 경계(하락 후 반등)가 실제로 확정됐는가. False 면 확정 저점이 없어
+    **구간 최저 Low** 로 대신했다는 뜻 — 화면이 이 사실을 알려야 한다.
+    `falling` = 데이터 끝에서 drop_pct 를 넘는 하락이 **진행 중**(반등 미확정)인가.
+    바닥은 반등이 확인돼야 바닥이다 — 진행 중 하락의 최저가를 저점으로 쓰면 어제 저가에
+    피보나치를 긋는 꼴이 된다(오너 실측 2026-08-06: 삼성전자 -49.5% 하락 중에 7/29 가
+    저점으로 잡혀 직접 그은 큰 파동과 어긋남). 이때는 직전 확정 사이클로 긋고, 화면이
+    "하락 진행 중"을 알린다.
     """
 
     date: pd.Timestamp
     price: float
     confirmed: bool
+    falling: bool
 
 
 @dataclass(frozen=True)
@@ -341,8 +346,8 @@ def find_cycle_low(df: pd.DataFrame, *, drop_pct: float, as_of: AsOf = None) -> 
     - 상승 상태: 고점(최고 High)을 갱신하다가 고점 대비 `drop_pct` % 이상 빠지면 하락 상태로.
     - 하락 상태: 저점(최저 Low)을 갱신하다가 저점 대비 `drop_pct` % 이상 반등하면
       그 저점을 사이클 시작으로 확정하고 상승 상태로.
-    - 데이터 끝이 하락 상태면 그때까지의 최저 Low 가 진행 중인 바닥 — 그걸 쓴다.
-      (파동 고점 직전에 큰 하락의 바닥이 있는, 오너가 실제로 긋는 케이스가 이쪽이다.)
+    - 데이터 끝이 하락 상태면(반등 미확정) **직전 확정 저점을 유지**하고 `falling=True`.
+      바닥은 반등이 확인돼야 바닥이다 — 진행 중 하락의 최저가에 긋지 않는다.
 
     사이클이 여러 번이면 **가장 최근** 확정 저점. 동률은 고점·저점 모두 **가장 이른 날**
     (strict 비교 — 같은 값은 갱신하지 않는다). 하락·반등 판정은 경계 포함(이상).
@@ -382,13 +387,16 @@ def find_cycle_low(df: pd.DataFrame, *, drop_pct: float, as_of: AsOf = None) -> 
                 down = True
                 trough_px, trough_i = lows[i], i
 
-    if down:
-        cycle_i = trough_i
     if cycle_i is None:
         i = int(np.argmin(lows))
-        return CycleLow(date=pd.Timestamp(d["Date"].iloc[i]), price=float(lows[i]), confirmed=False)
+        return CycleLow(
+            date=pd.Timestamp(d["Date"].iloc[i]), price=float(lows[i]), confirmed=False, falling=down
+        )
     return CycleLow(
-        date=pd.Timestamp(d["Date"].iloc[cycle_i]), price=float(lows[cycle_i]), confirmed=True
+        date=pd.Timestamp(d["Date"].iloc[cycle_i]),
+        price=float(lows[cycle_i]),
+        confirmed=True,
+        falling=down,
     )
 
 

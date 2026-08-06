@@ -397,13 +397,28 @@ class TestFindCycleLow:
         assert (c.date, c.price) == (df["Date"].iloc[4], 9_000.0)
         assert c.confirmed
 
-    def test_반등_미확정이면_진행_중_바닥을_쓴다(self) -> None:
-        """폭락 후 반등이 drop_pct 에 못 미쳐도 바닥은 이미 있다 — 그게 사이클 저점."""
-        bars = V_BOTTOM[:5] + [rally_bar(9_000, 12_000)]  # 반등 12,000 < 13,500
+    def test_반등_미확정이면_진행_중_저가에_긋지_않는다(self) -> None:
+        """바닥은 반등이 확인돼야 바닥 — 하락 진행 중이면 falling 만 알린다.
+        (오너 실측 2026-08-06: 삼성 -49.5% 하락 중에 어제 저가가 저점으로 잡혔던 문제.)"""
+        bars = V_BOTTOM[:5] + [rally_bar(9_000, 12_000)]  # 반등 12,000 < 13,500 — 미확정
         df = make_df(bars)
         c = find_cycle_low(df, drop_pct=50.0)
-        assert (c.date, c.price) == (df["Date"].iloc[4], 9_000.0)
+        assert not c.confirmed  # 확정 저점 없음 → 구간 최저 Low 폴백
+        assert c.falling
+        assert c.price == 9_000.0
+
+    def test_하락_진행_중이면_직전_확정_사이클을_유지한다(self) -> None:
+        """확정 저점(9,000) 이후 신고점(21,000) → 임계 초과 하락 진행 중(반등 미확정).
+        저점은 직전 확정 사이클 그대로, falling=True 로만 알린다."""
+        bars = V_BOTTOM + [
+            (18_000.0, 21_000.0, 18_000.0, 21_000.0),  # 신고점 21,000
+            drop_bar(21_000, 10_400),  # 저가 10,400 ≤ 21,000×0.5 → 하락 진행
+        ]
+        df = make_df(bars)
+        c = find_cycle_low(df, drop_pct=50.0)
+        assert (c.date, c.price) == (df["Date"].iloc[4], 9_000.0)  # 직전 확정 저점 유지
         assert c.confirmed
+        assert c.falling
 
     def test_하락이_없으면_구간_최저_Low_로_대신한다(self) -> None:
         """confirmed=False — 화면이 '기준 미충족'을 표시할 근거다."""

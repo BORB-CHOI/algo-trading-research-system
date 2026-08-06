@@ -84,6 +84,7 @@ def test_anchors_are_cycle_low_and_high() -> None:
     assert (a["low_date"], a["low_price"]) == (df["Date"].iloc[4].strftime("%Y-%m-%d"), 9_000.0)
     assert (a["high_date"], a["high_price"]) == (df["Date"].iloc[6].strftime("%Y-%m-%d"), 21_000.0)
     assert a["confirmed"] is True
+    assert a["falling"] is False
 
 
 def test_left_of_cut_only() -> None:

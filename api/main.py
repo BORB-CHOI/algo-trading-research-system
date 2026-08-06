@@ -50,6 +50,7 @@ from src.layer3_strategy.case_overlay import (
     strategies_payload,
 )
 from src.layer3_strategy.entry_levels import average_entry, buy_targets_sr, sell_targets_sr
+from src.layer3_strategy.fibonacci import FIB_RATIOS
 from src.layer3_strategy.screening import ScreeningRule, screen
 from src.layer3_strategy.support_resistance import find_levels
 from src.layer3_strategy.surge import find_52w_high, find_cycle_low
@@ -959,12 +960,26 @@ def api_simulate(req: SimulateRequest) -> dict:
     _, w52_price = find_52w_high(full)
     is_52w = abs(high_price - w52_price) < 1e-9
 
-    # 지지/저항 수평선 — 오너가 손으로 긋는 그 선(스윙 피벗+군집, ADR-0014).
-    # full 은 이미 기준일까지 잘려 있고, 피벗은 우측 span 봉이 있어야 확정 → look-ahead 없음.
+    warnings: list[str] = []
+    if cycle.falling:
+        warnings.append(
+            f"하락 기준(-{req.cycle_drop_pct:g}%)을 넘는 하락이 진행 중 — 직전 상승장 기준으로 "
+            "그렸습니다. 바닥은 반등이 확인돼야 저점으로 갱신됩니다."
+        )
+
+    # 지지/저항 수평선 — 오너가 손으로 긋는 그 선(ADR-0014).
+    # 이번 상승장(사이클 저점 이후)에서 만들어진 선만 찾고, 가격도 피보나치 구간
+    # (78.6% 레벨 ~ 고점) 안만 남긴다 — "너무 과거의 지지저항까지 다 보여주니까 선이
+    # 너무 많아" (오너 2026-08-06). 슬라이스 앞에 span 봉을 남겨 사이클 저점 피벗도 확정.
+    lo_i = int(full["Date"].searchsorted(cycle.date))
+    fib_floor = high_price - max(FIB_RATIOS) * fib_span
     try:
-        sr = find_levels(full, span=req.sr_span, cluster_pct=req.sr_cluster_pct)
+        sr = find_levels(
+            full.iloc[max(0, lo_i - req.sr_span) :], span=req.sr_span, cluster_pct=req.sr_cluster_pct
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    sr = [lv for lv in sr if fib_floor <= lv.price <= high_price]
 
     buys = sorted(
         (s for s in req.buy if s.enabled and s.ratio is not None and 0 < s.ratio < 1),
@@ -985,19 +1000,23 @@ def api_simulate(req: SimulateRequest) -> dict:
         raise HTTPException(status_code=400, detail=f"매도 비중 합이 {sell_wsum:g}% — 100%를 넘을 수 없습니다.")
 
     computed: dict[str, int] = {}
+    # 피보나치는 차트 그리기 도구(피보나치 선분)처럼 0~100% 표준 레벨을 **전부** 긋는다 —
+    # 매수 차수로 고른 비율만 그리면 "사이 선이 5개 나와야 하지 않나"가 된다(오너 2026-08-06).
     lines: list[dict] = [
-        {"price": cycle.price, "label": "사이클 저점", "kind": "anchor"},
-        {"price": high_price, "label": "사이클 고점(52주 신고가)" if is_52w else "사이클 고점", "kind": "anchor"},
+        {"price": cycle.price, "label": "사이클 저점 (100%)", "kind": "anchor"},
+        {
+            "price": high_price,
+            "label": "사이클 고점 (0%) · 52주 신고가" if is_52w else "사이클 고점 (0%)",
+            "kind": "anchor",
+        },
     ]
-    for s in buys:  # 되돌림 원값 — 목표가(지지/저항선)와 근거 레벨을 함께 보여준다
-        lv = high_price - s.ratio * fib_span
-        lines.append({"price": lv, "label": f"{s.ratio * 100:.1f}%", "kind": "fib"})
+    for ratio in FIB_RATIOS:
+        lines.append({"price": high_price - ratio * fib_span, "label": f"{ratio * 100:.1f}%", "kind": "fib"})
     for lv_sr in sr:  # 지지/저항선 전부 — y축 밖은 차트가 알아서 안 그리고, 칩으로 끌 수 있다
         lines.append({"price": lv_sr.price, "label": f"지지저항 {lv_sr.touches}회", "kind": "sr"})
 
     # 목표가를 못 걸어도 전체를 실패시키지 않는다 — 그릴 수 있는 것(사이클·피보·지지저항)은
     # 다 그리고, 못 건 쪽만 경고로 알린다 (오너 지적 2026-08-06: "오류만 띄우면 뭘 고칠지 몰라").
-    warnings: list[str] = []
     try:
         blevels = (
             buy_targets_sr(
@@ -1171,6 +1190,7 @@ def api_simulate(req: SimulateRequest) -> dict:
             "gain_pct": (high_price / cycle.price - 1) * 100,
             "drop_pct": req.cycle_drop_pct,
             "confirmed": cycle.confirmed,
+            "falling": cycle.falling,
             "is_52w_high": is_52w,
         },
         "sell_basis_price": sell_basis_price,

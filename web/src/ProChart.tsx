@@ -167,9 +167,9 @@ function drawSeries(c: DrawCtx, list: SeriesDraw[]): void {
   ctx.lineWidth = 1
 }
 
-// 가격을 라벨에 병기할 선 종류 — "매수, 매도 지점 가로선으로 가격과 함께" (오너 지시).
-// fib 는 서버 라벨(비율)만으로 충분 — 원값 병기는 중복이다.
-const PRICE_LABEL_KINDS = new Set<OverlayLine['kind']>(['buy', 'sell', 'stop', 'anchor', 'sr'])
+// 가격을 라벨에 병기할 선 종류 — 차트 그리기 도구(피보나치 선분)처럼 "비율 + 가격"으로
+// 읽히게 fib 도 병기한다 (오너 2026-08-06: 트레이딩뷰식 표기).
+const PRICE_LABEL_KINDS = new Set<OverlayLine['kind']>(['buy', 'sell', 'stop', 'anchor', 'sr', 'fib'])
 
 /** 수평선 + 우측 라벨. y축 범위 밖 레벨은 건너뛴다. */
 function drawLines(c: DrawCtx, list: OverlayLine[]): void {
