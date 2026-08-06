@@ -53,13 +53,20 @@ const LIMIT = 100
 // ③ 시뮬레이션 대표 종목 — 오너 지시로 고정(2026-08-06 SK하이닉스로 변경). 전략 설계 확인용.
 const SIM_SYM = { code: '000660', name: 'SK하이닉스', market: 'KOSPI' } as const
 
+// 전략 1호 파동·지지저항 **고정 정의** (오너 결정 2026-08-06 — "시작점·고점은 자동으로
+// 구하는 건데 입력값을 왜 내가 만지나" → ② 입력칸 제거, 정의로 내림).
+// 아직 임시값이다: 피보나치 시작점 새 정의("고점의 10% 컷 + 그 안에서 -30% 사이클")가
+// 확정되면 여기 한 곳만 바꾼다. 서버에는 여전히 요청 데이터로만 나간다(ADR-0009).
+const STRATEGY_ONE_WAVE = {
+  cycleDropPct: 50, // 사이클 경계 — 고점 대비 이만큼 빠지면 사이클이 끊긴 것으로 본다(ADR-0013)
+  srSpan: 10, // 지지/저항 고점·저점 기준(좌우 거래일, ADR-0014)
+  srClusterPct: 1, // 같은 선 폭 — 이 % 안이면 한 선으로 합친다
+} as const
+
 // ③ 예시 기본값 — 지위는 PLACEHOLDER 와 같다 (ADR-0009: 서버 하드코딩 금지, UI 예시는 허용).
 // 실행 시 **빈 항목만** 이 값으로 채우고, 채운 값은 전부 화면(분할 카드·메시지)에 보인다.
 // "실행 버튼을 누르면 무조건 예시가 보여야 한다"(오너) — 빈 폼 때문에 실행을 막지 않는다.
 const SIM_EXAMPLE = {
-  cycleDropPct: 50, // 오너도 -50/-60 미확정 — 화면에서 조정하는 값이다(ADR-0013)
-  srSpan: 10, // 지지/저항 고점·저점 기준(좌우 거래일, ADR-0014)
-  srClusterPct: 1,
   qtyShares: 100,
   buy: [
     { ratio: 0.382, weight: 33 },
@@ -543,22 +550,8 @@ export function StrategyPanel() {
       buy = SIM_EXAMPLE.buy.map((b) => newBuyStage(b.ratio, b.weight))
       filled.push('분할 매수 3차(38.2/50/61.8%)')
     }
-    const ep = draft.entryKey === 'fib_retrace' ? draft.entryParams : {}
-    let cyc = Number(ep['drop_pct'])
-    if (!(cyc > 0 && cyc < 100)) {
-      cyc = SIM_EXAMPLE.cycleDropPct
-      filled.push(`사이클 하락 기준 ${cyc}%`)
-    }
-    let srSpan = Number(ep['sr_span'])
-    if (!(Number.isInteger(srSpan) && srSpan >= 1)) {
-      srSpan = SIM_EXAMPLE.srSpan
-      filled.push(`고점·저점 기준 ${srSpan}일`)
-    }
-    let srCluster = Number(ep['sr_cluster_pct'])
-    if (!(srCluster > 0)) {
-      srCluster = SIM_EXAMPLE.srClusterPct
-      filled.push(`같은 선 폭 ${srCluster}%`)
-    }
+    // 파동·지지저항은 전략 1호 고정 정의 — 화면 입력 없음 (오너 결정 2026-08-06)
+    const { cycleDropPct: cyc, srSpan, srClusterPct: srCluster } = STRATEGY_ONE_WAVE
     const buyOff = Number(draft.buyTickOffset || '0')
     const sellOff = Number(draft.sellTickOffset || '0')
     setBtRunning(true)
@@ -641,24 +634,9 @@ export function StrategyPanel() {
       filled.push(`비중 균등 ${each}%씩`)
     }
 
-    // 파동·지지저항 기준은 ② 진입 기법(피보나치)의 파라미터다 (오너: "피보나치에만
-    // 해당되는 거잖아, 옮겨"). 비었으면 예시값으로 돌리고 채운 사실을 알린다.
-    const ep = draft.entryKey === 'fib_retrace' ? draft.entryParams : {}
-    let cyc = Number(ep['drop_pct'])
-    if (!(cyc > 0 && cyc < 100)) {
-      cyc = SIM_EXAMPLE.cycleDropPct
-      filled.push(`사이클 하락 기준 ${cyc}%`)
-    }
-    let srSpan = Number(ep['sr_span'])
-    if (!(Number.isInteger(srSpan) && srSpan >= 1)) {
-      srSpan = SIM_EXAMPLE.srSpan
-      filled.push(`고점·저점 기준 ${srSpan}일`)
-    }
-    let srCluster = Number(ep['sr_cluster_pct'])
-    if (!(srCluster > 0)) {
-      srCluster = SIM_EXAMPLE.srClusterPct
-      filled.push(`같은 선 폭 ${srCluster}%`)
-    }
+    // 파동·지지저항은 전략 1호 고정 정의 — 화면 입력 없음 (오너 결정 2026-08-06:
+    // "시작점·고점은 자동으로 구하는 건데 입력값을 왜 내가 만지나")
+    const { cycleDropPct: cyc, srSpan, srClusterPct: srCluster } = STRATEGY_ONE_WAVE
     const buyOff = Number(draft.buyTickOffset || '0')
     const sellOff = Number(draft.sellTickOffset || '0')
 
@@ -1052,11 +1030,21 @@ export function StrategyPanel() {
               {entryDef ? (
                 <>
                   <p className="hint">{entryDef.desc}</p>
-                  <ParamInputs
-                    defs={entryDef.params}
-                    values={draft.entryParams}
-                    onChange={(k, v) => set('entryParams', { ...draft.entryParams, [k]: v })}
-                  />
+                  {/* 전략 1호(피보나치)의 파동·지지저항 값은 고정 정의 — 입력칸을 안 보여준다
+                      (오너 결정 2026-08-06: "시작점·고점은 자동으로 구하는 건데 입력값을 왜
+                      내가 만지나"). 값 변경은 STRATEGY_ONE_WAVE 정의에서. 다른 기법은 그대로. */}
+                  {entryDef.key === 'fib_retrace' ? (
+                    <p className="hint">
+                      시작점(사이클 저점)·고점은 자동 탐지 — 정의: 사이클 -{STRATEGY_ONE_WAVE.cycleDropPct}%
+                      · 고점·저점 {STRATEGY_ONE_WAVE.srSpan}일 · 같은 선 폭 {STRATEGY_ONE_WAVE.srClusterPct}%
+                    </p>
+                  ) : (
+                    <ParamInputs
+                      defs={entryDef.params}
+                      values={draft.entryParams}
+                      onChange={(k, v) => set('entryParams', { ...draft.entryParams, [k]: v })}
+                    />
+                  )}
                   {/* "차트에 적용" 버튼은 삭제 (오너 결정 2026-08-06) — ②는 설정만,
                       눈으로 확인은 ③ 시뮬레이션에서. 차트 탭 오버레이 입구도 함께 폐기. */}
                 </>
@@ -1236,12 +1224,12 @@ export function StrategyPanel() {
                 <div className="kv">
                   <span className="k">파동·지지저항</span>
                   <span className="v">
-                    사이클 -{Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['drop_pct'] : 0) || SIM_EXAMPLE.cycleDropPct}%
-                    · 고점·저점 {Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['sr_span'] : 0) || SIM_EXAMPLE.srSpan}일
-                    · 같은 선 폭 {Number(draft.entryKey === 'fib_retrace' ? draft.entryParams['sr_cluster_pct'] : 0) || SIM_EXAMPLE.srClusterPct}%
+                    사이클 -{STRATEGY_ONE_WAVE.cycleDropPct}%
+                    · 고점·저점 {STRATEGY_ONE_WAVE.srSpan}일
+                    · 같은 선 폭 {STRATEGY_ONE_WAVE.srClusterPct}%
                   </span>
                 </div>
-                <p className="hint">기준 수정은 ② 매매전략의 진입 기법(피보나치)에서 — 여기는 실행만.</p>
+                <p className="hint">전략 1호 고정 정의 — 시작점·고점은 자동 탐지. 정의가 바뀌면 화면이 아니라 정의를 고친다.</p>
                 <div className="form-row" style={{ marginTop: 8 }}>
                   <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
                     {simRunning ? '계산 중…' : '시뮬레이션 실행'}
