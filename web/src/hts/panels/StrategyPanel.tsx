@@ -610,10 +610,10 @@ export function StrategyPanel() {
     simVisRef.current = simVis
   }, [simVis])
 
-  // ③ 에 들어오면(차트가 새로 마운트되면) 대표 종목을 싣고, 직전 결과가 있으면 다시 그린다.
+  // ③ 재진입 시 직전 결과를 다시 그린다. 종목은 initialSymbol 로 마운트 때 이미 실려 있다 —
+  // 마운트 직후 showSymbol 을 부르면 초기 로드와 경합한다(ProChart props 주석 참고).
   useEffect(() => {
     if (step !== 'sim') return
-    proRef.current?.showSymbol(SIM_SYM.code, SIM_SYM.name, SIM_SYM.market)
     const r = simResultRef.current
     if (r) proRef.current?.applySimulation({ lines: r.lines, fills: r.fills, series: r.series })
     // 차트가 새로 마운트되면 필터는 전체 표시로 초기화된다 — 이전 선택을 다시 입힌다.
@@ -1397,7 +1397,7 @@ export function StrategyPanel() {
                 ))}
               </div>
               <div className="sim-canvas">
-                <ProChart ref={proRef} />
+                <ProChart ref={proRef} initialSymbol={SIM_SYM} />
               </div>
               {/* 하단 결과 스트립 — "결국 결과가 어떻게 될거다"까지 차트 밑에서 (오너 지시) */}
               {simResult && <SimFoot r={simResult} sellBasis={draft.sellBasis} />}

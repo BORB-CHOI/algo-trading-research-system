@@ -77,7 +77,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 42px;
+  height: 44px;
   padding: 0 12px;
   background: var(--hts-panel);
   border-bottom: 1px solid var(--hts-border);
@@ -193,21 +193,16 @@ body {
 .ticker .tk .v { font-weight: 700; font-variant-numeric: tabular-nums; }
 .ticker .tk .c { font-size: 11px; font-variant-numeric: tabular-nums; }
 
-/* ── 상단바 2행: 메뉴 ─────────────────────────────────────────── */
-.menubar {
+/* ── 상단바에 합쳐진 메뉴 (헤더 1줄 통합 — 오너 지적 2026-08-06) ── */
+.mainnav {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 2px;
-  height: 34px;
-  padding: 0 8px;
-  background: var(--hts-panel);
-  border-bottom: 1px solid var(--hts-border);
+  gap: 1px;
 }
-.menubar .spacer { flex: 1; }
-.menubar .menu {
+.mainnav .menu {
   height: var(--ctl-h);
-  padding: 0 13px;
+  padding: 0 10px;
   background: none;
   border: 0;
   border-radius: var(--r-pill);
@@ -217,8 +212,32 @@ body {
   cursor: pointer;
   white-space: nowrap;
 }
-.menubar .menu:hover { background: var(--hts-hover); color: var(--hts-text); }
-.menubar .menu.on { background: var(--hts-accent-soft); color: var(--hts-accent-down); }
+.mainnav .menu:hover { background: var(--hts-hover); color: var(--hts-text); }
+.mainnav .menu.on { background: var(--hts-accent-soft); color: var(--hts-accent-down); }
+
+/* 창 관리(플로팅/새 창/레이아웃)는 ⋯ 팝업으로 접는다 — 헤더 한 줄 유지 */
+.more { position: relative; flex: none; }
+.more-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 132px;
+  padding: 6px;
+  background: var(--hts-panel);
+  border: 1px solid var(--hts-border);
+  border-radius: var(--r-card);
+  box-shadow: var(--sh-2);
+}
+.hts .more-pop button { border: 0; background: none; text-align: left; height: 28px; }
+.hts .more-pop button:hover { background: var(--hts-hover); }
+@media (max-width: 1500px) {
+  .brand em { display: none; }
+  .omni { width: 190px; }
+}
 
 .dock-area { flex: 1; min-height: 0; padding: 5px; box-sizing: border-box; }
 
@@ -1126,18 +1145,18 @@ body {
 .sim-split {
   display: grid;
   grid-template-columns: minmax(300px, 360px) 1fr;
+  grid-template-rows: minmax(0, 1fr);
   gap: 12px;
-  align-items: start;
-  min-height: 100%;
+  align-items: stretch;
+  height: 100%;
 }
+/* 왼쪽 컨트롤만 안에서 스크롤 — 차트는 항상 패널 높이 그대로 (100vh 계산 ❌: 도크 패널
+   안에서 어긋나 차트가 짓눌렸다, 오너 보고 2026-08-06) */
+.sim-split .sim-side { min-height: 0; overflow-y: auto; }
 .sim-split .sim-chart {
   display: flex;
   flex-direction: column;
-  /* 화면(패널) 높이에 맞춰 늘어난다 — 고정 640px 는 헤더와 합치면 한 화면을 넘었다 */
-  position: sticky;
-  top: 0;
-  height: calc(100vh - 176px);
-  min-height: 480px;
+  min-height: 420px;
   min-width: 0;
   border: 1px solid var(--hts-line);
   border-radius: 10px;
@@ -1198,5 +1217,7 @@ body {
 .sstage .px input.auto::placeholder { color: #374151; opacity: 1; }
 @container (max-width: 860px) {
   .sim-split { grid-template-columns: 1fr; }
-  .sim-split .sim-chart { height: calc(100vh - 176px); min-height: 420px; }
+  .sim-split { grid-template-rows: none; height: auto; }
+  .sim-split .sim-side { overflow-y: visible; }
+  .sim-split .sim-chart { height: 480px; }
 }

@@ -480,6 +480,10 @@ type ProChartProps = {
   /** 전략 오버레이 조회 실패(400/404 한국어 메시지)를 화면에 알릴 곳. 안 주면 콘솔만.
    *  실패가 조용하면 "차트에 아무것도 안 뜨는데 왜?"가 된다 (오너 지적 2026-08-06). */
   onOverlayError?: (msg: string | null) => void
+  /** 최초 로드 종목. 마운트 직후 showSymbol 을 부르면 초기 로드와 경합해 늦게 온 이전
+   *  종목 응답이 새 종목을 덮는다(실측 2026-08-06: 제목은 SK하이닉스, 캔들은 삼성전자 —
+   *  y축이 어긋나 오버레이가 전부 축 밖으로 사라짐). 초기 종목은 여기로 넘긴다. */
+  initialSymbol?: { code: string; name: string; market: string }
 }
 
 export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProChart(props, ref) {
@@ -492,11 +496,12 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   if (!overlayRef.current) overlayRef.current = createOverlayIndicator()
   // 현재 적용중 전략 payload — 종목 전환 시 이 값으로 재조회한다.
   const strategyRef = useRef<StrategyPayload | null>(null)
+  const init = props.initialSymbol ?? { code: '005930', name: '삼성전자', market: 'KOSPI' }
   const symbolRef = useRef<SymbolInfo>({
-    ticker: '005930',
-    name: '삼성전자',
-    shortName: '삼성전자',
-    exchange: 'KOSPI',
+    ticker: init.code,
+    name: init.name,
+    shortName: init.name,
+    exchange: init.market,
     market: 'stocks',
     pricePrecision: 0,
     volumePrecision: 0,

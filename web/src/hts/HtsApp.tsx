@@ -171,6 +171,7 @@ export function HtsApp() {
   const [dataDate, setDataDate] = useState<string | null>(null)
   const [drawer, setDrawer] = useState<SymbolPick | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false) // 헤더 ⋯ 창관리 팝업
   const [searchSeed, setSearchSeed] = useState('')
 
   // 어디서 종목을 고르든 우측 요약이 따라 열린다. 상세(호가·차트)는 차트 패널 몫.
@@ -253,10 +254,24 @@ export function HtsApp() {
 
   return (
     <div className="hts">
+      {/* 헤더 1줄 통합 — 브랜드·메뉴·검색·지수·창관리(⋯)를 한 줄에 (오너 지적 2026-08-06:
+          "헤더가 화면의 1/5"). 창 관리 버튼 3개는 ⋯ 팝업으로 접었다. */}
       <header className="topbar">
         <span className="brand">
           ATS <em>Auto Trading System</em>
         </span>
+        <nav className="mainnav">
+          {MENU.map((k) => (
+            <button
+              key={k}
+              className={`menu ${activeKind === k ? 'on' : ''}`}
+              title="클릭: 열기·이동 / Shift+클릭: 새 탭"
+              onClick={(e) => openPanel(k, e.shiftKey)}
+            >
+              {TITLES[k]}
+            </button>
+          ))}
+        </nav>
         <OmniSearch
           onOpenModal={(q) => {
             setSearchSeed(q)
@@ -265,30 +280,19 @@ export function HtsApp() {
         />
         <Ticker />
         {dataDate && <span className="badge">시세 {dataDate}</span>}
-      </header>
-
-      <nav className="menubar">
-        {MENU.map((k) => (
-          <button
-            key={k}
-            className={`menu ${activeKind === k ? 'on' : ''}`}
-            title="클릭: 열기·이동 / Shift+클릭: 새 탭"
-            onClick={(e) => openPanel(k, e.shiftKey)}
-          >
-            {TITLES[k]}
+        <div className="more">
+          <button className="ghost" title="창 관리" onClick={() => setMoreOpen((v) => !v)}>
+            ⋯
           </button>
-        ))}
-        <span className="spacer" />
-        <button className="ghost" onClick={() => addPanel('chart', true)}>
-          플로팅 차트
-        </button>
-        <button className="ghost" onClick={popoutActive}>
-          새 창으로
-        </button>
-        <button className="ghost" onClick={resetLayout}>
-          레이아웃 초기화
-        </button>
-      </nav>
+          {moreOpen && (
+            <div className="more-pop">
+              <button onClick={() => { addPanel('chart', true); setMoreOpen(false) }}>플로팅 차트</button>
+              <button onClick={() => { popoutActive(); setMoreOpen(false) }}>새 창으로</button>
+              <button onClick={resetLayout}>레이아웃 초기화</button>
+            </div>
+          )}
+        </div>
+      </header>
 
       <div className="stage">
         <div className="dock-area">

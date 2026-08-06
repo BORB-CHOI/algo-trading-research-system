@@ -42,16 +42,11 @@ export function ChartPanel({ panelApi }: { panelApi?: DockviewPanelApi }) {
     [],
   )
 
-  // 마운트(추가·레이아웃 복원) 시 현재 선택 상태를 이어받는다.
-  // 복원된 탭 제목("차트 · X")과 실제 로드 종목이 어긋나는 것도 여기서 맞춘다.
+  // 마운트(추가·레이아웃 복원) 시 현재 선택 상태를 이어받는다. 종목은 initialSymbol 로
+  // 마운트 때 이미 실려 있다 — 직후 showSymbol 을 부르면 초기 로드와 경합한다(ProChart 주석).
   useEffect(() => {
     const s = currentSymbol()
-    if (s) {
-      ref.current?.showSymbol(s.code, s.name, s.market)
-      panelApi?.setTitle(`차트 · ${s.name}`)
-    } else {
-      panelApi?.setTitle('차트')
-    }
+    panelApi?.setTitle(s ? `차트 · ${s.name}` : '차트')
     const strategy = currentStrategy()
     if (strategy) void ref.current?.applyStrategy(strategy)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -76,7 +71,7 @@ export function ChartPanel({ panelApi }: { panelApi?: DockviewPanelApi }) {
         </div>
       )}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <ProChart ref={ref} onOverlayError={setOverlayErr} />
+        <ProChart ref={ref} onOverlayError={setOverlayErr} initialSymbol={currentSymbol() ?? undefined} />
       </div>
     </div>
   )
