@@ -19,6 +19,7 @@ import { currentSymbol, onSymbolPick, pickSymbol, type SymbolPick } from '../bus
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../format'
 import { MiniCandles } from '../MiniCandles'
 import { BuyStages, SellStages, type ComputedPrices } from './SplitStages'
+import { SR_PAYLOAD, STRATEGY_ONE_WAVE, isFixedDefinition } from './strategyOne'
 import {
   deleteScreen,
   loadScreens,
@@ -53,29 +54,8 @@ const LIMIT = 100
 // ③ 시뮬레이션 대표 종목 — 오너 지시로 고정(2026-08-06 SK하이닉스로 변경). 전략 설계 확인용.
 const SIM_SYM = { code: '000660', name: 'SK하이닉스', market: 'KOSPI' } as const
 
-// 전략 1호 파동·지지저항 **고정 정의** (오너 결정 2026-08-06 — "시작점·고점은 자동으로
-// 구하는 건데 입력값을 왜 내가 만지나" → ② 입력칸 제거, 정의로 내림).
-// 지지저항 = TradingView "Support Resistance Channels" 포팅(ADR-0014 개정) — 값은 원본
-// 스크립트 기본값이다. 사이클 하락 기준은 임시값: 피보나치 시작점 새 정의("고점의 10% 컷
-// + 그 안에서 -30% 사이클")가 확정되면 여기 한 곳만 바꾼다. 서버에는 요청 데이터로만
-// 나간다(ADR-0009).
-const STRATEGY_ONE_WAVE = {
-  cycleDropPct: 50, // 사이클 경계 — 고점 대비 이만큼 빠지면 사이클이 끊긴 것으로 본다(ADR-0013)
-  srPrd: 10, // 피벗 기준(좌우 거래일) — 원본 Pivot Period
-  srChannelWidthPct: 5, // 존 최대 폭 — 최근 300일 가격폭 대비 % (원본 Maximum Channel Width)
-  srLoopback: 290, // 피벗 찾는 구간(거래일) — 원본 Loopback Period
-  srMinStrength: 1, // 최소 강도 — 원본 Minimum Strength
-  srMaxChannels: 5, // 존 개수(강도순) — 원본 Maximum Number of S/R
-} as const
-
-// 서버 요청용 평면 키 — Simulate/Backtest 공용(ADR-0014 개정 계약)
-const SR_PAYLOAD = {
-  sr_prd: STRATEGY_ONE_WAVE.srPrd,
-  sr_channel_width_pct: STRATEGY_ONE_WAVE.srChannelWidthPct,
-  sr_loopback: STRATEGY_ONE_WAVE.srLoopback,
-  sr_min_strength: STRATEGY_ONE_WAVE.srMinStrength,
-  sr_max_channels: STRATEGY_ONE_WAVE.srMaxChannels,
-} as const
+// 전략 1호 고정 정의는 strategyOne.ts 가 단일 정본이다 (오너: "캡슐화") —
+// 화면 표시·서버 요청·저장 검증(strategyStore.toStrategy) 전부 그 모듈을 쓴다.
 
 // ③ 예시 기본값 — 지위는 PLACEHOLDER 와 같다 (ADR-0009: 서버 하드코딩 금지, UI 예시는 허용).
 // 실행 시 **빈 항목만** 이 값으로 채우고, 채운 값은 전부 화면(분할 카드·메시지)에 보인다.
@@ -1046,7 +1026,7 @@ export function StrategyPanel() {
                   {/* 전략 1호(피보나치)의 파동·지지저항 값은 고정 정의 — 입력칸을 안 보여준다
                       (오너 결정 2026-08-06: "시작점·고점은 자동으로 구하는 건데 입력값을 왜
                       내가 만지나"). 값 변경은 STRATEGY_ONE_WAVE 정의에서. 다른 기법은 그대로. */}
-                  {entryDef.key === 'fib_retrace' ? (
+                  {isFixedDefinition(entryDef.key) ? (
                     <p className="hint">
                       시작점(사이클 저점)·고점·지지저항 전부 자동 탐지 — 정의: 사이클 -{STRATEGY_ONE_WAVE.cycleDropPct}%
                       · 지지저항은 트레이딩뷰 표준(Support Resistance Channels) 방식으로

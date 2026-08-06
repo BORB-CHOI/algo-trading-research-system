@@ -2,6 +2,7 @@
 // 정량 값은 전부 사용자가 입력한 것만 저장한다 (ADR-0009 — 전략 숫자 하드코딩 금지).
 
 import type { ConditionParamDef } from '../../api'
+import { isFixedDefinition } from './strategyOne'
 
 export const STORE_KEY = 'hts-strategies'
 
@@ -285,9 +286,16 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
   // 진입 기법은 선택 사항 — 골랐을 때만 파라미터를 검증한다.
   let entry: Strategy['entry']
   if (d.entryKey) {
-    const params = parseParams(entryDefs, d.entryParams)
-    if (!params.ok) return params
-    entry = { key: d.entryKey, params: params.value }
+    if (isFixedDefinition(d.entryKey)) {
+      // 전략 1호(피보나치) — 파라미터는 고정 정의라 사용자 입력이 없다(strategyOne.ts 정본).
+      // 여기서 카탈로그 필수값을 요구하면 입력칸이 없는 화면에서 저장이 영원히 막힌다
+      // (실측 2026-08-06 "전략 저장이 안되잖아"). 값은 요청 시점에 주입한다.
+      entry = { key: d.entryKey, params: {} }
+    } else {
+      const params = parseParams(entryDefs, d.entryParams)
+      if (!params.ok) return params
+      entry = { key: d.entryKey, params: params.value }
+    }
   }
 
   // 수량은 옛 저장본 호환용 — 값이 있을 때만 담는다 (입력 UI 는 삭제됨).
