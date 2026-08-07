@@ -5,8 +5,15 @@ import type { ConditionDef, ConditionParamDef } from '../../../api'
 import { KV } from '../../components/ui'
 import type { SavedCondition, SellBasis } from '../strategyStore'
 
-// ③ 시뮬레이션 대표 종목 — 오너 지시로 고정(2026-08-06 SK하이닉스로 변경). 전략 설계 확인용.
-export const SIM_SYM = { code: '000660', name: 'SK하이닉스', market: 'KOSPI' } as const
+// ③ 시뮬레이션 확인용 종목 — 전략 1호 정의(특히 시작점)를 차트로 비교하려고 둔다.
+// 성격이 다른 셋: 크게 오른 종목 / 중간 / 고점에서 크게 밀린 종목 (오너 지시 2026-08-07).
+export const SIM_SYMS = [
+  { code: '000660', name: 'SK하이닉스', market: 'KOSPI' },
+  { code: '009150', name: '삼성전기', market: 'KOSPI' },
+  { code: '005380', name: '현대차', market: 'KOSPI' },
+] as const
+
+export const SIM_SYM = SIM_SYMS[0]
 
 // ③ 예시 기본값 — 지위는 PLACEHOLDER 와 같다 (ADR-0009: 서버 하드코딩 금지, UI 예시는 허용).
 // 실행 시 **빈 항목만** 이 값으로 채우고, 채운 값은 전부 화면(분할 카드·메시지)에 보인다.

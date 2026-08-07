@@ -8,7 +8,7 @@ import { Card, Chip, Chips, KV, MsgLine } from '../../components/ui'
 import type { ComputedPrices } from '../SplitStages'
 import { SR_PAYLOAD, STRATEGY_ONE_WAVE } from '../strategyOne'
 import { newBuyStage, toDraft, type Strategies, type StrategyDraft } from '../strategyStore'
-import { SELL_BASIS_LABEL, SIM_EXAMPLE, SIM_SYM, todayStr } from './common'
+import { SELL_BASIS_LABEL, SIM_EXAMPLE, SIM_SYM, SIM_SYMS, todayStr } from './common'
 
 // ③ 시뮬레이션 — 대표 종목에 전략 1호(상승장 사이클+분할)를 돌려 전용 차트로 확인 (오너 지시:
 // 종목 차트 오버레이 ❌, 이 탭에서 본다). 계산은 전부 파이썬(/api/simulate).
@@ -105,6 +105,7 @@ export function SimStep(props: {
     setDraft((d) => ({ ...d, [k]: v }))
 
   const proRef = useRef<ProChartHandle>(null)
+  const [sym, setSym] = useState<(typeof SIM_SYMS)[number]>(SIM_SYM)
   const [simDate, setSimDate] = useState(todayStr)
   const [simMsg, setSimMsg] = useState('')
   const [simRunning, setSimRunning] = useState(false)
@@ -172,7 +173,7 @@ export function SimStep(props: {
     setSimMsg('계산 중…')
     try {
       const res = await postSimulate({
-        code: SIM_SYM.code,
+        code: sym.code,
         end: simDate || undefined,
         cycle_drop_pct: STRATEGY_ONE_WAVE.cycleDropPct,
         ...SR_PAYLOAD,
@@ -225,7 +226,7 @@ export function SimStep(props: {
       {/* ─────────────── ③ 시뮬레이션 ─────────────── */}
       <div className="sim-split">
         <div className="sim-side">
-          <Card title="시뮬레이션" sub={`${SIM_SYM.name} 고정 — 전략 1호`}>
+          <Card title="시뮬레이션" sub={`${sym.name} — 전략 1호`}>
             {/* 입력 = 전략 선택 + 기준일 + 사이클 하락 기준. 빈 값은 예시로 채워 실행한다. */}
             <KV label="전략">
               <select
@@ -242,6 +243,26 @@ export function SimStep(props: {
                 <option value="">지금 편집 중인 값 {Object.keys(saved).length === 0 ? '(저장된 전략 없음)' : ''}</option>
                 {Object.keys(saved).map((n) => (
                   <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </KV>
+            <KV label="종목">
+              <select
+                value={sym.code}
+                onChange={(e) => {
+                  const next = SIM_SYMS.find((x) => x.code === e.target.value) ?? SIM_SYM
+                  setSym(next)
+                  // 종목이 바뀌면 이전 종목의 오버레이는 무의미하다 — 지우고 다시 실행하게 한다.
+                  proRef.current?.applySimulation(null)
+                  setSimResult(null)
+                  setSimMsg('')
+                  proRef.current?.showSymbol(next.code, next.name, next.market)
+                }}
+              >
+                {SIM_SYMS.map((x) => (
+                  <option key={x.code} value={x.code}>
+                    {x.name} ({x.code})
+                  </option>
                 ))}
               </select>
             </KV>
