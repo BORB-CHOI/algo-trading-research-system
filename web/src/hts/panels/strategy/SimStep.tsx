@@ -51,8 +51,8 @@ function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeo
         {fmtPrice(r.cycle.high_price)} (+{r.cycle.gain_pct.toFixed(0)}%)
         {r.cycle.is_52w_high ? ' · 고점 = 52주 신고가' : ''}
         {r.cycle.confirmed
-          ? ` · -${r.cycle.drop_pct}% 하락 후 바닥`
-          : ` · -${r.cycle.drop_pct}% 하락 없음 — 구간 최저가로 대신`}
+          ? ` · 사이클이 끊긴 하락 뒤의 바닥`
+          : ` · 창 안에 사이클을 끊는 하락 없음 — 구간 최저가로 대신`}
       </p>
       {/* 매도 기준가를 명시한다 — 안 보이면 "평단 기준인 줄 알았다"가 반복된다 (2026-08-06). */}
       {sellLines.length > 0 && (
@@ -106,6 +106,10 @@ export function SimStep(props: {
 
   const proRef = useRef<ProChartHandle>(null)
   const [sym, setSym] = useState<(typeof SIM_SYMS)[number]>(SIM_SYM)
+  // 사이클 기준 — 오너가 차트 보며 직접 돌려본다(ADR-0013 개정 3차, 아직 확정 전)
+  const [volMult, setVolMult] = useState(String(STRATEGY_ONE_WAVE.cycleVolMult))
+  const [minBars, setMinBars] = useState(String(STRATEGY_ONE_WAVE.cycleMinBars))
+  const [lookback, setLookback] = useState(String(STRATEGY_ONE_WAVE.cycleLookbackBars))
   const [simDate, setSimDate] = useState(todayStr)
   const [simMsg, setSimMsg] = useState('')
   const [simRunning, setSimRunning] = useState(false)
@@ -176,6 +180,9 @@ export function SimStep(props: {
         code: sym.code,
         end: simDate || undefined,
         cycle_drop_pct: STRATEGY_ONE_WAVE.cycleDropPct,
+        cycle_vol_mult: Number(volMult) || undefined,
+        cycle_min_bars: Number(minBars) || undefined,
+        cycle_lookback_bars: Number(lookback) || undefined,
         ...SR_PAYLOAD,
         buy: buy.map((b) => ({
           id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled, price_override: b.priceOverride,
@@ -274,11 +281,23 @@ export function SimStep(props: {
                 title="기본 = 오늘 (휴장일이면 직전 거래일 기준). 과거 날짜를 주면 그 시점을 재현한다."
               />
             </KV>
-            <KV label="파동·지지저항">
-              사이클 -{STRATEGY_ONE_WAVE.cycleDropPct}%
-              · 지지저항 = 트레이딩뷰 표준 존 최대 {STRATEGY_ONE_WAVE.srMaxChannels}개
+            <KV label="사이클 끊김" desc="낙폭이 이 종목 평소 변동성의 몇 배면 사이클이 끊긴 것으로 보는가">
+              <input className="amt" value={volMult} onChange={(e) => setVolMult(e.target.value)} />
+              <span className="unit">배</span>
             </KV>
-            <p className="hint">전략 1호 고정 정의 — 시작점·고점은 자동 탐지. 정의가 바뀌면 화면이 아니라 정의를 고친다.</p>
+            <KV label="최소 지속" desc="그 하락이 이만큼 끌어야 '주르르륵 흐른' 것으로 본다">
+              <input className="amt" value={minBars} onChange={(e) => setMinBars(e.target.value)} />
+              <span className="unit">봉</span>
+            </KV>
+            <KV label="거슬러 보는 창" desc="신고가로부터 이만큼만 본다. 그 이전 매물대는 영향이 옅다">
+              <input className="amt" value={lookback} onChange={(e) => setLookback(e.target.value)} />
+              <span className="unit">봉</span>
+            </KV>
+            <KV label="지지저항">트레이딩뷰 표준 존 최대 {STRATEGY_ONE_WAVE.srMaxChannels}개</KV>
+            <p className="hint">
+              시작점 기준은 아직 확정 전이다 — 값을 바꿔가며 차트에서 확인한다(ADR-0013 개정 3차).
+              고점은 자동(신고가).
+            </p>
             <div className="form-row" style={{ marginTop: 8 }}>
               <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
                 {simRunning ? '계산 중…' : '시뮬레이션 실행'}

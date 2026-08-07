@@ -99,7 +99,7 @@ def main(argv: list[str]) -> int:
         print(f"규칙: 낙폭 {drop_pct}% 이상 & {min_bars}봉 이상 끌면 사이클을 끊는다 (창 {LOOKBACK_BARS}봉)")
         print("=" * 96)
         print(f"{'종목':<10} {'신고가일':>12} {'정답':>12} {'계산':>12} {'차이':>6}  판정  근거")
-        for code, name, peak_d, ans_d, ans_px, note in rows:
+        for code, name, peak_d, ans_d, _ans_px, _note in rows:
             df = load_adjusted(code).reset_index(drop=True)
             pi = df.index[df["Date"] >= peak_d]
             if len(pi) == 0:

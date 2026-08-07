@@ -400,6 +400,94 @@ def find_cycle_low(df: pd.DataFrame, *, drop_pct: float, as_of: AsOf = None) -> 
     )
 
 
+def find_cycle_low_adaptive(
+    df: pd.DataFrame,
+    *,
+    vol_mult: float,
+    min_bars: int,
+    lookback_bars: int,
+    vol_window: int = 250,
+    as_of: AsOf = None,
+) -> CycleLow:
+    """사이클 시작 저점 — **종목이 자기 기준을 스스로 갖는** 방식 (ADR-0013 개정 3차).
+
+    `find_cycle_low` 는 모든 종목에 같은 낙폭(%)을 들이댄다. 그런데 로보티즈는 -45% 가
+    일상이고 삼성전자는 -25% 도 큰 사건이다. 고정 숫자는 그 차이를 못 담는다
+    (오너 2026-08-07: "단순 숫자 말고 공식이나 뭐 없어? 매 종목마다 내가 그어줘야 하면
+    그냥 노가다잖아").
+
+    그래서 **낙폭을 그 종목 평소 변동성으로 나눈 값**을 기준으로 쓴다.
+
+        사이클이 끊긴다  =  낙폭 ≥ (평소 변동성 × vol_mult)  그리고  min_bars 이상 끌었다
+
+    변동성 = **하락이 시작된 고점 시점 기준 직전 `vol_window` 봉**의 일간수익률 표준편차(%).
+    고점 시점 기준인 이유는 look-ahead 때문이다 — 하락이 끝난 뒤의 변동성을 쓰면 그 하락
+    자체가 변동성을 부풀려 기준이 느슨해진다.
+
+    실측 근거(오너가 찍은 시작점 7개 지점): 원래 낙폭은 21~54% 로 2.5배 벌어지는데
+    변동성으로 나누면 7.2~19.9(한 건 빼면 7.2~13.0)로 모인다. 차트는 화면 높이에 맞춰
+    스케일되므로 "같은 눈으로 그은 것"이 곧 변동성 대비 같은 크기였다는 뜻이다.
+
+    `lookback_bars` = 신고가로부터 몇 봉까지 거슬러 볼 것인가. 오너는 500봉(약 2년)으로 본다
+    — "그 이전에 높은 산의 매물대가 있어도 영향을 덜 받는다".
+
+    정량값은 전부 인자다. 기본값을 두지 않는다 — 전략 판단이므로 호출부(요청 데이터)가 준다.
+    """
+    if vol_mult <= 0:
+        raise ValueError(f"vol_mult 는 0보다 커야 합니다: {vol_mult!r}")
+    if min_bars < 0:
+        raise ValueError(f"min_bars 는 0 이상이어야 합니다: {min_bars!r}")
+    if lookback_bars < 2:
+        raise ValueError(f"lookback_bars 는 2 이상이어야 합니다: {lookback_bars!r}")
+
+    d, _ = _truncate(df, as_of)
+    if d.empty:
+        raise ValueError("사이클 저점을 찾을 데이터가 없습니다.")
+
+    # 변동성은 잘라내기 **전** 전체로 계산해야 창 앞부분에서도 값이 있다.
+    vol = d["Close"].pct_change().rolling(vol_window, min_periods=vol_window // 2).std() * 100.0
+    vol_arr = vol.to_numpy(dtype=np.float64)
+
+    start = max(0, len(d) - lookback_bars)
+    highs = d["High"].to_numpy(dtype=np.float64)
+    lows = d["Low"].to_numpy(dtype=np.float64)
+
+    cycle_i: int | None = None
+    peak_px, peak_at = highs[start], start
+    down = False
+    for i in range(start + 1, len(d)):
+        if highs[i] > peak_px:
+            peak_px, peak_at = highs[i], i
+            down = False
+            continue
+        v = vol_arr[peak_at]
+        if not np.isfinite(v) or v <= 0:
+            continue
+        drawdown = (1.0 - lows[i] / peak_px) * 100.0
+        if drawdown >= v * vol_mult and (i - peak_at) >= min_bars:
+            # 이 하락이 사이클을 끊었다 — 고점~여기 사이의 바닥이 다음 사이클의 시작점
+            seg_lo = int(np.argmin(lows[peak_at : i + 1])) + peak_at
+            cycle_i = seg_lo
+            down = True
+            peak_px, peak_at = highs[i], i
+
+    if cycle_i is None:
+        # 창 안에서 사이클을 끊은 하락이 없다 = 창 전체가 한 상승장. 창의 최저점에서 긋는다.
+        i = int(np.argmin(lows[start:])) + start
+        return CycleLow(
+            date=pd.Timestamp(d["Date"].iloc[i]),
+            price=float(lows[i]),
+            confirmed=False,
+            falling=False,
+        )
+    return CycleLow(
+        date=pd.Timestamp(d["Date"].iloc[cycle_i]),
+        price=float(lows[cycle_i]),
+        confirmed=True,
+        falling=down,
+    )
+
+
 def build_anchor(
     df: pd.DataFrame,
     *,

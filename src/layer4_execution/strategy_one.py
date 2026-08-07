@@ -33,7 +33,7 @@ from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy
 from src.layer3_strategy.entry_levels import buy_targets_sr, sell_targets_sr
 from src.layer3_strategy.fibonacci import FIB_RATIOS
 from src.layer3_strategy.support_resistance import find_channels, sr_params_from
-from src.layer3_strategy.surge import find_cycle_low
+from src.layer3_strategy.surge import find_cycle_low, find_cycle_low_adaptive
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 from src.layer4_execution.backtest import SPLITS, Trade, slice_split
 from src.layer4_execution.costs import DEFAULT_COST, CostModel
@@ -48,7 +48,15 @@ def _plan_buys(left: pd.DataFrame, p: dict) -> tuple[object, float, list]:
     반환: (cycle, 사이클 고점가, 차수별 매수 목표 SRTarget 목록).
     파동·선이 없으면 ValueError(한국어) — 호출부가 skip 사유로 기록한다.
     """
-    cycle = find_cycle_low(left, drop_pct=p["cycle_drop_pct"])
+    if p.get("cycle_vol_mult"):
+        cycle = find_cycle_low_adaptive(
+            left,
+            vol_mult=p["cycle_vol_mult"],
+            min_bars=p.get("cycle_min_bars") or 0,
+            lookback_bars=p.get("cycle_lookback_bars") or len(left),
+        )
+    else:
+        cycle = find_cycle_low(left, drop_pct=p["cycle_drop_pct"])
     rise = left.loc[left["Date"] >= cycle.date].reset_index(drop=True)
     hi = int(rise["High"].idxmax())
     high_price = float(rise["High"].iloc[hi])

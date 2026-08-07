@@ -328,6 +328,10 @@ export type SimulateRequest = {
   code: string
   end?: string
   cycle_drop_pct: number // 사이클 하락 기준(%) — 파동 = 상승장 사이클 하나뿐(ADR-0013)
+  // 변동성 방식(ADR-0013 개정 3차). 주면 이쪽을 쓴다 — 종목마다 기준이 자동으로 달라진다.
+  cycle_vol_mult?: number
+  cycle_min_bars?: number
+  cycle_lookback_bars?: number
   // 지지/저항 존 — TradingView Support Resistance Channels 포팅(ADR-0014 개정)
   sr_prd: number // 피벗 기준(좌우 N거래일)
   sr_channel_width_pct: number // 존 최대 폭 — 최근 300봉 가격폭 대비 %

@@ -53,7 +53,7 @@ from src.layer3_strategy.entry_levels import average_entry, buy_targets_sr, sell
 from src.layer3_strategy.fibonacci import FIB_RATIOS
 from src.layer3_strategy.screening import ScreeningRule, screen
 from src.layer3_strategy.support_resistance import SRParams, find_channels
-from src.layer3_strategy.surge import find_52w_high, find_cycle_low
+from src.layer3_strategy.surge import find_52w_high, find_cycle_low, find_cycle_low_adaptive
 from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
 from src.layer4_execution.strategy_one import run_strategy_one
 
@@ -910,6 +910,10 @@ class SimulateRequest(BaseModel):
     code: str
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     cycle_drop_pct: float  # 사이클 하락 기준(%) — 이만큼 안 빠진 구간 = 한 상승장(ADR-0013)
+    # 변동성 방식(ADR-0013 개정 3차) — 주면 이쪽을 쓴다. 종목마다 기준이 자동으로 달라진다.
+    cycle_vol_mult: float | None = None  # 낙폭이 평소 변동성의 몇 배면 사이클이 끊기는가
+    cycle_min_bars: int | None = None  # 그 하락이 최소 몇 봉 끌어야 하는가
+    cycle_lookback_bars: int | None = None  # 신고가로부터 몇 봉까지 거슬러 볼 것인가
     # 지지/저항 존 — TradingView Support Resistance Channels 포팅(ADR-0014 개정)
     sr_prd: int  # 피벗 기준(좌우 N거래일)
     sr_channel_width_pct: float  # 존 최대 폭 — 최근 300봉 가격폭 대비 %
@@ -948,7 +952,15 @@ def api_simulate(req: SimulateRequest) -> dict:
         if full.empty:
             raise HTTPException(status_code=404, detail=f"'{code}' {req.end} 까지 데이터가 없습니다.")
     try:
-        cycle = find_cycle_low(full, drop_pct=req.cycle_drop_pct)
+        if req.cycle_vol_mult:
+            cycle = find_cycle_low_adaptive(
+                full,
+                vol_mult=req.cycle_vol_mult,
+                min_bars=req.cycle_min_bars or 0,
+                lookback_bars=req.cycle_lookback_bars or len(full),
+            )
+        else:
+            cycle = find_cycle_low(full, drop_pct=req.cycle_drop_pct)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     rise = full.loc[full["Date"] >= cycle.date].reset_index(drop=True)
