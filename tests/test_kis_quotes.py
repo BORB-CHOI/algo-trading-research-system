@@ -11,7 +11,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.layer4_execution.brokers.kis.auth import AccessToken, KisCredentials
-from src.layer4_execution.brokers.kis.client import KisApiError, KisClient, RawResponse
+from src.layer4_execution.brokers.kis.client import (
+    CallPolicy,
+    KisApiError,
+    KisClient,
+    RawResponse,
+)
 from src.layer4_execution.brokers.kis.quotes import HTS_TOP_VIEW_TR_ID, fetch_hts_top_view
 
 NOW = datetime(2026, 8, 4, 9, 0, tzinfo=UTC)
@@ -115,6 +120,141 @@ def test_output1이_비면_빈_목록():
     rec = _Recorder({"rt_cd": "0"})
 
     assert fetch_hts_top_view(_client(rec)) == []
+
+
+# ── 호출 제한 — 스로틀·재시도 (ADR-0012, BORB-33) ─────────────
+
+
+class _Sequence:
+    """호출마다 다른 응답을 돌려주는 가짜 transport. 마지막 응답은 계속 반복한다."""
+
+    def __init__(self, *responses: RawResponse):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def __call__(self, url: str, headers: dict, params: dict) -> RawResponse:
+        self.calls += 1
+        return self.responses[min(self.calls, len(self.responses)) - 1]
+
+
+class _Clock:
+    """주입할 시계. sleep 은 실제로 자지 않고 시각만 앞으로 민다."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+_THROTTLED = RawResponse(
+    status_code=200,
+    body={"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "초당 거래건수를 초과하였습니다."},
+)
+_OK = RawResponse(status_code=200, body={"rt_cd": "0", "output1": []})
+
+
+def _policy_client(transport, clock: _Clock, **kwargs) -> KisClient:
+    return KisClient(
+        creds=CREDS,
+        token=TOKEN,
+        transport=transport,
+        policy=CallPolicy(**kwargs),
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+
+def test_초당_거래건수_초과는_기다렸다_다시_부른다():
+    seq = _Sequence(_THROTTLED, _OK)
+    clock = _Clock()
+
+    response = _policy_client(seq, clock, max_attempts=3, backoff_base_sec=0.5).get("/p", tr_id="T")
+
+    assert response.body["rt_cd"] == "0"
+    assert seq.calls == 2
+    assert clock.slept == [0.5]
+
+
+def test_재시도해도_소용없는_실패는_즉시_올린다():
+    # 토큰 만료·권한 없음은 몇 번을 더 불러도 같다. 헛되이 기다리지 않는다.
+    seq = _Sequence(
+        RawResponse(
+            200, {"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "기간이 만료된 token 입니다."}
+        )
+    )
+    clock = _Clock()
+
+    with pytest.raises(KisApiError, match="EGW00123"):
+        _policy_client(seq, clock, max_attempts=3).get("/p", tr_id="T")
+
+    assert seq.calls == 1
+    assert clock.slept == []
+
+
+def test_재시도_횟수를_소진하면_실패로_올린다():
+    seq = _Sequence(_THROTTLED)
+    clock = _Clock()
+
+    with pytest.raises(KisApiError, match="EGW00201"):
+        _policy_client(seq, clock, max_attempts=3, backoff_base_sec=0.5).get("/p", tr_id="T")
+
+    assert seq.calls == 3
+    assert clock.slept == [0.5, 1.0]  # 지수 백오프 — 연타로 제한을 더 때리지 않는다
+
+
+def test_서버_일시_오류도_재시도한다():
+    seq = _Sequence(RawResponse(503, {}), _OK)
+    clock = _Clock()
+
+    response = _policy_client(seq, clock, max_attempts=2).get("/p", tr_id="T")
+
+    assert response.status_code == 200
+    assert seq.calls == 2
+
+
+def test_호출_간_최소_간격을_지킨다():
+    # 백필은 종목당 79 호출이다. 간격이 없으면 EGW00201 을 스스로 부른다.
+    seq = _Sequence(_OK)
+    clock = _Clock()
+    client = _policy_client(seq, clock, min_interval_sec=0.6)
+
+    client.get("/p", tr_id="T")
+    assert clock.slept == []  # 첫 호출은 기다릴 이유가 없다
+
+    client.get("/p", tr_id="T")
+    assert clock.slept == [0.6]
+
+
+def test_이미_시간이_지났으면_기다리지_않는다():
+    seq = _Sequence(_OK)
+    clock = _Clock()
+    client = _policy_client(seq, clock, min_interval_sec=0.6)
+
+    client.get("/p", tr_id="T")
+    clock.now += 5.0  # 호출 사이에 다른 작업이 오래 걸린 경우
+    client.get("/p", tr_id="T")
+
+    assert clock.slept == []
+
+
+def test_기본_정책은_간격을_두지_않는다():
+    # 기존 호출 경로의 동작을 바꾸지 않는다. 스로틀은 백필 쪽에서 명시적으로 켠다.
+    seq = _Sequence(_OK)
+    clock = _Clock()
+    client = KisClient(
+        creds=CREDS, token=TOKEN, transport=seq, sleep=clock.sleep, monotonic=clock.monotonic
+    )
+
+    client.get("/p", tr_id="T")
+    client.get("/p", tr_id="T")
+
+    assert clock.slept == []
 
 
 def test_종목코드가_없는_행은_버린다():

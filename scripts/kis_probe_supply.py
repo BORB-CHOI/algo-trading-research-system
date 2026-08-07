@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,7 +37,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.layer1_data.marcap_loader import load_years, normalize_code  # noqa: E402
 from src.layer4_execution.brokers.kis.auth import KisCredentials, get_access_token  # noqa: E402
-from src.layer4_execution.brokers.kis.client import KisApiError, KisClient  # noqa: E402
+from src.layer4_execution.brokers.kis.client import (  # noqa: E402
+    CallPolicy,
+    KisApiError,
+    KisClient,
+)
 from src.layer4_execution.brokers.kis.quotes import fetch_hts_top_view  # noqa: E402
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
@@ -52,9 +55,9 @@ SUPPLY_TR = "FHPTJ04160001"
 # 프로브 종목 — 코스피 대형주 하나면 충분하다(한도는 종목이 아니라 API 속성).
 PROBE_CODE = "005930"
 
-# 호출 간 간격. EGW00201(초당 거래건수 초과)이 실제로 떨어져서 넣었다.
+# EGW00201(초당 거래건수 초과)이 실제로 떨어져서 넣었다. 간격·재시도는 클라이언트가 맡는다.
 # 값은 placeholder — 백필용 스로틀은 별도로 실측해서 정한다.
-THROTTLE_SEC = 0.6
+PROBE_POLICY = CallPolicy(min_interval_sec=0.6)
 
 # 상폐 프로브 표본 수. 한 종목만 보면 그 종목 사정인지 API 사정인지 모른다.
 DELISTED_SAMPLE = 4
@@ -227,7 +230,6 @@ def probe_delisted(client: KisClient) -> int:
             "FID_ORG_ADJ_PRC": "",
             "FID_ETC_CLS_CODE": "",
         }
-        time.sleep(THROTTLE_SEC)  # EGW00201 회피
         try:
             body = client.get(SUPPLY_PATH, SUPPLY_TR, params).body
         except KisApiError as exc:
@@ -272,7 +274,7 @@ def main(argv: list[str]) -> int:
     which = argv[1] if len(argv) > 1 else "all"
     creds = _credentials()
     print(f"환경: {creds.env} ({creds.base_url})\n")
-    client = KisClient(creds, get_access_token(creds, cache_path=CACHE_PATH))
+    client = KisClient(creds, get_access_token(creds, cache_path=CACHE_PATH), policy=PROBE_POLICY)
 
     status = 0
     if which in ("all", "market"):

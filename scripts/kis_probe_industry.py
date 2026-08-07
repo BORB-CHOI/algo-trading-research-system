@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,7 +41,11 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.layer4_execution.brokers.kis.auth import KisCredentials, get_access_token  # noqa: E402
-from src.layer4_execution.brokers.kis.client import KisApiError, KisClient  # noqa: E402
+from src.layer4_execution.brokers.kis.client import (  # noqa: E402
+    CallPolicy,
+    KisApiError,
+    KisClient,
+)
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 
@@ -55,8 +58,8 @@ CATEGORY_TR = "FHPUP02140000"
 DAILY_PATH = "/uapi/domestic-stock/v1/quotations/inquire-index-daily-price"
 DAILY_TR = "FHPUP02120000"
 
-# EGW00201(초당 거래건수 초과)이 프로브 연타만으로 떨어진다. 값은 placeholder.
-THROTTLE_SEC = 0.6
+# EGW00201(초당 거래건수 초과)이 프로브 연타만으로 떨어진다. 간격·재시도는 클라이언트가 맡는다.
+PROBE_POLICY = CallPolicy(min_interval_sec=0.6)  # placeholder
 
 # 상승/하락 종목 수 필드 — 이게 output2 에 있느냐가 이 프로브의 핵심 질문이다.
 BREADTH_FIELDS = ("ascn_issu_cnt", "down_issu_cnt", "stnr_issu_cnt")
@@ -107,7 +110,6 @@ def fetch_sectors(client: KisClient) -> list[Sector]:
             "FID_MRKT_CLS_CODE": mrkt_cls,
             "FID_BLNG_CLS_CODE": "0",
         }
-        time.sleep(THROTTLE_SEC)
         try:
             body = client.get(CATEGORY_PATH, CATEGORY_TR, params).body
         except KisApiError as exc:
@@ -153,7 +155,6 @@ def probe_daily_fields(client: KisClient, sectors: list[Sector]) -> int:
         "FID_INPUT_ISCD": target.code,
         "FID_INPUT_DATE_1": PROBE_DATES[0],
     }
-    time.sleep(THROTTLE_SEC)
     try:
         body = client.get(DAILY_PATH, DAILY_TR, params).body
     except KisApiError as exc:
@@ -215,7 +216,6 @@ def probe_history_limit(client: KisClient, sectors: list[Sector]) -> int:
                 "FID_INPUT_ISCD": sector.code,
                 "FID_INPUT_DATE_1": date,
             }
-            time.sleep(THROTTLE_SEC)
             try:
                 body = client.get(DAILY_PATH, DAILY_TR, params).body
             except KisApiError as exc:
@@ -237,7 +237,6 @@ def probe_stock_sector(client: KisClient) -> int:
     print("=" * 72)
 
     for code, label in (("000660", "SK하이닉스"), ("005930", "삼성전자")):
-        time.sleep(THROTTLE_SEC)
         try:
             body = client.get(
                 "/uapi/domestic-stock/v1/quotations/search-stock-info",
@@ -267,7 +266,7 @@ def main(argv: list[str]) -> int:
     which = argv[1] if len(argv) > 1 else "all"
     creds = _credentials()
     print(f"환경: {creds.env} ({creds.base_url})\n")
-    client = KisClient(creds, get_access_token(creds, cache_path=CACHE_PATH))
+    client = KisClient(creds, get_access_token(creds, cache_path=CACHE_PATH), policy=PROBE_POLICY)
 
     status, sectors = probe_sector_codes(client)
     print()
