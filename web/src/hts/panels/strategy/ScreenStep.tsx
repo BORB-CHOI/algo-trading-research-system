@@ -3,6 +3,7 @@ import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react'
 import {
   runScreen,
   type ConditionCategory,
+  type FinanceCoverage,
   type ConditionDef,
   type ScreenResponse,
 } from '../../../api'
@@ -30,11 +31,12 @@ export function ScreenStep(props: {
   active: boolean
   catErrNode: ReactNode
   condCats: ConditionCategory[]
+  finCov: FinanceCoverage | null
   condMap: Map<string, ConditionDef>
   screens: Screens
   setScreens: Dispatch<SetStateAction<Screens>>
 }) {
-  const { active, catErrNode, condCats, condMap, screens, setScreens } = props
+  const { active, catErrNode, condCats, finCov, condMap, screens, setScreens } = props
 
   const [sym, setSym] = useState<SymbolPick | null>(currentSymbol)
   useEffect(() => onSymbolPick(setSym), [])
@@ -184,6 +186,18 @@ export function ScreenStep(props: {
                   </Chip>
                 ))}
               </Chips>
+              {catKey === 'finance' && finCov && (
+                <MsgLine
+                  warn
+                  text={
+                    finCov.ready
+                      ? `재무 데이터는 ${finCov.codes.toLocaleString()}종목만 있습니다` +
+                        `${finCov.years ? ` (${finCov.years[0]}~${finCov.years[1]}년)` : ''}` +
+                        ' — 나머지 종목은 재무 조건에서 그냥 빠집니다.'
+                      : '재무 데이터가 아직 없습니다 — 재무 조건을 걸면 아무 종목도 안 나옵니다.'
+                  }
+                />
+              )}
               <Chips style={{ marginBottom: 10 }}>
                 {catConds
                   .filter((c) => c.key !== 'new_low')

@@ -126,16 +126,14 @@ def cond_operating_growth(hist, base: pd.DataFrame, p: dict) -> pd.Series:
 #
 # params 항목: (key, label, type, unit, required, desc, choices)
 
-_RANGE_DESC = "빈칸이면 그쪽 한도는 안 본다"
-
 FINANCE_SPECS: list[dict] = [
     {
         "key": "operating_margin",
         "name": "영업이익률",
         "desc": "영업이익 ÷ 매출액. 본업으로 얼마나 남기는가.",
         "params": [
-            ("min", "최소", "number", "%", False, _RANGE_DESC, ()),
-            ("max", "최대", "number", "%", False, _RANGE_DESC, ()),
+            ("min", "최소", "number", "%", False, "", ()),
+            ("max", "최대", "number", "%", False, "", ()),
         ],
         "fn": cond_operating_margin,
     },
@@ -144,8 +142,8 @@ FINANCE_SPECS: list[dict] = [
         "name": "순이익률",
         "desc": "당기순이익 ÷ 매출액. 세금·이자까지 빼고 남는 몫.",
         "params": [
-            ("min", "최소", "number", "%", False, _RANGE_DESC, ()),
-            ("max", "최대", "number", "%", False, _RANGE_DESC, ()),
+            ("min", "최소", "number", "%", False, "", ()),
+            ("max", "최대", "number", "%", False, "", ()),
         ],
         "fn": cond_net_margin,
     },
@@ -154,8 +152,8 @@ FINANCE_SPECS: list[dict] = [
         "name": "자기자본이익률(ROE)",
         "desc": "당기순이익 ÷ 자본총계. 주주 돈으로 얼마를 벌었는가. 자본잠식 기업은 제외된다.",
         "params": [
-            ("min", "최소", "number", "%", False, _RANGE_DESC, ()),
-            ("max", "최대", "number", "%", False, _RANGE_DESC, ()),
+            ("min", "최소", "number", "%", False, "", ()),
+            ("max", "최대", "number", "%", False, "", ()),
         ],
         "fn": cond_roe,
     },
@@ -164,8 +162,8 @@ FINANCE_SPECS: list[dict] = [
         "name": "부채비율",
         "desc": "부채총계 ÷ 자본총계. 낮을수록 빚이 적다. 통상 200% 이하를 안정권으로 본다.",
         "params": [
-            ("min", "최소", "number", "%", False, _RANGE_DESC, ()),
-            ("max", "최대", "number", "%", False, _RANGE_DESC, ()),
+            ("min", "최소", "number", "%", False, "", ()),
+            ("max", "최대", "number", "%", False, "", ()),
         ],
         "fn": cond_debt_ratio,
     },
@@ -184,8 +182,8 @@ FINANCE_SPECS: list[dict] = [
         "name": "매출액 증가율",
         "desc": "전년 대비. 같은 보고서에 실린 전기 금액과 비교한다.",
         "params": [
-            ("min", "최소", "number", "%", False, _RANGE_DESC, ()),
-            ("max", "최대", "number", "%", False, _RANGE_DESC, ()),
+            ("min", "최소", "number", "%", False, "", ()),
+            ("max", "최대", "number", "%", False, "", ()),
         ],
         "fn": cond_revenue_growth,
     },
@@ -194,8 +192,8 @@ FINANCE_SPECS: list[dict] = [
         "name": "영업이익 증가율",
         "desc": "전년 대비. 전년이 적자면 증가율이 무의미하므로 제외된다.",
         "params": [
-            ("min", "최소", "number", "%", False, _RANGE_DESC, ()),
-            ("max", "최대", "number", "%", False, _RANGE_DESC, ()),
+            ("min", "최소", "number", "%", False, "", ()),
+            ("max", "최대", "number", "%", False, "", ()),
         ],
         "fn": cond_operating_growth,
     },

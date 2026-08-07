@@ -153,8 +153,17 @@ export type ConditionCategory = {
   conditions: ConditionDef[]
 }
 
+/** 재무 조건은 데이터가 있는 종목만 판정된다. 내려받기가 덜 끝났으면 결과가 잘린다는 뜻이라
+ *  화면이 그 사실을 알려야 한다 (BORB-41). */
+export type FinanceCoverage = {
+  ready: boolean
+  codes: number // 재무 데이터를 가진 종목 수
+  years: [number, number] | null
+}
+
 export type ConditionsResponse = {
   categories: ConditionCategory[]
+  finance_coverage: FinanceCoverage
 }
 
 export async function fetchConditions(): Promise<ConditionsResponse> {

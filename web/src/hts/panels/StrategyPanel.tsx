@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   fetchConditions,
+  type FinanceCoverage,
   fetchStrategies,
   type ConditionCategory,
   type ConditionDef,
@@ -37,6 +38,7 @@ export function StrategyPanel() {
   // ── 카탈로그 ──
   const [condCats, setCondCats] = useState<ConditionCategory[]>([])
   const [stratCat, setStratCat] = useState<StrategyDef[]>([])
+  const [finCov, setFinCov] = useState<FinanceCoverage | null>(null)
   const [catErr, setCatErr] = useState('')
   const [catReq, setCatReq] = useState(0)
 
@@ -46,6 +48,7 @@ export function StrategyPanel() {
       .then(([c, s]) => {
         if (!alive) return
         setCondCats(c.categories)
+        setFinCov(c.finance_coverage ?? null)
         setStratCat(s)
         setCatErr('')
         // 첫 카테고리 기본 선택은 ScreenStep 이 condCats 변화를 보고 처리한다 (분할 전과 동일 동작).
@@ -106,6 +109,7 @@ export function StrategyPanel() {
         active={step === 'screen'}
         catErrNode={catErrNode}
         condCats={condCats}
+        finCov={finCov}
         condMap={condMap}
         screens={screens}
         setScreens={setScreens}
