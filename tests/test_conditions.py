@@ -94,9 +94,10 @@ def run(
 
 def test_categories_payload_matches_contract() -> None:
     payload = categories_payload()
-    assert set(payload) == {"categories"}
+    # finance_coverage: 재무 데이터가 있는 종목 수 — 조건 UI 가 "결과가 잘린다"를 알리는 근거 (BORB-41)
+    assert set(payload) == {"categories", "finance_coverage"}
     cat_keys = [c["key"] for c in payload["categories"]]
-    assert cat_keys == ["range", "price", "technical", "volume", "pattern"]
+    assert cat_keys == ["range", "price", "technical", "volume", "pattern", "finance"]
     seen = []
     for cat in payload["categories"]:
         assert set(cat) == {"key", "name", "conditions"}
@@ -104,9 +105,14 @@ def test_categories_payload_matches_contract() -> None:
             assert set(c) == {"key", "name", "desc", "params"}
             assert c["params"], f"{c['key']}: 파라미터가 비면 UI 를 못 그린다"
             for p in c["params"]:
-                assert set(p) == {"key", "label", "type", "unit", "required"}
-                assert p["type"] in {"number", "int"}
-                assert p["unit"] in {"원", "억", "%", "일", "배", "주"}
+                # desc: 입력칸 아래 흐린 설명 · choices: 있으면 드롭다운, 없으면 자유 입력
+                assert set(p) == {"key", "label", "type", "unit", "required", "desc", "choices"}
+                assert p["type"] in {"number", "int", "select"}
+                if p["type"] == "select":
+                    assert p["choices"], f"{c['key']}.{p['key']}: 선택지가 없으면 드롭다운을 못 그린다"
+                    assert p["unit"] == "", f"{c['key']}.{p['key']}: 드롭다운에 단위는 붙지 않는다"
+                else:
+                    assert p["unit"] in {"원", "억", "%", "일", "배", "주"}
             seen.append(c["key"])
     # 레지스트리의 모든 조건이 정확히 한 카테고리에 속한다.
     assert sorted(seen) == sorted(CONDITIONS)
@@ -418,7 +424,14 @@ def test_api_conditions_shape() -> None:
     r = client.get("/api/conditions")
     assert r.status_code == 200
     body = r.json()
-    assert [c["key"] for c in body["categories"]] == ["range", "price", "technical", "volume", "pattern"]
+    assert [c["key"] for c in body["categories"]] == [
+        "range",
+        "price",
+        "technical",
+        "volume",
+        "pattern",
+        "finance",
+    ]
 
 
 @pytest.mark.slow

@@ -24,11 +24,19 @@ export function Card(props: {
 }
 
 /** kv 한 줄 — 왼쪽 라벨(k) + 오른쪽 값(v). */
-export function KV(props: { label: ReactNode; style?: CSSProperties; children: ReactNode }) {
+export function KV(props: {
+  label: ReactNode
+  style?: CSSProperties
+  desc?: string
+  children: ReactNode
+}) {
   return (
     <div className="kv" style={props.style}>
       <span className="k">{props.label}</span>
-      <span className="v">{props.children}</span>
+      <span className="v">
+        {props.children}
+        {props.desc ? <small className="kv-desc">{props.desc}</small> : null}
+      </span>
     </div>
   )
 }

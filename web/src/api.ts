@@ -133,9 +133,11 @@ export async function fetchScreen(p: ScreenParams): Promise<ScreenResponse> {
 export type ConditionParamDef = {
   key: string
   label: string // "이상" / "이하" / "기간" 등
-  type: 'number' | 'int'
-  unit: '원' | '억' | '%' | '일' | '배' | '주'
+  type: 'number' | 'int' | 'select'
+  unit: '원' | '억' | '%' | '일' | '배' | '주' | '' // select 는 단위가 없다
   required: boolean // false 면 생략 가능. 단 조건당 최소 1개 값 필요
+  desc: string // 입력칸 아래 흐린 설명. 비면 안 그린다
+  choices: string[] // 비어 있지 않으면 드롭다운
 }
 
 export type ConditionDef = {
@@ -161,7 +163,8 @@ export async function fetchConditions(): Promise<ConditionsResponse> {
 
 export type ScreenCondition = {
   key: string
-  params: Record<string, number> // 값은 항상 요청에 담는다(서버 기본값 없음)
+  // 값은 항상 요청에 담는다(서버 기본값 없음). 문자열은 select 파라미터(예: "흑자") 뿐이다.
+  params: Record<string, number | string>
 }
 
 export type ScreenRunRequest = {
@@ -389,7 +392,7 @@ export async function postSimulate(req: SimulateRequest): Promise<SimulateRespon
 
 export type BacktestRequest = {
   split: 'train' | 'validate' | 'test'
-  conditions: { key: string; params: Record<string, number> }[]
+  conditions: ScreenCondition[]
   logic: 'and' | 'or'
   cycle_drop_pct: number
   sr_prd: number

@@ -11,7 +11,7 @@ export type PriceType = 'market' | 'limit'
 export type QtyType = 'shares' | 'amount'
 export type CreditType = 'cash' | 'credit'
 
-export type SavedCondition = { key: string; params: Record<string, number> }
+export type SavedCondition = { key: string; params: Record<string, number | string> }
 
 /** within(이내) 파라미터 추가(2026-08-05) 이전 저장분 이관 — '이내' 없음 = 당일(1).
  *  기본값 주입이 아니라 기존 검색식의 원래 의미(당일 발생만) 보존이다. */
@@ -65,7 +65,7 @@ export type Strategy = {
   /** name = ① 에서 만든 조건검색식 이름. 없으면 전체 종목이 대상. */
   screen: { name?: string; logic: ScreenLogic; conditions: SavedCondition[] }
   /** 진입 기법(케이스 검사기 오버레이용). 전략 1호 시뮬레이션은 안 쓴다 — 선택 사항. */
-  entry?: { key: string; params: Record<string, number> }
+  entry?: { key: string; params: Record<string, number | string> }
   /** 분할 매수·매도 설계. 가격은 여기 없다 — 기법 파라미터와 종목에서 계산된다.
    *  목표가 = 각 레벨에서 가장 가까운 지지/저항선 ± 호가 오프셋(ADR-0014).
    *  roundTolerancePct 는 라운드 피겨 방식 폐기로 옛 저장본 호환용으로만 남는다. */
@@ -233,12 +233,19 @@ function toNum(label: string, raw: string, int: boolean): ParseResult<number> {
 export function parseParams(
   defs: ConditionParamDef[],
   draft: Record<string, string>,
-): ParseResult<Record<string, number>> {
-  const params: Record<string, number> = {}
+): ParseResult<Record<string, number | string>> {
+  const params: Record<string, number | string> = {}
   for (const p of defs) {
     const raw = (draft[p.key] ?? '').trim()
     if (!raw) {
       if (p.required) return { ok: false, error: `[${p.label}] 값을 입력하세요.` }
+      continue
+    }
+    if (p.type === 'select') {
+      if (p.choices.length && !p.choices.includes(raw)) {
+        return { ok: false, error: `[${p.label}] 은 ${p.choices.join(' / ')} 중 하나여야 합니다.` }
+      }
+      params[p.key] = raw
       continue
     }
     const r = toNum(p.label, raw, p.type === 'int')

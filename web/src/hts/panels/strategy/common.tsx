@@ -48,8 +48,9 @@ export function rowLabel(i: number): string {
   return i < 26 ? String.fromCharCode(65 + i) : String(i + 1)
 }
 
-function fmtVal(v: number, unit: string): string {
-  return `${v.toLocaleString()}${unit}`
+function fmtVal(v: number | string, unit: string): string {
+  // select 값은 "흑자" 같은 말이라 단위도 천단위 구분도 붙이지 않는다.
+  return typeof v === 'number' ? `${v.toLocaleString()}${unit}` : String(v)
 }
 
 export function summarizeCond(c: SavedCondition, def: ConditionDef | undefined): string {
@@ -65,7 +66,7 @@ export function summarizeCond(c: SavedCondition, def: ConditionDef | undefined):
   const min = c.params['min']
   const max = c.params['max']
   if (min != null && max != null && minDef && maxDef && minDef.unit === maxDef.unit) {
-    parts.push(`${min.toLocaleString()}~${fmtVal(max, maxDef.unit)}`)
+    parts.push(`${fmtVal(min, '')}~${fmtVal(max, maxDef.unit)}`)
   } else {
     if (min != null && minDef) parts.push(`${fmtVal(min, minDef.unit)} ${minDef.label}`)
     if (max != null && maxDef) parts.push(`${fmtVal(max, maxDef.unit)} ${maxDef.label}`)
@@ -101,14 +102,28 @@ export function ParamInputs(props: {
   return (
     <>
       {props.defs.map((p) => (
-        <KV label={p.label} key={p.key}>
-          <input
-            className="amt"
-            placeholder={PLACEHOLDER[p.key] ?? ''}
-            value={props.values[p.key] ?? ''}
-            onChange={(e) => props.onChange(p.key, e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && props.onEnter?.()}
-          />
+        <KV label={p.label} key={p.key} desc={p.desc}>
+          {p.choices?.length ? (
+            <select
+              className="amt"
+              value={props.values[p.key] ?? p.choices[0]}
+              onChange={(e) => props.onChange(p.key, e.target.value)}
+            >
+              {p.choices.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className="amt"
+              placeholder={PLACEHOLDER[p.key] ?? ''}
+              value={props.values[p.key] ?? ''}
+              onChange={(e) => props.onChange(p.key, e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && props.onEnter?.()}
+            />
+          )}
           <span className="unit">{p.unit}</span>
         </KV>
       ))}

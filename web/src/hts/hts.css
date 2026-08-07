@@ -540,6 +540,15 @@ body {
 .kv > .v { flex: 1; display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-width: 0; }
 .kv > .v input, .kv > .v select { flex: 1; min-width: 0; }
 .kv > .v .unit { flex: none; color: var(--hts-text-3); font-size: 12px; }
+/* 입력칸 아래 흐린 설명 — 한 줄을 통째로 차지해 입력칸 옆에 끼지 않게 한다. */
+.kv > .v { flex-wrap: wrap; }
+.kv > .v .kv-desc {
+  flex-basis: 100%;
+  text-align: right;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--hts-dim, #6b7280);
+}
 
 /* 라디오 줄 */
 .radios { display: flex; align-items: center; gap: 18px; }

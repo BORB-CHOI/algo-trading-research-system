@@ -33,6 +33,8 @@ import talib
 import talib.abstract  # Function(...).lookback — 패턴 워밍업 계산용 (명시 import 필요)
 
 from src.layer1_data.adjust import SPLIT_PRICE_MATCH, SPLIT_SHARE_HI, SPLIT_SHARE_LO
+from src.layer3_strategy.conditions_finance import FINANCE_KEYS, FINANCE_SPECS
+from src.layer3_strategy.conditions_finance import coverage as finance_coverage
 
 # 이평·신고가 룩백 상한 — 기준일 이전 최대 520 거래일(약 2년). 이걸 넘는 요청은 400.
 # "52주 신고가(250일)를 최근 1년(이내 250일) 안에 찍은 종목"이 들어가는 선 (오너 요구 2026-08-05).
@@ -717,7 +719,19 @@ _ALL = [
     ],
 ]
 
-CONDITIONS: dict[str, Condition] = {c.key: c for c in _ALL}
+# 재무 조건은 데이터 출처가 달라(DART 공시) 별도 모듈에 있다. 명세만 받아 여기서 조립한다.
+_FINANCE = [
+    Condition(
+        key=spec["key"],
+        name=spec["name"],
+        desc=spec["desc"],
+        params=tuple(Param(*p) for p in spec["params"]),
+        fn=spec["fn"],
+    )
+    for spec in FINANCE_SPECS
+]
+
+CONDITIONS: dict[str, Condition] = {c.key: c for c in _ALL + _FINANCE}
 
 # 카테고리 메타 — (key, name, 조건 key 목록). /api/conditions 응답 순서 그대로.
 CATEGORIES: list[tuple[str, str, list[str]]] = [
@@ -734,6 +748,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     ),
     ("volume", "거래량분석", ["vol_vs_prev", "vol_vs_avg"]),
     ("pattern", "패턴분석", list(_PATTERNS)),
+    ("finance", "재무분석", list(FINANCE_KEYS)),
 ]
 
 
@@ -756,6 +771,9 @@ def categories_payload() -> dict:
                                 "type": p.type,
                                 "unit": p.unit,
                                 "required": p.required,
+                                # 선택지가 없으면 자유 입력. 있으면 드롭다운을 그린다.
+                                "desc": p.desc,
+                                "choices": list(p.choices),
                             }
                             for p in CONDITIONS[k].params
                         ],
@@ -764,7 +782,9 @@ def categories_payload() -> dict:
                 ],
             }
             for ckey, cname, keys in CATEGORIES
-        ]
+        ],
+        # 재무 조건은 데이터가 있는 종목만 판정된다. 지금은 절반뿐이라 화면이 알려줘야 한다.
+        "finance_coverage": finance_coverage(),
     }
 
 
@@ -801,6 +821,13 @@ def parse_conditions(raw: list[dict]) -> Parsed:
             if v is None:
                 if p.required:
                     raise ValueError(f"조건 '{cond.name}': 필수 파라미터 '{p.label}'({p.key}) 누락")
+                continue
+            if p.type == "select":
+                sv = str(v)
+                if p.choices and sv not in p.choices:
+                    allowed = " / ".join(p.choices)
+                    raise ValueError(f"조건 '{cond.name}': '{p.label}' 은 {allowed} 중 하나여야 합니다.")
+                params[p.key] = sv
                 continue
             try:
                 fv = float(v)

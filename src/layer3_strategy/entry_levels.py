@@ -339,7 +339,7 @@ def buy_targets_sr(
     high: float,
     *,
     ratios: Sequence[float],
-    levels: Sequence["SRLevel"],
+    levels: Sequence[SRLevel],
     tick_offset: int = 0,
     kind: InstrumentKind = "stock",
 ) -> list[SRTarget]:
@@ -389,7 +389,7 @@ def sell_targets_sr(
     basis: float,
     *,
     rebound_pcts: Sequence[float],
-    levels: Sequence["SRLevel"],
+    levels: Sequence[SRLevel],
     tick_offset: int = 0,
     kind: InstrumentKind = "stock",
 ) -> list[SRTarget]:
