@@ -91,14 +91,20 @@ def test_캐시에_앱시크릿을_적지_않는다(tmp_path):
 def test_다른_환경의_캐시는_무시한다(tmp_path):
     # 실전 토큰을 모의 서버에 쏘면 인증이 깨진다. 환경이 다르면 캐시 미스로 본다.
     path = tmp_path / "kis_token.json"
-    save_token(path, AccessToken("REAL-TOK", "Bearer", NOW + timedelta(hours=5)), creds=_creds("real"))
+    save_token(
+        path, AccessToken("REAL-TOK", "Bearer", NOW + timedelta(hours=5)), creds=_creds("real")
+    )
 
     assert load_cached_token(path, creds=_creds("vts")) is None
 
 
 def test_앱키가_바뀌면_캐시를_무시한다(tmp_path):
     path = tmp_path / "kis_token.json"
-    save_token(path, AccessToken("OLD", "Bearer", NOW + timedelta(hours=5)), creds=_creds(app_key="APPKEY-A"))
+    save_token(
+        path,
+        AccessToken("OLD", "Bearer", NOW + timedelta(hours=5)),
+        creds=_creds(app_key="APPKEY-A"),
+    )
 
     assert load_cached_token(path, creds=_creds(app_key="APPKEY-B")) is None
 

@@ -44,11 +44,15 @@ data-refresh:  ## marcap 갱신분 반영 (git pull → 수정주가 재빌드 �
 api:  ## 백엔드 dev 서버 (FastAPI, :8000)
 	$(BIN)uvicorn api.main:app --reload --port 8000
 
-web: web/node_modules  ## 프런트 dev 서버 (Vite, :5173) — api 와 같이 띄워야 차트가 나온다
+web: web/node_modules/.bin/vite  ## 프런트 dev 서버 (Vite, :5173) — api 와 같이 띄워야 차트가 나온다
 	cd web && npm run dev
 
-# 락파일이 바뀌었거나 node_modules 가 없을 때만 설치한다.
-web/node_modules: web/package-lock.json
+# 락파일이 바뀌었거나 설치가 깨졌을 때만 다시 깐다.
+# **폴더가 아니라 실행파일을 기준으로 본다.** npm uninstall 은 트리를 부수면서도
+# node_modules 폴더의 시각을 새로 찍기 때문에, 폴더 기준이면 "최신"으로 보여 재설치를
+# 건너뛴다 — 그러면 `make web` 이 "vite 는 내부 또는 외부 명령이 아닙니다" 로 죽는다
+# (실측 2026-08-08: @klinecharts/pro 제거 뒤 node_modules 가 10개만 남았는데 make 는 통과).
+web/node_modules/.bin/vite: web/package-lock.json
 	cd web && npm ci
 	@touch $@
 
