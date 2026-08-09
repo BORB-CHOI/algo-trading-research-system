@@ -50,3 +50,22 @@ def derived_last_date(adjusted_dir: Path = ADJUSTED_DIR) -> pd.Timestamp | None:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     last = meta.get("source_last_date")
     return pd.Timestamp(last) if last else None
+
+
+def drop_halted(df: pd.DataFrame) -> pd.DataFrame:
+    """거래정지일 제거 — 체결이 없던 날은 봉이 아니다 (BORB-32).
+
+    marcap 은 거래정지일을 OHLC 0원 · 거래량 0 으로 남긴다. 백테스트에서 이걸 안 걸면
+    **저가가 0 이라 어떤 매수 지정가든 체결된 것으로 판정된다** — 실측 2026-08-10:
+    전 기간 검사에서 -100.5% 같은(주식으로는 불가능한) 수익률이 나왔다. 033180 은
+    1,482봉 중 668봉이 0원이었다.
+
+    화면(`api.main`)과 전략(`surge._clean`)은 이미 같은 규칙을 쓰고 있었는데 백테스트
+    경로만 빠져 있었다. 규칙은 한 곳에 둔다.
+    """
+    if df.empty:
+        return df
+    ok = (df["Open"] > 0) & (df["High"] > 0) & (df["Low"] > 0) & (df["Close"] > 0)
+    if "Volume" in df.columns:
+        ok &= df["Volume"] > 0
+    return df[ok]

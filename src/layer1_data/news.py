@@ -44,12 +44,14 @@ def market_news(limit: int = 30) -> list[dict]:
                 title = (it.findtext("title") or "").strip()
                 if not title:
                     continue
-                items.append({
-                    "title": title,
-                    "source": source,
-                    "url": (it.findtext("link") or "").strip(),
-                    "datetime": (it.findtext("pubDate") or "").strip(),
-                })
+                items.append(
+                    {
+                        "title": title,
+                        "source": source,
+                        "url": (it.findtext("link") or "").strip(),
+                        "datetime": (it.findtext("pubDate") or "").strip(),
+                    }
+                )
         except Exception:  # noqa: BLE001 — 한 소스가 죽어도 나머지는 보여준다
             continue
 
@@ -70,12 +72,16 @@ def stock_news(code: str, limit: int = 20) -> list[dict]:
         for block in data if isinstance(data, list) else []:
             for it in block.get("items", []):
                 dt = str(it.get("datetime", ""))
-                items.append({
-                    "title": str(it.get("title", "")).replace("&quot;", '"').strip(),
-                    "source": it.get("officeName", ""),
-                    "url": f"https://n.news.naver.com/mnews/article/{it.get('officeId')}/{it.get('articleId')}",
-                    "datetime": f"{dt[:4]}-{dt[4:6]}-{dt[6:8]} {dt[8:10]}:{dt[10:12]}" if len(dt) >= 12 else dt,
-                })
+                items.append(
+                    {
+                        "title": str(it.get("title", "")).replace("&quot;", '"').strip(),
+                        "source": it.get("officeName", ""),
+                        "url": f"https://n.news.naver.com/mnews/article/{it.get('officeId')}/{it.get('articleId')}",
+                        "datetime": f"{dt[:4]}-{dt[4:6]}-{dt[6:8]} {dt[8:10]}:{dt[10:12]}"
+                        if len(dt) >= 12
+                        else dt,
+                    }
+                )
     except Exception:  # noqa: BLE001
         return []
 

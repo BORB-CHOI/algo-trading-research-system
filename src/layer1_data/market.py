@@ -15,27 +15,39 @@ import yfinance as yf
 CACHE_TTL_SEC = 60
 
 GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
-    ("국내", [
-        ("^KS11", "코스피", "pt"),
-        ("^KQ11", "코스닥", "pt"),
-    ]),
-    ("해외 지수", [
-        ("^IXIC", "나스닥", "pt"),
-        ("^GSPC", "S&P 500", "pt"),
-        ("^DJI", "다우", "pt"),
-        # VIX 는 S&P500 옵션의 내재변동성이다. "공포지수"는 별명일 뿐 심리 지수가 아니고,
-        # 한국 시장 국면 판단에 쓸 지표도 아니다. 한국형 공포·탐욕 지수는 BORB-59.
-        ("^VIX", "VIX (미국 변동성)", "pt"),
-    ]),
-    ("미국 선물", [
-        ("NQ=F", "나스닥 선물", "pt"),
-        ("ES=F", "S&P 선물", "pt"),
-    ]),
-    ("환율·원자재", [
-        ("KRW=X", "달러/원", "원"),
-        ("CL=F", "WTI 유가", "$"),
-        ("GC=F", "금", "$"),
-    ]),
+    (
+        "국내",
+        [
+            ("^KS11", "코스피", "pt"),
+            ("^KQ11", "코스닥", "pt"),
+        ],
+    ),
+    (
+        "해외 지수",
+        [
+            ("^IXIC", "나스닥", "pt"),
+            ("^GSPC", "S&P 500", "pt"),
+            ("^DJI", "다우", "pt"),
+            # VIX 는 S&P500 옵션의 내재변동성이다. "공포지수"는 별명일 뿐 심리 지수가 아니고,
+            # 한국 시장 국면 판단에 쓸 지표도 아니다. 한국형 공포·탐욕 지수는 BORB-59.
+            ("^VIX", "VIX (미국 변동성)", "pt"),
+        ],
+    ),
+    (
+        "미국 선물",
+        [
+            ("NQ=F", "나스닥 선물", "pt"),
+            ("ES=F", "S&P 선물", "pt"),
+        ],
+    ),
+    (
+        "환율·원자재",
+        [
+            ("KRW=X", "달러/원", "원"),
+            ("CL=F", "WTI 유가", "$"),
+            ("GC=F", "금", "$"),
+        ],
+    ),
 ]
 
 _cache: dict[str, object] = {"at": 0.0, "data": None}
@@ -71,8 +83,17 @@ def _snapshot() -> list[dict]:
                     ]
             except (KeyError, IndexError):
                 pass
-            rows.append({"key": ticker, "name": name, "unit": unit,
-                         "price": price, "chg": chg, "asof": asof, "candles": candles})
+            rows.append(
+                {
+                    "key": ticker,
+                    "name": name,
+                    "unit": unit,
+                    "price": price,
+                    "chg": chg,
+                    "asof": asof,
+                    "candles": candles,
+                }
+            )
         out.append({"group": group, "items": rows})
     return out
 
@@ -138,16 +159,26 @@ def _intraday(ticker: str) -> list[dict]:
         df = df.droplevel(1, axis=1)
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
     return [
-        {"t": ts.strftime("%H:%M"), "o": float(r.Open), "h": float(r.High),
-         "l": float(r.Low), "c": float(r.Close)}
+        {
+            "t": ts.strftime("%H:%M"),
+            "o": float(r.Open),
+            "h": float(r.High),
+            "l": float(r.Low),
+            "c": float(r.Close),
+        }
         for ts, r in zip(df.index, df.itertuples(), strict=True)
     ]
 
 
 def _boards() -> list[dict]:
     try:
-        df = yf.download([t for t, _, _ in INDEX_BOARDS], period="5d", interval="1d",
-                         progress=False, auto_adjust=False)
+        df = yf.download(
+            [t for t, _, _ in INDEX_BOARDS],
+            period="5d",
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+        )
         daily = {t: df["Close"][t].dropna() for t, _, _ in INDEX_BOARDS}
     except Exception:  # noqa: BLE001 — 전일종가를 못 구해도 장중 포인트는 그린다
         daily = {}
@@ -164,23 +195,29 @@ def _boards() -> list[dict]:
             price = points[-1]["c"]
             if prev:
                 chg = (price / prev - 1) * 100
-        out.append({
-            "key": ticker,
-            "code": ncode,
-            "name": name,
-            "price": price,
-            "prev_close": prev,
-            "chg": chg,
-            "diff": None if (price is None or prev is None) else price - prev,
-            "intraday": points,
-            "flow": _flow(ncode),
-        })
+        out.append(
+            {
+                "key": ticker,
+                "code": ncode,
+                "name": name,
+                "price": price,
+                "prev_close": prev,
+                "chg": chg,
+                "diff": None if (price is None or prev is None) else price - prev,
+                "intraday": points,
+                "flow": _flow(ncode),
+            }
+        )
     return out
 
 
 def index_boards(force: bool = False) -> list[dict]:
     now = time.time()
-    if not force and _board_cache["data"] is not None and now - float(_board_cache["at"]) < CACHE_TTL_SEC:
+    if (
+        not force
+        and _board_cache["data"] is not None
+        and now - float(_board_cache["at"]) < CACHE_TTL_SEC
+    ):
         return _board_cache["data"]  # type: ignore[return-value]
     data = _boards()
     _board_cache.update(at=now, data=data)
