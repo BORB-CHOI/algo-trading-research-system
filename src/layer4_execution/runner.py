@@ -122,9 +122,10 @@ def _select_universe(
     hist: pd.DataFrame | None,
     exclusions: ExclusionPolicy | None,
 ) -> tuple[list[str], pd.Timestamp]:
-    """조건검색식으로 유니버스를 뽑는다. 기준일 = split 시작 직전 거래일 (1회).
+    """조건검색식으로 **검사할 종목**을 뽑는다. 기준일 = split 시작 직전 거래일 (1회).
 
-    반환: (선별 종목코드 목록(코드 오름차순 — 재현성), 기준일).
+    반환: (선별 종목코드 목록(코드 오름차순 — 재현성), 기준일, 코드→종목명).
+    종목명은 화면 표시용이다 — 코드만 보여 주면 어느 회사인지 알 수 없다(오너 2026-08-09).
     """
     parsed = cond_registry.parse_conditions(conditions)  # 형식·룩백 검증 포함 (정본 재사용)
     lookback = cond_registry.required_lookback(parsed)
@@ -147,7 +148,44 @@ def _select_universe(
     panel = cond_registry.HistPanel(hist[hist["Date"].isin(keep)], base_date)
 
     mask = cond_registry.evaluate(parsed, panel, base, logic)
-    return sorted(str(c) for c in base.index[mask]), base_date
+    picked = base.index[mask]
+    codes = sorted(str(c) for c in picked)
+    names = (
+        {str(c): str(n) for c, n in base.loc[picked, "Name"].items()}
+        if "Name" in base.columns
+        else {}
+    )
+    return codes, base_date, names
+
+
+def aggregate_returns(rets: list[float]) -> dict:
+    """순수익률 목록 → 집계 지표. **정의는 여기 한 곳뿐이다.**
+
+    보관함에서 꺼낸 결과(거래 객체가 아니라 숫자만 남아 있다)도 같은 정의로 세야
+    화면에 뜨는 숫자가 방금 돌린 것과 어긋나지 않는다.
+    """
+    n = len(rets)
+    if n == 0:
+        return {
+            "n_trades": 0,
+            "win_rate": None,
+            "avg_win": None,
+            "avg_loss": None,
+            "expectancy": None,
+            "cum_net_return": 0.0,
+            "reliable": False,
+        }
+    s = pd.Series(rets)
+    wins, losses = s[s > 0], s[s <= 0]
+    return {
+        "n_trades": n,
+        "win_rate": float((s > 0).mean()),
+        "avg_win": float(wins.mean()) if len(wins) else 0.0,
+        "avg_loss": float(losses.mean()) if len(losses) else 0.0,
+        "expectancy": float(s.mean()),
+        "cum_net_return": float((1 + s).prod() - 1),
+        "reliable": n >= MIN_RELIABLE_TRADES,
+    }
 
 
 def _aggregate(trades: list[Trade]) -> dict:
@@ -159,28 +197,7 @@ def _aggregate(trades: list[Trade]) -> dict:
     - cum_net_return: Π(1+r)−1. 순차 복리 가정(자본 배분 무시 — 모듈 docstring 한계).
     - reliable: N ≥ 30 (CLAUDE.md: N<30 신뢰 불가).
     """
-    n = len(trades)
-    if n == 0:
-        return {
-            "n_trades": 0,
-            "win_rate": None,
-            "avg_win": None,
-            "avg_loss": None,
-            "expectancy": None,
-            "cum_net_return": 0.0,
-            "reliable": False,
-        }
-    rets = pd.Series([t.net_return for t in trades])
-    wins, losses = rets[rets > 0], rets[rets <= 0]
-    return {
-        "n_trades": n,
-        "win_rate": float((rets > 0).mean()),
-        "avg_win": float(wins.mean()) if len(wins) else 0.0,
-        "avg_loss": float(losses.mean()) if len(losses) else 0.0,
-        "expectancy": float(rets.mean()),
-        "cum_net_return": float((1 + rets).prod() - 1),
-        "reliable": n >= MIN_RELIABLE_TRADES,
-    }
+    return aggregate_returns([t.net_return for t in trades])
 
 
 def run_universe(
@@ -234,7 +251,7 @@ def run_universe(
         raise ValueError("strategy.params 는 dict 여야 합니다.")
 
     split_start, split_end = (pd.Timestamp(d) for d in SPLITS[split])
-    universe, base_date = _select_universe(conditions, logic, split_start, hist, exclusions)
+    universe, base_date, _ = _select_universe(conditions, logic, split_start, hist, exclusions)
 
     per_symbol: dict[str, dict] = {}
     skipped: dict[str, str] = {}

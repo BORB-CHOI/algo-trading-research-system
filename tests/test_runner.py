@@ -103,8 +103,14 @@ def test_select_signal_fill_aggregate(catalog: None) -> None:
         "000002": make_daily("000002", "2020-01-02", [200, 200, 190, 180, 170, 160]),
     }
     res = runner.run_universe(
-        PRICE_COND, "and", STRAT, "train",
-        cost=NO_COST, exclusions=None, hist=hist, loader=data.get,
+        PRICE_COND,
+        "and",
+        STRAT,
+        "train",
+        cost=NO_COST,
+        exclusions=None,
+        hist=hist,
+        loader=data.get,
     )
     # 선별: 기준일 = split 시작 직전 거래일, 500원 초과인 000003 탈락.
     assert res["base_date"] == "2019-12-30"
@@ -129,8 +135,13 @@ def test_universe_uses_day_before_split_only(catalog: None) -> None:
     """선별 기준일은 split 시작 직전 거래일 '1회' — 그 전날 조건을 통과해도 소용없다."""
     hist = selection_hist({"000001": [100, 100], "000003": [100, 1000]}, BASE_DATES)
     res = runner.run_universe(
-        PRICE_COND, "and", STRAT, "train",
-        cost=NO_COST, exclusions=None, hist=hist,
+        PRICE_COND,
+        "and",
+        STRAT,
+        "train",
+        cost=NO_COST,
+        exclusions=None,
+        hist=hist,
         loader={"000001": make_daily("000001", "2020-01-02", [100] * 6)}.get,
     )
     # 000003 은 12-27 엔 100원(통과)이었지만 기준일(12-30) 1000원이라 탈락.
@@ -141,8 +152,13 @@ def test_missing_symbol_data_skipped(catalog: None) -> None:
     """선별은 됐는데 수정주가 파일이 없는 종목(미빌드·상폐 등)은 건너뛰고 계속 돈다."""
     hist = selection_hist({"000001": [100, 100], "000002": [200, 200]}, BASE_DATES)
     res = runner.run_universe(
-        PRICE_COND, "and", STRAT, "train",
-        cost=NO_COST, exclusions=None, hist=hist,
+        PRICE_COND,
+        "and",
+        STRAT,
+        "train",
+        cost=NO_COST,
+        exclusions=None,
+        hist=hist,
         loader={"000001": make_daily("000001", "2020-01-02", [100] * 6)}.get,
     )
     assert res["skipped"] == {"000002": "데이터 없음"}
@@ -158,8 +174,12 @@ def test_test_split_requires_explicit_consent(catalog: None) -> None:
     """test split 은 i_know_test_is_once=True 없이는 데이터 로드 전에 막힌다."""
     with pytest.raises(ValueError, match="i_know_test_is_once"):
         runner.run_universe(
-            PRICE_COND, "and", STRAT, "test",
-            cost=NO_COST, exclusions=None,
+            PRICE_COND,
+            "and",
+            STRAT,
+            "test",
+            cost=NO_COST,
+            exclusions=None,
             hist=selection_hist({"000001": [100]}, ["2024-12-30"]),
             loader={}.get,
         )
@@ -169,8 +189,13 @@ def test_test_split_runs_with_consent(catalog: None) -> None:
     """명시 동의 시 test split(2025~)이 정상 실행된다."""
     strat = {"key": "테스트전략", "params": {"buy": "2025-01-03", "sell": "2025-01-07"}}
     res = runner.run_universe(
-        PRICE_COND, "and", strat, "test",
-        cost=NO_COST, exclusions=None, i_know_test_is_once=True,
+        PRICE_COND,
+        "and",
+        strat,
+        "test",
+        cost=NO_COST,
+        exclusions=None,
+        i_know_test_is_once=True,
         hist=selection_hist({"000001": [100]}, ["2024-12-30"]),
         # 영업일: 01-02, 01-03, 01-06, 01-07, 01-08, 01-09
         loader={"000001": make_daily("000001", "2025-01-02", [100, 100, 110, 120, 130, 140])}.get,
@@ -197,9 +222,13 @@ def test_slippage_combines_with_cost(catalog: None) -> None:
     )
     k, order_notional, adv = 0.1, 1e7, 1e9  # ADV 는 합성 Amount(1e9) 그대로
     with_slip = runner.run_universe(
-        PRICE_COND, "and", STRAT, "train",
+        PRICE_COND,
+        "and",
+        STRAT,
+        "train",
         cost=CostModel(round_trip_rate=0.005),
-        slippage=SqrtImpactSlippage(k=k), order_notional=order_notional,
+        slippage=SqrtImpactSlippage(k=k),
+        order_notional=order_notional,
         **common,
     )
     round_trip_slip = 2 * k * math.sqrt(order_notional / adv)
@@ -223,8 +252,12 @@ def test_empty_conditions_rejected(catalog: None) -> None:
     """조건검색과 같은 계약: 조건 없는 유니버스는 없다 (ADR-0009 — 전 종목도 데이터로 명시)."""
     with pytest.raises(ValueError, match="조건"):
         runner.run_universe(
-            [], "and", STRAT, "train",
-            cost=NO_COST, exclusions=None,
+            [],
+            "and",
+            STRAT,
+            "train",
+            cost=NO_COST,
+            exclusions=None,
             hist=selection_hist({"000001": [100, 100]}, BASE_DATES),
             loader={}.get,
         )
@@ -233,9 +266,7 @@ def test_empty_conditions_rejected(catalog: None) -> None:
 def test_signals_to_position_mapping() -> None:
     """buy 부터 1, sell 부터 0, 신호 전 구간은 0."""
     df = make_daily("000001", "2020-01-02", [100] * 6)
-    sig = pd.DataFrame(
-        {"Date": [df["Date"].iloc[1], df["Date"].iloc[3]], "side": ["buy", "sell"]}
-    )
+    sig = pd.DataFrame({"Date": [df["Date"].iloc[1], df["Date"].iloc[3]], "side": ["buy", "sell"]})
     pos = runner.signals_to_position(df, sig)
     assert pos.tolist() == [0, 1, 1, 0, 0, 0]
 

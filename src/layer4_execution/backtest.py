@@ -139,7 +139,9 @@ def run_symbol(
         if holding is None and want == 1:
             slip_rate = 0.0
             if slippage is not None:
-                slip_rate = slippage.round_trip_rate(order_notional or 0.0, _adv_asof(df, t, adv_window))
+                slip_rate = slippage.round_trip_rate(
+                    order_notional or 0.0, _adv_asof(df, t, adv_window)
+                )
                 if not slip_rate < float("inf"):  # inf·NaN 모두 여기서 걸린다
                     continue  # 유동성 없음 — 이 진입 신호는 체결 불가로 버린다
             fill = _next_tradable(df, t + 1)

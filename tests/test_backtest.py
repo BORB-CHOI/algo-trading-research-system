@@ -48,7 +48,9 @@ def test_entry_fills_next_day_open() -> None:
 def test_suspension_delays_fill() -> None:
     """체결일이 거래정지(Amount==0)면 다음 거래 가능일로 밀린다."""
     df = make_df([100, 110, 120, 130, 140], amounts=[1e9, 1e9, 0, 1e9, 1e9])
-    pos = pd.Series([0, 1, 1, 0, 0])  # t=1 매수 신호 → t=2 정지라 t=3 체결, t=3 매도 신호 → t=4 체결
+    pos = pd.Series(
+        [0, 1, 1, 0, 0]
+    )  # t=1 매수 신호 → t=2 정지라 t=3 체결, t=3 매도 신호 → t=4 체결
     res = run_symbol(df, pos, cost=CostModel(round_trip_rate=0.0))
     assert len(res.trades) == 1
     assert res.trades[0].entry_price == 130  # t=2 정지 → t=3 시가로 체결

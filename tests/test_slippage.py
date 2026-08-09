@@ -69,7 +69,11 @@ def test_engine_skips_entry_when_no_liquidity() -> None:
     df = make_df([100, 100, 100, 100, 100], [0, 0, 1e9, 1e9, 1e9])
     pos = pd.Series([0, 1, 0, 0, 0])  # t=1 하루만 신호. 그 시점 ADV = 0
     res = run_symbol(
-        df, pos, cost=CostModel(round_trip_rate=0.0), slippage=SqrtImpactSlippage(k=0.1), order_notional=1e7
+        df,
+        pos,
+        cost=CostModel(round_trip_rate=0.0),
+        slippage=SqrtImpactSlippage(k=0.1),
+        order_notional=1e7,
     )
     assert res.trades == []
 
@@ -79,7 +83,11 @@ def test_engine_retries_next_day_when_position_still_wanted() -> None:
     df = make_df([100, 100, 100, 100, 100], [0, 0, 1e9, 1e9, 1e9])
     pos = pd.Series([0, 1, 1, 0, 0])  # t=1 ADV=0 → 버림, t=2 ADV>0 → 진입
     res = run_symbol(
-        df, pos, cost=CostModel(round_trip_rate=0.0), slippage=SqrtImpactSlippage(k=0.1), order_notional=1e7
+        df,
+        pos,
+        cost=CostModel(round_trip_rate=0.0),
+        slippage=SqrtImpactSlippage(k=0.1),
+        order_notional=1e7,
     )
     assert len(res.trades) == 1
     assert res.trades[0].signal_date == df["Date"].iloc[2]

@@ -42,7 +42,15 @@ def daily(right_bars: list[tuple[float, float, float, float]]) -> pd.DataFrame:
     for dates, bars in ((left_dates, LEFT_BARS), (right_dates, right_bars)):
         for d, (o, h, low, c) in zip(dates, bars, strict=True):
             rows.append(
-                {"Date": d, "Code": "A", "Open": o, "High": h, "Low": low, "Close": c, "Volume": 1000}
+                {
+                    "Date": d,
+                    "Code": "A",
+                    "Open": o,
+                    "High": h,
+                    "Low": low,
+                    "Close": c,
+                    "Volume": 1000,
+                }
             )
     return pd.DataFrame(rows)
 
@@ -54,14 +62,35 @@ def selection_hist() -> pd.DataFrame:
     )
 
 
+# 파동 파라미터(ADR-0013 5차 — 트레이딩뷰 Auto Fib Retracement 규격).
+# 왼쪽 합성 봉이 짧아서 좌우 봉수는 최소값(2 = 좌우 1봉).
+# 잔파동 45% 인 이유: 고점 21,000 뒤의 눌림(→15,000, -40%)은 지지/저항 피벗을 만들라고 넣은
+# 것이지 새 파동이 아니다. 기준이 40% 밑이면 그 눌림 바닥이 파동 시작으로 잡혀 시나리오가
+# 통째로 바뀐다(파동 9,000→21,000 이 15,000→17,000 이 된다).
+ZZ = {
+    "zz_depth": 2,
+    "zz_deviation": 45,
+    "zz_deviation_mode": "pct",
+    # 합성 봉엔 거래대금이 없다 — 시작점은 옛 방식(상승 전환)으로 고정한다.
+    "start_mode": "상승 전환",
+    "start_box_bars": 20,
+    "start_volume_mult": 2,
+    "start_keep_mult": 2,
+}
+
 # 지지/저항 존 파라미터(ADR-0014 개정 — 채널 규격). 폭 1%면 피벗들이 안 묶여
 # 15,000·17,000·21,000 이 각각 존이 된다 — 구 방식과 같은 스냅 시나리오 유지.
 SR = {
+    # 피보나치 선 띠 (ADR-0014 2차 개정) — 합성 봉이 성겨서 넉넉한 폭으로 둔다.
+    "fib_band_mode": "파동폭",
+    "fib_band_value": 20,
+    "sr_scope": "전체",
+    "sr_source": "꺾임점",
     "sr_prd": 1,
-    "sr_channel_width_pct": 1.0,
     "sr_loopback": 290,
+    "sr_channel_width_pct": 3,
     "sr_min_strength": 1,
-    "sr_max_channels": 5,
+    "sr_round_max_gap_pct": 5,
 }
 
 
@@ -70,7 +99,7 @@ def run(right_bars, *, sell=None, stop=None, cost=NO_COST, **kw):
         PRICE_COND,
         "and",
         "validate",
-        cycle_drop_pct=50,
+        zz=ZZ,
         sr=SR,
         buy=[{"ratio": 0.5, "weight": 100}],
         sell=sell if sell is not None else [{"rebound_pct": 10, "weight": 100}],
@@ -88,13 +117,21 @@ RIGHT_ROUND = [
     (16_000, 16_000, 15_500, 15_800),
     (15_800, 15_900, 15_000, 15_200),  # 매수 체결 (Low ≤ 15,000)
     (15_200, 15_500, 15_100, 15_400),
-    (15_400, 17_500, 15_300, 17_200),  # 매도 체결 (High ≥ 17,000)
+    (15_400, 17_500, 15_300, 17_200),  # 매도 체결 (High ≥ 16,000)
 ]
 
 
 def test_round_trip_buy_at_support_sell_at_resistance() -> None:
-    """매수 = 50% 되돌림(15,000)에서 가장 가까운 지지선, 매도 = 평단+10%(16,500)에서
-    가장 가까운 기준가 위 저항선(17,000). 비용 0 이면 net = 17,000/15,000 − 1."""
+    """매수 = 50% 선이 들어간 자리의 라운드 가격, 매도 = 평단+10%(16,500) 위 첫 자리.
+
+    ADR-0014 7차 개정 — 자리를 먼저 만들고 되돌림 선을 배정한다. 꺾임점이 15,000·17,000
+    둘뿐이라 자리도 둘(폭 3%면 13% 떨어진 둘은 안 묶인다).
+      50%   15,000 → 자리 15,000 **안** → 15,000
+      38.2% 16,416 → 두 자리 사이 빈틈 → **아래 자리** 15,000
+      23.6% 18,168 → 빈틈 → 아래 자리 17,000
+    매도 후보는 15,000·17,000 이고 16,500 위 첫 자리가 17,000 이다.
+    (6차까지는 38.2% 가 16,000 을 만들어 매도가 16,000 이었다 — 그건 밴드 안 봉들의
+    아래끝~위끝을 자리라고 부르던 때의 값이다.)"""
     out = run(RIGHT_ROUND)
     assert out["universe"] == 1 and out["no_fill"] == 0 and not out["skipped"]
     r = out["results"][0]
@@ -144,17 +181,19 @@ def test_open_position_marked_at_last_close() -> None:
     assert r["net_return"] == pytest.approx(16_000 / 15_000 - 1)
 
 
-def test_buy_targets_stay_inside_fib_range() -> None:
-    """목표가 후보는 피보 구간(78.6% 레벨~고점) 안만 (ADR-0014 개정 2 회귀 고정).
+def test_깊은_차수는_아래_자리까지_내려간다() -> None:
+    """78.6% 선 11,568 아래에는 파동 바닥 자리(9,000)뿐이다 — 거기에 건다.
 
-    78.6% 목표가 11,568 에는 사이클 저점 존 9,000 이 더 가깝지만(거리 2,568 < 3,432),
-    존은 최근 구간 전체에서 나오므로 필터 없이는 사이클 밖 심저가에 지정가가 걸린다
-    (검증 에이전트 지적 2026-08-06). 구간 안 최근접 15,000 이 선택돼야 한다."""
+    ADR-0014 7차 개정 전에는 밴드(±2,400) 안에서만 찾아 15,000 이 나왔다. 이제는 "선이
+    자리 안이면 그 자리, 빈틈이면 바로 아래 자리"라서 9,000 이다. 위쪽 자리를 주면
+    되돌림이 아니라 추격 매수가 되므로 아래로 내려가는 게 맞다.
+
+    이 시나리오의 저가는 15,000 까지라 9,000 은 안 걸린다 — 미체결로 남는다."""
     out = run_strategy_one(
         PRICE_COND,
         "and",
         "validate",
-        cycle_drop_pct=50,
+        zz=ZZ,
         sr=SR,
         buy=[{"ratio": 0.786, "weight": 100}],
         sell=[],
@@ -163,7 +202,8 @@ def test_buy_targets_stay_inside_fib_range() -> None:
         hist=selection_hist(),
         loader=lambda code: daily(RIGHT_ROUND),
     )
-    assert out["results"][0]["avg_entry"] == 15_000.0
+    assert out["no_fill"] == 1
+    assert out["results"] == []
 
 
 def test_test_split_requires_explicit_consent() -> None:
@@ -172,7 +212,7 @@ def test_test_split_requires_explicit_consent() -> None:
             PRICE_COND,
             "and",
             "test",
-            cycle_drop_pct=50,
+            zz=ZZ,
             sr=SR,
             buy=[{"ratio": 0.5, "weight": 100}],
             sell=[],
