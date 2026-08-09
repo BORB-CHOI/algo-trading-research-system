@@ -3,7 +3,12 @@ import type { Dispatch, ReactNode, SetStateAction } from 'react'
 import type { ConditionDef, StrategyDef } from '../../../api'
 import { Card, KV } from '../../components/ui'
 import { BuyStages, SellStages, type ComputedPrices } from '../SplitStages'
-import { STRATEGY_ONE_WAVE, isFixedDefinition } from '../strategyOne'
+import {
+  DEFAULT_FIB_STOP_RATIO,
+  FIB_STOP_CHOICES,
+  STRATEGY_ONE_WAVE,
+  isFixedDefinition,
+} from '../strategyOne'
 import type { ScreenDef, Screens } from '../screenStore'
 import {
   deleteStrategy,
@@ -187,12 +192,13 @@ export function StrategyStep(props: {
               <p className="hint">{entryDef.desc}</p>
               {/* 전략 1호(피보나치)의 파동·지지저항 값은 고정 정의 — 입력칸을 안 보여준다
                   (오너 결정 2026-08-06: "시작점·고점은 자동으로 구하는 건데 입력값을 왜
-                  내가 만지나"). 값 변경은 STRATEGY_ONE_WAVE 정의에서. 다른 기법은 그대로. */}
+                  내가 만지나"). 값은 ③에서 돌려보고, 정본은 STRATEGY_ONE_WAVE. */}
               {isFixedDefinition(entryDef.key) ? (
                 <p className="hint">
-                  시작점(사이클 저점)·고점·지지저항 전부 자동 탐지 — 정의: 사이클 -{STRATEGY_ONE_WAVE.cycleDropPct}%
-                  · 지지저항은 트레이딩뷰 표준(Support Resistance Channels) 방식으로
-                  강한 존 최대 {STRATEGY_ONE_WAVE.srMaxChannels}개
+                  파동 바닥·꼭대기·지지저항 전부 자동으로 잡는다. 시작점은 이번 상승장이 시작된
+                  지점(좌우 {STRATEGY_ONE_WAVE.zzDepth / 2}봉으로 꼭대기·바닥을 찾고, 종가가 직전
+                  꼭대기를 넘어선 때의 바닥). 지지저항은 <b>피보나치 선 위아래 밴드 안</b>에서만
+                  찾고, 그 안의 라운드 가격이 주문가다. 값은 차트 패널의 전략에서 돌려본다.
                 </p>
               ) : (
                 <ParamInputs
@@ -211,6 +217,19 @@ export function StrategyStep(props: {
 
         <Card title="분할 매수" sub="되돌림 레벨에서 가장 가까운 지지/저항선에 건다 (ADR-0014)">
           <BuyStages stages={draft.buy} computed={computed} onChange={(b) => set('buy', b)} />
+          <KV label="차수 사이 최소 간격" style={{ marginTop: 8 }}>
+            <input
+              className="amt"
+              placeholder="10"
+              value={draft.buyMinGapPct}
+              onChange={(e) => set('buyMinGapPct', e.target.value)}
+            />
+            <span className="unit">%</span>
+          </KV>
+          <p className="hint">
+            다음 차수는 앞 차수보다 최소 이만큼 아래여야 한다. 0 = 안 쓴다. 안 쓰면 200,000 과
+            220,000 처럼 9% 밖에 안 벌어진 두 차수가 나올 수 있다.
+          </p>
           <KV label="호가 오프셋" style={{ marginTop: 8 }}>
             <input
               className="amt"
@@ -238,7 +257,7 @@ export function StrategyStep(props: {
           <p className="hint">반등 목표가에서 가장 가까운 기준가 위 지지/저항선 ± 오프셋에 건다.</p>
         </Card>
 
-        <Card title="손절" sub="평단 -% 또는 지지저항 ±N호가">
+        <Card title="손절" sub="평단 -% · 되돌림 선 · 지지저항 ±N호가">
           <KV label="사용">
             <span className="radios" style={{ marginLeft: 'auto' }}>
               <label>
@@ -256,6 +275,10 @@ export function StrategyStep(props: {
                     평단 대비 %
                   </label>
                   <label>
+                    <input type="radio" checked={draft.stopMode === 'fib'} onChange={() => set('stopMode', 'fib')} />
+                    되돌림 선
+                  </label>
+                  <label>
                     <input type="radio" checked={draft.stopMode === 'support'} onChange={() => set('stopMode', 'support')} />
                     지지저항 기준
                   </label>
@@ -266,6 +289,37 @@ export function StrategyStep(props: {
                   <input className="amt" placeholder="3" value={draft.stopPct} onChange={(e) => set('stopPct', e.target.value)} />
                   <span className="unit">% 아래</span>
                 </KV>
+              ) : draft.stopMode === 'fib' ? (
+                <>
+                  <KV label="어느 선">
+                    <select
+                      style={{ flex: 1 }}
+                      value={draft.stopFibRatio}
+                      onChange={(e) => set('stopFibRatio', e.target.value)}
+                    >
+                      {FIB_STOP_CHOICES.map((r, i) => (
+                        <option key={r} value={String(r)}>
+                          {(r * 100).toFixed(1)}% 선 ({i + 1}번째
+                          {i === FIB_STOP_CHOICES.length - 1 ? ' · 기본' : ''})
+                        </option>
+                      ))}
+                    </select>
+                  </KV>
+                  <KV label="그 선에서">
+                    <input
+                      className="amt"
+                      placeholder="0"
+                      value={draft.stopTicks}
+                      onChange={(e) => set('stopTicks', e.target.value)}
+                    />
+                    <span className="unit">호가</span>
+                  </KV>
+                  <p className="hint">
+                    올라간 구간을 되돌린 자리에서 자릅니다. 평단이 아니라 <b>파동</b>으로
+                    정해지는 자리라, 몇 번에 나눠 샀든 손절선은 그대로입니다.
+                    78.6% 선까지 밀렸다는 건 오른 폭을 거의 다 반납했다는 뜻입니다.
+                  </p>
+                </>
               ) : (
                 <>
                   <KV label="기준선">
@@ -303,6 +357,39 @@ export function StrategyStep(props: {
             </>
           )}
           <p className="hint">목표가·손절선·체결 마커는 ③ 시뮬레이션 탭에서 본다.</p>
+        </Card>
+
+        {/* 오너 2026-08-10: "다 팔고 또 그자리에 오는 걸 매수할지 말지" — 전략마다 다르게
+            두고 ④에서 둘을 각각 돌려 비교한다. ③ 시뮬레이션은 라운드 하나만 그리므로
+            여기 값은 ④ 전 기간 검사에서만 뜻이 있다. */}
+        <Card title="다 팔고 난 뒤" sub="같은 자리에 또 왔을 때 다시 살지">
+          <KV label="다시 매수">
+            <span className="radios" style={{ marginLeft: 'auto' }}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={draft.reenterSameWave}
+                  onChange={(e) => set('reenterSameWave', e.target.checked)}
+                />
+                같은 자리라도 다시 산다
+              </label>
+            </span>
+          </KV>
+          <p className="hint">
+            {draft.reenterSameWave ? (
+              <>
+                다 팔고 나서 그 종목이 검색식에 또 걸리면, 되돌림 선이 그대로여도 같은 값에
+                다시 겁니다. <b>손절로 끝난 경우에도 다시 삽니다</b> — 자리가 계속 무너지면
+                같은 손실이 반복될 수 있으니 결과에서 손절 횟수를 같이 보세요.
+              </>
+            ) : (
+              <>
+                다 판 뒤에는 <b>새 고점이 나와 되돌림 선이 다시 그어져야</b> 삽니다. 이미
+                걸어 뒀던 자리를 반복해서 사지 않습니다.
+              </>
+            )}{' '}
+            ④ 백테스팅의 <b>전 기간</b> 검사에서만 뜻이 있습니다.
+          </p>
         </Card>
 
         {/* "매수 주문조건" 카드는 삭제했다 (오너 지적 2026-08-05).

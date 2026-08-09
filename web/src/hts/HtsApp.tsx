@@ -56,6 +56,7 @@ const TICKER_MS = 60_000
 
 // 기본 레이아웃을 바꿀 때 키를 올린다 — 안 올리면 브라우저에 저장된 옛 배치가 계속 이긴다.
 const LAYOUT_KEY = 'hts-layout-v2'
+import { writeBoth } from './store'
 
 let seq = 0
 
@@ -240,7 +241,7 @@ export function HtsApp() {
     }
     if (!restored) defaultLayout(e.api)
     e.api.onDidLayoutChange(() => {
-      localStorage.setItem(LAYOUT_KEY, JSON.stringify(e.api.toJSON()))
+      writeBoth(LAYOUT_KEY, e.api.toJSON())
     })
     e.api.onDidActivePanelChange(({ panel }) => {
       if (panel) setActiveKind(panel.view.contentComponent)

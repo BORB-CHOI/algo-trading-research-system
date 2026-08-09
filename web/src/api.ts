@@ -235,7 +235,8 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 export type SignalsRequest = {
   code: string
   strategy: string
-  params: Record<string, number> // 정량 값은 전부 여기 — 서버 기본값 없음
+  // 정량 값은 전부 여기 — 서버 기본값 없음. 문자열은 드롭다운 값("자동"·"고정") 뿐이다.
+  params: Record<string, number | string>
   start?: string
   end?: string
 }
@@ -257,11 +258,17 @@ export type OverlayLine = {
   label: string // "38.2%" / "지지저항 (고점·저점 3개)" / "사이클 저점" 등 우측 라벨
   // buy/sell/stop 은 시뮬레이션(POST /api/simulate)이 내는 매매 목표가·손절가다.
   // 시각 전용이라는 점은 같지만 선 굵기·색을 달리해 "판단 대상"임을 구분한다.
-  kind: 'fib' | 'sr' | 'anchor' | 'buy' | 'sell' | 'stop'
+  kind: 'fib' | 'sr' | 'anchor' | 'buy' | 'sell' | 'stop' | 'ob' | 'fvg'
   // sr 존(ADR-0014 개정 — TradingView Support Resistance Channels)은 폭 있는 띠라
   // 상단/하단이 같이 온다. 있으면 반투명 띠 + 중앙선으로 그린다.
   top?: number
   bottom?: number
+  /** 이미 지나가 버린 자리(메워진 빈틈·뚫린 오더블록) — 흐리게 그린다. */
+  dim?: boolean
+  /** 그 자리가 생긴 날('YYYY-MM-DD'). 있으면 그 봉부터 오른쪽으로만 그린다 —
+   *  오더블록·빈틈은 생기기 전 과거엔 없던 자리다. 지지저항·피보나치는 안 준다
+   *  (시점과 무관한 수평 자리라 화면을 가로지르는 게 맞다). */
+  start?: string
 }
 
 export type OverlayTouch = {
@@ -296,7 +303,7 @@ export type OverlayAnchors = {
 export type OverlayRequest = {
   code: string
   strategy: string // "fib_retrace"
-  params: Record<string, number>
+  params: Record<string, number | string>
   end?: string
 }
 
@@ -324,34 +331,67 @@ export type SimStagePayload = {
   price_override?: number
 }
 
-export type SimulateRequest = {
+/** 잔파동 거르는 기준 — 자동 = 그 종목 하루 변동폭의 N배, 고정 = N%.
+ *  값은 서버가 그대로 받는 한국어 표기다(조건검색 select 값과 같은 관례). */
+export type DeviationMode = '자동' | '고정'
+
+/** 피보나치 선 위아래 띠를 재는 방법 — 서버 `fib_zone.BAND_MODES` 의 키 그대로.
+ *  자동 = 그 종목 하루 변동폭(ATR)의 N배 / 파동폭 = 바닥→꼭대기 폭의 N% / 가격 = 그 선의 N%. */
+export type BandMode = '자동' | '파동폭' | '가격'
+
+/** 지지저항을 어느 구간에서 찾을지 — 서버 `fib_zone.SR_SCOPES` 그대로. */
+export type SrScope = '파동 구간' | '최근 N봉' | '전체'
+
+/** 지지저항 자리 후보를 어디서 뽑나 — 서버 `support_resistance.SEED_SOURCES` 그대로. */
+export type SrSource = '고가·저가 전부' | '꺾임점'
+
+/** 파동 시작점을 잡는 법 — 서버 `base_breakout.START_MODES` 그대로.
+ *  평평한 구간 돌파 = 옆으로 기던 구간을 거래대금이 늘며 뚫은 날 (ADR-0013 7차)
+ *  상승 전환       = 값이 직전 꼭대기를 넘어선 때의 바닥 (6차, 비교용) */
+export type StartMode = '평평한 구간 돌파' | '상승 전환'
+
+/** 시작점 파라미터 — SimulateRequest·BacktestRequest 공용. */
+export type StartParams = {
+  start_mode: StartMode
+  start_box_bars: number // 평평한 구간으로 볼 봉 수
+  start_volume_mult: number // 돌파한 날 거래대금 = 그 구간 평균의 몇 배
+  start_keep_mult: number // 돌파 뒤 같은 봉 수 동안의 평균 = 몇 배
+}
+
+export type SimulateRequest = StartParams & {
   code: string
   end?: string
-  cycle_drop_pct: number // 사이클 하락 기준(%) — 파동 = 상승장 사이클 하나뿐(ADR-0013)
-  // 변동성 방식(ADR-0013 개정 3차). 주면 이쪽을 쓴다 — 종목마다 기준이 자동으로 달라진다.
-  cycle_vol_mult?: number
-  cycle_min_bars?: number
-  cycle_lookback_bars?: number
-  // 지지/저항 존 — TradingView Support Resistance Channels 포팅(ADR-0014 개정)
-  sr_prd: number // 피벗 기준(좌우 N거래일)
-  sr_channel_width_pct: number // 존 최대 폭 — 최근 300봉 가격폭 대비 %
-  sr_loopback: number // 피벗 탐색 구간(봉)
-  sr_min_strength: number // 최소 강도
-  sr_max_channels: number // 남길 존 수(강도순)
+  // 파동(올라간 구간) — TradingView 내장 Auto Fib Retracement 포팅(ADR-0013 5차)
+  zz_depth: number // 꼭대기·바닥 판단 — 좌우 zz_depth÷2 봉 창의 극값
+  zz_deviation: number // 이만큼은 움직여야 한 파동 (자동이면 배, 고정이면 %)
+  zz_deviation_mode?: DeviationMode
+  // 피보나치 선 위아래 밴드 — 이 안에서만 지지저항을 찾는다 (ADR-0014 2차 개정)
+  fib_band_mode: BandMode
+  fib_band_value: number
+  sr_scope: SrScope
+  sr_source: SrSource
+  sr_prd: number // 고점·저점 잡는 폭(좌우 N봉)
+  sr_loopback: number // '최근 N봉' 범위일 때 거슬러 볼 봉 수
+  sr_channel_width_pct: number // 한 자리로 묶는 폭 — 그 자리 가격 대비 %
+  sr_min_strength: number // 그 자리에 최소 몇 번은 닿아야
+  sr_round_max_gap_pct: number // 주문가가 되돌림 선에서 떨어져도 되는 폭(%)
   buy: SimStagePayload[]
   sell: SimStagePayload[]
   sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high' // anchor_high = 사이클 고점
   buy_tick_offset?: number // 매수 = 선택된 지지/저항선 ±N호가
   sell_tick_offset?: number
+  buy_min_gap_pct?: number // 매수 차수 사이 최소 간격(%). 0 = 안 씀
   qty?: number // ② 주문수량 — 주면 체결 내역(수량·손익)까지 온다
   qty_type?: 'shares' | 'amount'
   stop?: {
     enabled: boolean
-    mode: 'pct' | 'support'
+    // pct = 평단 -%, support = 기준선, fib = 되돌림 선(파동으로 자리가 정해진다)
+    mode: 'pct' | 'support' | 'fib'
     pct?: number
     source?: 'cycle_low' | 'custom'
     custom_price?: number
     tick_offset?: number // 기준선 ±N호가
+    fib_ratio?: number // mode=fib — 0.786 = 5번째 선
   }
 }
 
@@ -377,15 +417,16 @@ export type SimTrades = {
 
 export type SimulateResponse = {
   code: string
-  // 상승장 사이클 = 피보 구간. confirmed=false = 하락 기준 미충족 — 구간 최저가로 대신함.
+  // 올라간 구간 = 피보 구간. confirmed=false = 확정된 바닥 없음 — 구간 최저가로 대신함.
+  // falling=true = 꼭대기 찍고 내려오는 중.
   cycle: {
     low_date: string
     low_price: number
     high_date: string
     high_price: number
     gain_pct: number
-    drop_pct: number
     confirmed: boolean
+    falling: boolean
     is_52w_high: boolean
   }
   sell_basis_price: number | null // 매도 반등률의 기준가 — 화면에 명시한다(2026-08-06 오해 방지)
@@ -403,27 +444,53 @@ export async function postSimulate(req: SimulateRequest): Promise<SimulateRespon
 
 // ── ④ 백테스팅 (POST /api/backtest) — 전략 1호 전수 검사 (ADR-0013·0014) ──
 
-export type BacktestRequest = {
+export type BacktestRequest = StartParams & {
   split: 'train' | 'validate' | 'test'
   conditions: ScreenCondition[]
   logic: 'and' | 'or'
-  cycle_drop_pct: number
+  zz_depth: number
+  zz_deviation: number
+  zz_deviation_mode?: DeviationMode
+  fib_band_mode: BandMode
+  fib_band_value: number
+  sr_scope: SrScope
+  sr_source: SrSource
   sr_prd: number
-  sr_channel_width_pct: number
   sr_loopback: number
+  sr_channel_width_pct: number
   sr_min_strength: number
-  sr_max_channels: number
+  sr_round_max_gap_pct: number
   buy: SimStagePayload[]
   sell: SimStagePayload[]
   sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high'
   buy_tick_offset?: number
   sell_tick_offset?: number
+  buy_min_gap_pct?: number
+  label?: string // 보관함에 남길 이름
+  screen_name?: string // 어떤 검색식으로 돌렸나
   stop?: SimulateRequest['stop']
   i_know_test_is_once?: boolean // §4.1 — Test 는 단 1회, UI 명시 체크 필수
+  /** 다 팔고 같은 자리에 또 오면 다시 살지. 전 기간 검사에서만 뜻이 있다. */
+  reenter_same_wave?: boolean
+}
+
+export type BacktestFill = {
+  time: string // 'YYYY-MM-DD'
+  side: 'buy' | 'sell'
+  price: number
+  w: number // 비중(매수는 차수 비중, 매도는 청산한 비중)
+}
+
+export type BacktestOrder = {
+  tranche: number
+  price: number | null // 매도는 걸 자리가 없으면 null
+  ratio?: number // 매수 — 되돌림 비율
+  rebound_pct?: number // 매도 — 반등률
 }
 
 export type BacktestRow = {
   code: string
+  name: string
   n_buys: number
   stopped: boolean
   avg_entry?: number
@@ -432,14 +499,33 @@ export type BacktestRow = {
   last_exit?: string
   gross_return?: number
   net_return?: number
+  // 왜 이렇게 됐나 — 행을 펴면 보이는 근거 (오너 2026-08-09)
+  wave_low?: number
+  wave_low_date?: string
+  wave_high?: number
+  buy_orders?: BacktestOrder[]
+  sell_orders?: BacktestOrder[]
+  sell_basis_price?: number | null
+  low_in_span?: number // 검사 구간의 최저가 — 못 산 종목이 얼마나 모자랐나
+  fills?: BacktestFill[]
+  stop_price?: number // 손절선 — 어디서 자르기로 걸었나
+  open?: boolean // 구간 끝까지 안 팔림 (마지막 종가로 평가)
+  plan_date?: string // 전 구간 검사 — 이 라운드를 시작한 날(검색식에 걸린 날)
 }
 
 export type BacktestResponse = {
-  split: string
-  base_date: string // 유니버스 선별 기준일 (split 시작 직전 거래일)
-  universe: number
+  split: string // train | validate | test | all(전 구간)
+  split_start: string // 검사 구간 시작
+  split_end: string // 검사 구간 끝
+  base_date: string | null // 종목을 고른 날. 전 구간 검사는 매일 고르므로 null
+  picked: number // 그날 검색식에 걸린 종목 수
+  picked_names: { code: string; name: string }[]
+  universe: number // 옛 이름 — picked 와 같다
   results: BacktestRow[] // 체결된 종목만, 순수익률 내림차순
   no_fill: number // 매수 미체결(거래 아님 — 통계 제외)
+  no_fill_rows: BacktestRow[] // 그 종목들 — 왜 안 걸렸는지 지정가를 볼 수 있다
+  run_id: number | null // 보관함 번호. null 이면 저장 실패(warnings 참조)
+  warnings?: string[]
   skipped: Record<string, string>
   metrics: {
     n_trades: number
@@ -450,10 +536,80 @@ export type BacktestResponse = {
     cum_net_return: number
     reliable: boolean // N ≥ 30 (CLAUDE.md: N<30 신뢰 불가)
   }
+  // ── 전 구간 검사(walk_forward)에만 실리는 값 ──
+  trading_days?: number // 검색식을 돌린 거래일 수
+  screened_events?: number // (날짜×종목) 걸린 횟수 합
+  codes?: number // 한 번이라도 걸린 종목 수
+  open_rounds?: number // 구간 끝까지 안 팔린 라운드
+  closed_metrics?: BacktestResponse['metrics'] // 안 팔린 걸 뺀 성적
 }
 
 export async function postBacktest(req: BacktestRequest): Promise<BacktestResponse> {
   return postJson('/api/backtest', req)
+}
+
+// ── ④-b 전 구간 — 거래일마다 다시 고르는 검사 (POST /api/backtest/all) ──
+// 몇 분 걸린다. 한 요청으로 붙들면 브라우저가 먼저 끊으므로 **시작 / 진행 확인**으로 나눈다.
+
+export type BacktestAllStatus = {
+  status: 'running' | 'done' | 'error'
+  phase: string // '종목 고르는 중' | '매매 검사 중'
+  done: number
+  total: number
+  start?: string
+  end?: string
+  result?: BacktestResponse
+  detail?: string // status=error 일 때 사유
+}
+
+export async function postBacktestAll(
+  req: BacktestRequest & { start: string; end: string },
+): Promise<{ job_id: string }> {
+  return postJson('/api/backtest/all', req)
+}
+
+export async function fetchBacktestAll(jobId: string): Promise<BacktestAllStatus> {
+  return getJson(`/api/backtest/all/${jobId}`)
+}
+
+// ── 백테스트 보관함 (GET /api/runs) ──
+// 돌린 결과는 자동으로 담긴다. 여기는 **꺼내 보는 쪽** — 목록에서 골라 ④ 표에 다시 띄운다.
+
+export type SavedRun = {
+  id: number
+  ran_at: string // ISO
+  label: string
+  split: string
+  split_start: string
+  split_end: string
+  base_date: string // 전 기간 검사는 빈 문자열
+  screen: string
+  picked: number
+  n_trades: number
+  win_rate: number | null
+  expectancy: number | null
+  cum_return: number | null
+}
+
+/** 보관함에서 꺼낸 결과 — 화면 계약은 방금 돌린 것과 같다(같은 표·같은 지표). */
+export type SavedRunResult = BacktestResponse & {
+  ran_at: string
+  label: string
+  screen: string
+}
+
+export async function fetchRuns(limit = 50): Promise<SavedRun[]> {
+  const { runs } = await getJson<{ runs: SavedRun[] }>(`/api/runs?limit=${limit}`)
+  return runs
+}
+
+export async function fetchRunResult(runId: number): Promise<SavedRunResult> {
+  return getJson(`/api/runs/${runId}/result`)
+}
+
+export async function deleteRun(runId: number): Promise<void> {
+  const res = await fetch(`/api/runs/${runId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`삭제 실패 (${res.status})`)
 }
 
 export async function fetchCandles(
@@ -551,4 +707,91 @@ export async function fetchNews(code?: string, limit = 20): Promise<NewsItem[]> 
   if (code) p.set('code', code)
   const { items } = await getJson<{ items: NewsItem[] }>(`/api/news?${p.toString()}`)
   return items
+}
+
+// ── 지지저항 (GET /api/support-resistance) — **차트 기능**이지 전략이 아니다 ──
+// 오너 2026-08-09: "애초에 지지저항을 기법으로 원한 게 아니라 차트 기능으로 생각한 건데."
+// 그래서 /api/strategies 카탈로그에 없고 차트 도구 막대에서 켜고 끈다.
+// 값은 트레이딩뷰 Support Resistance Channels 원본 기본값 — 화면 입력칸을 만들지 않는다
+// (오너: "시뮬레이션 화면에서 지지저항 관련된 커스텀은 다 지우고").
+//
+// **거슬러 볼 봉 수는 고정값이 아니라 "화면에 보이는 봉"이다.** 차트 기능이니까 지금
+// 보고 있는 구간을 설명해야 한다. 290봉 고정으로 뒀더니 24만원짜리 삼성전자에 작년
+// 7만원대 자리가 떴다(오너 지적 2026-08-09 — 피보나치 쪽에서 이미 겪은 것과 같은 문제).
+// 차트 기능(도구 막대 [지지저항]) 기본값. 개수 상한(max_lines)은 **없다** —
+// 오너 2026-08-09: "지금 차트에서 보이는 봉 갯수 내에서의 지지저항을 다 그려줘야지".
+//
+// 좌우 10봉 → 5봉: 21봉 창에서 제일 높아야 인정이라 최근 자리를 통째로 놓쳤다.
+// 실측(기준일 2026-08-04, 200봉) 삼성전자 꺾임점 8개 → 18개, 240,000 이 잡힌다.
+//
+// 폭 5% → 2%: 뜻이 바뀌었다. 전엔 "최근 300봉 가격폭"의 5% 라 절대 금액이었고,
+// 삼성전자에선 16,040원 = 5만원 구간에서 32% 폭이었다(하이닉스는 96%). 이제 그 자리
+// 가격의 % 다 — 2%면 5만원에서 1,000원, 250만원에서 5만원.
+export const SR_TOOL_DEFAULTS = {
+  // 자리 후보 = 모든 봉의 고가·저가. '꺾임점'만 쓰면 사람이 보는 자리를 놓친다 —
+  // 하이닉스가 2026-04-21~24 나흘 내리 119만대에서 받쳤는데 연속이라 꺾임점이 아니었다.
+  source: '고가·저가 전부',
+  prd: 5, // '꺾임점'을 골랐을 때만 쓴다 (좌우 봉수)
+  width_pct: 2, // 한 자리로 묶는 폭 — **그 자리 가격** 대비 %
+  min_turns: 5, // 이만큼은 닿아야 자리로 친다 (실측 200봉에서 종목당 28~31자리)
+} as const
+
+export type SupportResistanceResponse = {
+  code: string
+  anchors: OverlayAnchors
+  lines: OverlayLine[]
+  touches: OverlayTouch[]
+}
+
+// ── 오더블록 · 가격 빈틈(FVG) (GET /api/price-zones) ──────────────
+// 지지저항과 **따로** 켜고 끈다 — 셋이 서로 다른 자리를 짚는다(ADR-0014 5차 개정).
+// 실측(기준일 2026-08-04, 200봉): 삼성전자 250,000 은 오더블록이 짚고, SK하이닉스
+// 120만은 '여러 번 닿은 자리'만 짚는다. 하나로 합치면 어느 근거인지 알 수 없다.
+export type PriceZoneKind = '오더블록' | '가격 빈틈'
+
+export const ZONE_TOOL_DEFAULTS = {
+  push_pct: 5, // 오더블록: 하루 몸통이 이만큼(%) 움직여야 '세게 밀었다'
+  min_gap_pct: 1, // 빈틈: 그 가격의 이만큼(%) 이상 벌어져야 자리로 친다
+  lookback_bars: 10, // 오더블록: 밀어낸 봉에서 몇 봉 뒤까지 반대색 봉을 찾나
+  // 이미 지나간 자리도 흐리게 보여준다 (오너 2026-08-09: "일단 보이게 해봐").
+  // 과거에 어디서 갭이 떴는지가 보여야 지금 자리가 왜 의미 있는지 읽힌다.
+  alive_only: false,
+} as const
+
+/** 화면에 보이는 구간. `start`·`end` 는 **왼쪽 끝·오른쪽 끝 봉의 날짜**다.
+ *
+ *  주봉·월봉에서는 "보이는 봉 200개"가 일봉 200개가 아니다. 계산은 언제나 일봉으로 하므로
+ *  날짜로 넘겨야 구간이 맞는다(오너 지적 2026-08-09). `bars` 는 `start` 를 못 구했을 때
+ *  쓰는 대비값이다. `end` 오른쪽은 서버가 보지 않는다(미래 못 봄). */
+export type VisibleWindow = { bars: number; start?: string; end?: string }
+
+function windowParams(p: URLSearchParams, w: VisibleWindow): URLSearchParams {
+  p.set('bars', String(Math.max(20, Math.round(w.bars))))
+  if (w.start) p.set('start', w.start)
+  if (w.end) p.set('end', w.end)
+  return p
+}
+
+export async function fetchPriceZones(
+  code: string,
+  kind: PriceZoneKind,
+  w: VisibleWindow,
+): Promise<SupportResistanceResponse> {
+  const p = new URLSearchParams({
+    code,
+    kind,
+    ...Object.fromEntries(Object.entries(ZONE_TOOL_DEFAULTS).map(([k, v]) => [k, String(v)])),
+  })
+  return getJson(`/api/price-zones?${windowParams(p, w).toString()}`)
+}
+
+export async function fetchSupportResistance(
+  code: string,
+  w: VisibleWindow,
+): Promise<SupportResistanceResponse> {
+  const p = new URLSearchParams({
+    code,
+    ...Object.fromEntries(Object.entries(SR_TOOL_DEFAULTS).map(([k, v]) => [k, String(v)])),
+  })
+  return getJson(`/api/support-resistance?${windowParams(p, w).toString()}`)
 }

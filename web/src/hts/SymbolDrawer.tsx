@@ -8,6 +8,7 @@ import { MiniCandles } from './MiniCandles'
 // "차트 크게" 를 누르면 차트 패널로 넘긴다 — 상세는 차트가, 요약은 여기가 맡는다.
 
 const WL_KEY = 'hts-watchlist'
+import { writeBoth } from './store'
 const NEWS_N = 4
 
 type Props = {
@@ -26,7 +27,7 @@ function addToWatchlist(sym: SymbolPick): string {
   const group = Object.keys(wl)[0] ?? '관심종목1'
   const items = wl[group] ?? []
   if (items.some((i) => i.code === sym.code)) return `이미 [${group}] 에 있습니다.`
-  localStorage.setItem(WL_KEY, JSON.stringify({ ...wl, [group]: [...items, sym] }))
+  writeBoth(WL_KEY, { ...wl, [group]: [...items, sym] })
   notifyWatchlistChanged()
   return `[${group}] 에 담았습니다.`
 }

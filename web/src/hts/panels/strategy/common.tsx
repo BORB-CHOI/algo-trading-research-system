@@ -1,19 +1,25 @@
 // 전략 화면(①~④) 스텝들이 함께 쓰는 상수·헬퍼·소형 컴포넌트 —
 // StrategyPanel.tsx 분할(구조 리팩토링 2026-08-06) 때 원본에서 그대로 옮겼다. 값·마크업 불변.
 
-import type { ConditionDef, ConditionParamDef } from '../../../api'
-import { KV } from '../../components/ui'
-import type { SavedCondition, SellBasis } from '../strategyStore'
+import { useState } from 'react'
+import type { ConditionDef, ConditionParamDef, SimulateRequest, Symbol } from '../../../api'
+import { SymbolResults } from '../../components/SymbolResults'
+import { Chip, Chips, KV } from '../../components/ui'
+import { useListCursor, useLiveSearch } from '../../components/useLiveSearch'
+import type { SavedCondition, SellBasis, StrategyDraft } from '../strategyStore'
 
-// ③ 시뮬레이션 확인용 종목 — 전략 1호 정의(특히 시작점)를 차트로 비교하려고 둔다.
-// 성격이 다른 셋: 크게 오른 종목 / 중간 / 고점에서 크게 밀린 종목 (오너 지시 2026-08-07).
-export const SIM_SYMS = [
+// ③ 시뮬레이션 종목 — **검색으로 아무 종목이나** 고른다 (오너 지시 2026-08-07:
+// "내가 예시로 알려줬던 종목들 다 볼 수도 없네"). 아래는 자주 쓰는 바로가기일 뿐이고,
+// 고정 목록이 아니다. 성격이 다른 종목들로 골라 뒀다 — 크게 오른 것 / 중간 / 크게 밀린 것.
+export const SIM_QUICK_SYMS = [
+  { code: '005930', name: '삼성전자', market: 'KOSPI' },
   { code: '000660', name: 'SK하이닉스', market: 'KOSPI' },
-  { code: '009150', name: '삼성전기', market: 'KOSPI' },
+  { code: '108490', name: '로보티즈', market: 'KOSDAQ' },
   { code: '005380', name: '현대차', market: 'KOSPI' },
+  { code: '009150', name: '삼성전기', market: 'KOSPI' },
 ] as const
 
-export const SIM_SYM = SIM_SYMS[0]
+export const SIM_SYM = SIM_QUICK_SYMS[0]
 
 // ③ 예시 기본값 — 지위는 PLACEHOLDER 와 같다 (ADR-0009: 서버 하드코딩 금지, UI 예시는 허용).
 // 실행 시 **빈 항목만** 이 값으로 채우고, 채운 값은 전부 화면(분할 카드·메시지)에 보인다.
@@ -43,12 +49,29 @@ export const PLACEHOLDER: Record<string, string> = {
   days: '250',
   within: '3',
   amount: '300',
-  drop_pct: '50',
-  sr_prd: '10',
-  sr_channel_width_pct: '5',
-  sr_loopback: '290',
+  zz_depth: '10',
+  zz_deviation: '3',
+  sr_prd: '5',
+  sr_loopback: '120',
   sr_min_strength: '1',
-  sr_max_channels: '5',
+}
+
+/** 폼 드래프트 → 서버가 받는 손절 설정. ③ 시뮬레이션·④ 백테스팅이 **같은 값**을 보내야
+ *  같은 자리를 그린다 — 전에는 두 화면이 각자 만들어서 한쪽만 고치기 쉬웠다.
+ *  계산 정본은 서버 `layer4_execution.stops.stop_price` 하나다. */
+export function stopPayload(draft: StrategyDraft): SimulateRequest['stop'] {
+  if (!draft.stopEnabled) return undefined
+  const num = (v: string) => (Number(v) > 0 ? Number(v) : undefined)
+  const ticks = Number(draft.stopTicks)
+  return {
+    enabled: true,
+    mode: draft.stopMode,
+    pct: num(draft.stopPct),
+    source: draft.stopSource,
+    custom_price: num(draft.stopCustom),
+    tick_offset: Number.isInteger(ticks) ? ticks : 0,
+    fib_ratio: num(draft.stopFibRatio),
+  }
 }
 
 export function rowLabel(i: number): string {
@@ -81,7 +104,54 @@ export function summarizeCond(c: SavedCondition, def: ConditionDef | undefined):
   return parts.length ? `${def.name} ${parts.join(' · ')}` : def.name
 }
 
-export const SELL_BASIS_LABEL = { avg_entry: '매수 평단', lowest_fill: '최저 체결가', anchor_high: '사이클 고점' } as const
+export const SELL_BASIS_LABEL = { avg_entry: '매수 평단', lowest_fill: '최저 체결가', anchor_high: '파동 꼭대기' } as const
+
+/** ③ 시뮬 종목 고르기 — 검색으로 아무 종목이나. 자주 쓰는 종목은 아래 바로가기 칩으로.
+ *  검색은 헤더 검색창과 **같은 훅·같은 결과 목록**을 쓴다(코드도 동작도 한 벌). */
+export function SimSymbolPicker({ value, onPick }: Readonly<{ value: Symbol; onPick: (s: Symbol) => void }>) {
+  const [q, setQ] = useState('')
+  const { hits, loading } = useLiveSearch(q, {}, 12)
+  const { cur, setCur, onKeyDown } = useListCursor(hits.length)
+  const term = q.trim()
+
+  function choose(s: Symbol) {
+    onPick(s)
+    setQ('')
+  }
+
+  return (
+    <>
+      <KV label="종목">
+        <input
+          style={{ flex: 1 }}
+          value={q}
+          placeholder={`${value.name} (${value.code})`}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => onKeyDown(e, (i) => hits[i] && choose(hits[i]), () => setQ(''))}
+        />
+      </KV>
+      {term && (
+        <div className="sim-sym-hits">
+          <SymbolResults
+            hits={hits}
+            q={term}
+            cur={cur}
+            onHover={setCur}
+            onPick={choose}
+            empty={<p className="empty">{loading ? '찾는 중…' : `'${term}' 검색 결과가 없습니다.`}</p>}
+          />
+        </div>
+      )}
+      <Chips className="sim-quick">
+        {SIM_QUICK_SYMS.map((s) => (
+          <Chip key={s.code} on={s.code === value.code} title={s.code} onClick={() => choose({ ...s })}>
+            {s.name}
+          </Chip>
+        ))}
+      </Chips>
+    </>
+  )
+}
 
 // 매도 기준점 선택 — ②와 ③ 양쪽에 노출한다. ②에만 묻어두면 ③에서 반등률을 만지는
 // 동안 기준점이 뭔지 안 보여 "평단 +10%가 왜 사이클 고점 값이냐"가 재발한다(2026-08-06).

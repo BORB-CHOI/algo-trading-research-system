@@ -46,7 +46,9 @@ export function onWatchlistChanged(fn: () => void): () => void {
 // 정량 값은 항상 이 payload 에 담겨 서버 요청으로만 나간다(ADR-0009 — 하드코딩 금지).
 export type StrategyPick = {
   key: string // 전략 key ("ma_cross" | "fib_retrace" …)
-  params: Record<string, number> // 사용자가 입력한 파라미터 — 서버 기본값 없음
+  // 사용자가 입력한 파라미터 — 서버 기본값 없음(ADR-0009). 드롭다운(select) 값은
+  // 한국어 말 그대로 나간다("자동"·"파동 구간") — 서버가 그 값을 그대로 받는다.
+  params: Record<string, number | string>
   signals: boolean // POST /api/signals 사용 여부 (▲▼ 마커)
   overlay: boolean // POST /api/overlay 사용 여부 (수평선 오버레이)
 }

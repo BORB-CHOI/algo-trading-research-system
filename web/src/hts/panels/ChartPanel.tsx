@@ -3,6 +3,7 @@ import type { DockviewPanelApi } from 'dockview-react'
 import { ProChart, type ProChartHandle } from '../../ProChart'
 import { allVisible, type OverlayVisibility } from '../../simVisibility'
 import { currentStrategy, currentSymbol, onStrategyPick, onSymbolPick } from '../bus'
+import { ChartStrategyBar } from './ChartStrategyBar'
 
 // 전략 오버레이도 종류별로 끄고 켠다 — 시뮬레이션과 퉁치지 않는다 (오너 지적 2026-08-06).
 const OVERLAY_LAYERS: readonly (readonly [keyof OverlayVisibility, string])[] = [
@@ -54,6 +55,8 @@ export function ChartPanel({ panelApi }: { panelApi?: DockviewPanelApi }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* 전략 고르기 — 차트에서 바로 얹는다 (오너 2026-08-08: 시뮬 탭에 몰아넣지 않는다) */}
+      <ChartStrategyBar />
       {hasOverlay && (
         <div className="chips chart-layers">
           {OVERLAY_LAYERS.map(([k, label]) => (

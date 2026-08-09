@@ -139,7 +139,20 @@ export function StrategyPanel() {
         setDraft={setDraft}
         setComputed={setComputed}
       />
-      <BacktestStep active={step === 'backtest'} catErrNode={catErrNode} screens={screens} draft={draft} />
+      <BacktestStep
+        active={step === 'backtest'}
+        catErrNode={catErrNode}
+        saved={saved}
+        name={name}
+        setName={setName}
+        draft={draft}
+        setDraft={setDraft}
+        onGoStrategy={() => setStep('strategy')}
+        onOpenSim={(code, symName, date) => {
+          setSimJump((j) => ({ code, name: symName, date, seq: (j?.seq ?? 0) + 1 }))
+          setStep('sim')
+        }}
+      />
     </div>
   )
 }

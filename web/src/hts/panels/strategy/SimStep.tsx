@@ -1,24 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Dispatch, ReactNode, SetStateAction } from 'react'
-import { postSimulate, type SimulateResponse } from '../../../api'
-import { ProChart, type ProChartHandle } from '../../../ProChart'
+import { postSimulate, type DeviationMode, type SimulateResponse, type Symbol } from '../../../api'
+import { ProChart, type BaseBar, type ProChartHandle } from '../../../ProChart'
 import { allVisible, type OverlayVisibility } from '../../../simVisibility'
 import { chgClass, fmtChg, fmtPrice } from '../../format'
 import { Card, Chip, Chips, KV, MsgLine } from '../../components/ui'
 import type { ComputedPrices } from '../SplitStages'
-import { SR_PAYLOAD, STRATEGY_ONE_WAVE } from '../strategyOne'
+import { BAND_PAYLOAD, SR_PAYLOAD, START_PAYLOAD, STRATEGY_ONE_WAVE } from '../strategyOne'
 import { newBuyStage, toDraft, type Strategies, type StrategyDraft } from '../strategyStore'
-import { SELL_BASIS_LABEL, SIM_EXAMPLE, SIM_SYM, SIM_SYMS, todayStr } from './common'
+import { SIM_EXAMPLE, SIM_SYM, SimSymbolPicker, stopPayload, todayStr } from './common'
 
-// ③ 시뮬레이션 — 대표 종목에 전략 1호(상승장 사이클+분할)를 돌려 전용 차트로 확인 (오너 지시:
+// ③ 시뮬레이션 — 고른 종목에 전략 1호(올라간 구간 피보나치+분할)를 돌려 전용 차트로 확인 (오너 지시:
 // 종목 차트 오버레이 ❌, 이 탭에서 본다). 계산은 전부 파이썬(/api/simulate).
 // StrategyPanel.tsx 분할(구조 리팩토링 2026-08-06)로 옮겨온 스텝.
 //
-// 종목은 **대표 종목(삼성전자) 고정**이다 — ① 에서 뭘 골랐는지와 무관 (오너 지시 2026-08-05:
-// "내가 설계한 전략이 어떻게 되는지만 보고 싶은 거"). 이 화면은 전략 설계를 눈으로
+// 종목은 **검색으로 아무 종목이나** 고른다 (오너 지시 2026-08-07: "내가 예시로 알려줬던
+// 종목들 다 볼 수도 없네"). ① 에서 뭘 골랐는지와는 무관하다 — 이 화면은 전략 설계를 눈으로
 // 확인하는 자리지 종목 검증 자리가 아니다. 실전 적용은 백테스트 러너(ADR-0007) 몫.
 //
-// 파동 입력은 사이클 하락 기준 하나뿐이다 — "급등" 개념은 없다 (오너 확정 2026-08-06).
+// 파동 입력 = 꺾임점을 찾는 두 값(좌우 봉수·잔파동 기준)뿐이다. 시작점은 그 꺾임점 위에서
+// '이번 상승장이 시작된 지점'으로 정한다(ADR-0013 6차). 지어낸 세 값은 폐기했다.
 // 빈 값은 예시값으로 채워서 실행이 절대 막히지 않게 한다 — 채운 값은 화면에 보인다.
 
 // ③ 차트 요소별 표시 필터 — 겹칠 때 하나씩 끄고 본다 (오너 지시 2026-08-06).
@@ -32,63 +33,9 @@ const SIM_LAYERS: readonly (readonly [keyof OverlayVisibility, string])[] = [
   ['fills', '체결'],
 ] as const
 
-// ③ 결과 요약 — 구간·지지선·매도 기준·최종 손익을 한 줄씩. 왼쪽 사이드에 둔다
-// (오너 지시 2026-08-06: 차트 위아래 띠를 전부 사이드로 넘기고 차트를 키운다).
-// 이름은 "피보나치 구간" — '상승장'은 폐기했다(한 번도 -50% 를 안 맞은 종목은 시작점이
-// 수십 년 전이 되어 상승장이라는 말과 안 맞는다, 오너 2026-08-06).
-function SimFoot({ r, sellBasis }: { r: SimulateResponse; sellBasis: keyof typeof SELL_BASIS_LABEL }) {
-  const stopLine = r.lines.find((l) => l.kind === 'stop')
-  const srCount = r.lines.filter((l) => l.kind === 'sr').length
-  const sellLines = r.lines.filter((l) => l.kind === 'sell')
-  const buys = r.fills.filter((f) => f.side === 'buy').length
-  const sells = r.fills.filter((f) => f.side === 'sell').length
-  const t = r.trades
-  const total = t ? t.realized_pnl + t.unrealized_pnl : null
-  return (
-    <div className="sim-foot">
-      <p>
-        <b>피보나치 구간</b> {r.cycle.low_date} {fmtPrice(r.cycle.low_price)} → {r.cycle.high_date}{' '}
-        {fmtPrice(r.cycle.high_price)} (+{r.cycle.gain_pct.toFixed(0)}%)
-        {r.cycle.is_52w_high ? ' · 고점 = 52주 신고가' : ''}
-        {r.cycle.confirmed
-          ? ` · 사이클이 끊긴 하락 뒤의 바닥`
-          : ` · 창 안에 사이클을 끊는 하락 없음 — 구간 최저가로 대신`}
-      </p>
-      {/* 매도 기준가를 명시한다 — 안 보이면 "평단 기준인 줄 알았다"가 반복된다 (2026-08-06). */}
-      {sellLines.length > 0 && (
-        <p>
-          <b>매도 기준</b> {SELL_BASIS_LABEL[sellBasis]}
-          {r.sell_basis_price != null && <> {fmtPrice(r.sell_basis_price)}</>} 대비 반등 —{' '}
-          {sellLines.map((l) => `${l.label} ${fmtPrice(l.price)}`).join(' · ')}
-        </p>
-      )}
-      <p>
-        <b>지지저항</b> 여러 번 닿은 가격대(존) {srCount}개 — 강한 순 · 시작점{' '}
-        {fmtPrice(r.cycle.low_price)}
-        {stopLine && <> · 손절선 {fmtPrice(stopLine.price)}</>}
-      </p>
-      {t && total != null ? (
-        <p>
-          <b>결과</b> 매수 {t.buys.length}건 체결
-          {t.avg_entry != null && <> → 평단 {fmtPrice(t.avg_entry)}</>} · 매도 {t.sells.length}건 →
-          실현 <b className={chgClass(t.realized_pnl)}>{Math.round(t.realized_pnl).toLocaleString()}원</b>
-          {t.remain_shares > 0 && (
-            <>
-              {' '}· 잔여 {t.remain_shares.toLocaleString()}주 평가{' '}
-              <b className={chgClass(t.unrealized_pnl)}>{Math.round(t.unrealized_pnl).toLocaleString()}원</b>
-            </>
-          )}{' '}
-          = 합계 <b className={chgClass(total)}>{total > 0 ? '+' : ''}{Math.round(total).toLocaleString()}원</b>
-          <span className="dim"> (수수료·세금·슬리피지 미포함)</span>
-        </p>
-      ) : (
-        <p>
-          <b>결과</b> 체결 지점 매수 {buys} · 매도 {sells} — 모의 수량을 넣으면 손익까지 계산됩니다.
-        </p>
-      )}
-    </div>
-  )
-}
+// 결과 요약 문단(SimFoot)은 삭제했다 — 오너 2026-08-09: "잡설 없애라고. 그냥 차트 보면 알게."
+// 파동 구간·매도 기준·지지저항 개수는 전부 차트에 그려져 있다. 숫자로 다시 읽을 것은
+// 아래 '체결 내역' 표 하나면 충분하다.
 
 export function SimStep(props: {
   active: boolean
@@ -105,12 +52,34 @@ export function SimStep(props: {
     setDraft((d) => ({ ...d, [k]: v }))
 
   const proRef = useRef<ProChartHandle>(null)
-  const [sym, setSym] = useState<(typeof SIM_SYMS)[number]>(SIM_SYM)
-  // 사이클 기준 — 오너가 차트 보며 직접 돌려본다(ADR-0013 개정 3차, 아직 확정 전)
-  const [volMult, setVolMult] = useState(String(STRATEGY_ONE_WAVE.cycleVolMult))
-  const [minBars, setMinBars] = useState(String(STRATEGY_ONE_WAVE.cycleMinBars))
-  const [lookback, setLookback] = useState(String(STRATEGY_ONE_WAVE.cycleLookbackBars))
+  const [sym, setSym] = useState<Symbol>({ ...SIM_SYM })
+  // 파동 기준 — 트레이딩뷰 원본 기본값에서 시작해 오너가 차트 보며 돌려본다.
+  const [depth, setDepth] = useState(String(STRATEGY_ONE_WAVE.zzDepth))
+  const [deviation, setDeviation] = useState(String(STRATEGY_ONE_WAVE.zzDeviation))
+  const [devMode, setDevMode] = useState<DeviationMode>(STRATEGY_ONE_WAVE.zzDeviationMode)
+  // 기준일 = **차트 오른쪽 끝 봉** (오너 요청 2026-08-08). 차트를 왼쪽으로 밀면 그만큼
+  // 과거 시점이 되고, 그 시점에 없던 데이터는 어차피 서버가 안 본다.
+  // 손으로 고치면 반대로 차트가 그 날짜로 옮겨 간다 — 둘이 항상 같은 곳을 가리키게.
+  // 주봉·월봉도 그대로 된다(봉 날짜 = 그 주/달 마지막 거래일). 분봉은 데이터가 생기면
+  // ProChart.baseStampOf 한 곳만 고치면 시각까지 실린다.
   const [simDate, setSimDate] = useState(todayStr)
+  // 마지막으로 오간 기준일. 차트→입력, 입력→차트가 서로를 되부르는 고리를 끊는다.
+  const simDateRef = useRef(simDate)
+
+  function onBaseBar(b: BaseBar) {
+    if (b.time === simDateRef.current) return
+    simDateRef.current = b.time
+    setSimDate(b.time)
+  }
+
+  function editSimDate(v: string) {
+    simDateRef.current = v
+    setSimDate(v)
+    void proRef.current?.showUntil(v) // 형식이 덜 갖춰진 값은 차트 쪽에서 무시한다
+  }
+
+  // 왼쪽 설정 패널 접기 — 차트를 넓게 볼 때 (오너 2026-08-09)
+  const [sideOpen, setSideOpen] = useState(true)
   const [simMsg, setSimMsg] = useState('')
   const [simRunning, setSimRunning] = useState(false)
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null)
@@ -168,6 +137,7 @@ export function SimStep(props: {
     // "시작점·고점은 자동으로 구하는 건데 입력값을 왜 내가 만지나")
     const buyOff = Number(draft.buyTickOffset || '0')
     const sellOff = Number(draft.sellTickOffset || '0')
+    const minGap = Number(draft.buyMinGapPct || '0')
 
     const hasQty = Number(draft.qty) > 0
     const qty = hasQty ? Number(draft.qty) : SIM_EXAMPLE.qtyShares
@@ -179,10 +149,13 @@ export function SimStep(props: {
       const res = await postSimulate({
         code: sym.code,
         end: simDate || undefined,
-        cycle_drop_pct: STRATEGY_ONE_WAVE.cycleDropPct,
-        cycle_vol_mult: Number(volMult) || undefined,
-        cycle_min_bars: Number(minBars) || undefined,
-        cycle_lookback_bars: Number(lookback) || undefined,
+        zz_depth: Number(depth) || STRATEGY_ONE_WAVE.zzDepth,
+        zz_deviation: Number(deviation) || STRATEGY_ONE_WAVE.zzDeviation,
+        zz_deviation_mode: devMode,
+        // 지지저항 값은 ③에서 안 만진다 — 전략 1호 고정 정의 그대로 나간다
+        // (오너 2026-08-09). 돌려보는 자리는 차트 패널의 전략 값이다.
+        ...START_PAYLOAD,
+        ...BAND_PAYLOAD,
         ...SR_PAYLOAD,
         buy: buy.map((b) => ({
           id: b.id, ratio: b.ratio, weight: b.weight, enabled: b.enabled, price_override: b.priceOverride,
@@ -193,18 +166,10 @@ export function SimStep(props: {
         sell_basis: draft.sellBasis,
         buy_tick_offset: Number.isInteger(buyOff) ? buyOff : 0,
         sell_tick_offset: Number.isInteger(sellOff) ? sellOff : 0,
+        buy_min_gap_pct: Number.isFinite(minGap) && minGap >= 0 ? minGap : 0,
         qty,
         qty_type: hasQty ? draft.qtyType : 'shares',
-        stop: draft.stopEnabled
-          ? {
-              enabled: true,
-              mode: draft.stopMode,
-              pct: Number(draft.stopPct) > 0 ? Number(draft.stopPct) : undefined,
-              source: draft.stopSource,
-              custom_price: Number(draft.stopCustom) > 0 ? Number(draft.stopCustom) : undefined,
-              tick_offset: Number.isInteger(Number(draft.stopTicks)) ? Number(draft.stopTicks) : 0,
-            }
-          : undefined,
+        stop: stopPayload(draft),
       })
       setSimResult(res)
       setComputed(res.computed)
@@ -231,7 +196,7 @@ export function SimStep(props: {
       {catErrNode}
 
       {/* ─────────────── ③ 시뮬레이션 ─────────────── */}
-      <div className="sim-split">
+      <div className={sideOpen ? 'sim-split' : 'sim-split side-closed'}>
         <div className="sim-side">
           <Card title="시뮬레이션" sub={`${sym.name} — 전략 1호`}>
             {/* 입력 = 전략 선택 + 기준일 + 사이클 하락 기준. 빈 값은 예시로 채워 실행한다. */}
@@ -253,51 +218,46 @@ export function SimStep(props: {
                 ))}
               </select>
             </KV>
-            <KV label="종목">
-              <select
-                value={sym.code}
-                onChange={(e) => {
-                  const next = SIM_SYMS.find((x) => x.code === e.target.value) ?? SIM_SYM
-                  setSym(next)
-                  // 종목이 바뀌면 이전 종목의 오버레이는 무의미하다 — 지우고 다시 실행하게 한다.
-                  proRef.current?.applySimulation(null)
-                  setSimResult(null)
-                  setSimMsg('')
-                  proRef.current?.showSymbol(next.code, next.name, next.market)
-                }}
-              >
-                {SIM_SYMS.map((x) => (
-                  <option key={x.code} value={x.code}>
-                    {x.name} ({x.code})
-                  </option>
-                ))}
-              </select>
-            </KV>
+            <SimSymbolPicker
+              value={sym}
+              onPick={(next) => {
+                setSym(next)
+                // 종목이 바뀌면 이전 종목의 오버레이는 무의미하다 — 지우고 다시 실행하게 한다.
+                proRef.current?.applySimulation(null)
+                setSimResult(null)
+                setSimMsg('')
+                proRef.current?.showSymbol(next.code, next.name, next.market)
+              }}
+            />
             <KV label="기준일">
               <input
                 type="date"
                 value={simDate}
-                onChange={(e) => setSimDate(e.target.value)}
-                title="기본 = 오늘 (휴장일이면 직전 거래일 기준). 과거 날짜를 주면 그 시점을 재현한다."
+                onChange={(e) => editSimDate(e.target.value)}
+                title="차트 오른쪽 끝 봉의 날짜. 여기서 고치면 차트가 그 날짜로 옮겨 간다. 휴장일이면 직전 거래일."
               />
             </KV>
-            <KV label="사이클 끊김" desc="낙폭이 이 종목 평소 변동성의 몇 배면 사이클이 끊긴 것으로 보는가">
-              <input className="amt" value={volMult} onChange={(e) => setVolMult(e.target.value)} />
-              <span className="unit">배</span>
-            </KV>
-            <KV label="최소 지속" desc="그 하락이 이만큼 끌어야 '주르르륵 흐른' 것으로 본다">
-              <input className="amt" value={minBars} onChange={(e) => setMinBars(e.target.value)} />
+            {/* ③ 입력은 **파동 잡는 값 둘**뿐이다. 지지저항 값은 여기 없다
+                (오너 2026-08-09: "시뮬레이션 화면에서 지지저항 관련된 커스텀은 다 지우고").
+                설명문도 없앴다 — "잡설 부분 싹다 지우라고". */}
+            <KV label="꼭대기·바닥 판단">
+              <input className="amt" value={depth} onChange={(e) => setDepth(e.target.value)} />
               <span className="unit">봉</span>
             </KV>
-            <KV label="거슬러 보는 창" desc="신고가로부터 이만큼만 본다. 그 이전 매물대는 영향이 옅다">
-              <input className="amt" value={lookback} onChange={(e) => setLookback(e.target.value)} />
-              <span className="unit">봉</span>
+            <KV label="잔파동 거르는 기준">
+              <span className="radios" style={{ marginLeft: 'auto' }}>
+                {(['자동', '고정'] as const).map((m) => (
+                  <label key={m}>
+                    <input type="radio" checked={devMode === m} onChange={() => setDevMode(m)} />
+                    {m}
+                  </label>
+                ))}
+              </span>
             </KV>
-            <KV label="지지저항">트레이딩뷰 표준 존 최대 {STRATEGY_ONE_WAVE.srMaxChannels}개</KV>
-            <p className="hint">
-              시작점 기준은 아직 확정 전이다 — 값을 바꿔가며 차트에서 확인한다(ADR-0013 개정 3차).
-              고점은 자동(신고가).
-            </p>
+            <KV label="이만큼은 움직여야 한 파동">
+              <input className="amt" value={deviation} onChange={(e) => setDeviation(e.target.value)} />
+              <span className="unit">{devMode === '자동' ? '배' : '%'}</span>
+            </KV>
             <div className="form-row" style={{ marginTop: 8 }}>
               <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
                 {simRunning ? '계산 중…' : '시뮬레이션 실행'}
@@ -320,8 +280,6 @@ export function SimStep(props: {
                 </Chip>
               ))}
             </Chips>
-            {/* 결과 요약 — 옛 표(저점/고점/매도 기준가/체결 마커)는 이 요약과 같은 내용이라 지웠다. */}
-            {simResult && <SimFoot r={simResult} sellBasis={draft.sellBasis} />}
           </Card>
 
           {simResult && (
@@ -387,11 +345,22 @@ export function SimStep(props: {
           {/* 분할 매수/매도 카드는 ③에서 삭제 (오너 지시 2026-08-06) —
               "차트만 잘 보여주면 돼. 요약 정보와 체결 내역만 있으면 돼." 설정은 ②에서. */}
         </div>
-        {/* 차트는 패널 전체를 쓴다 — 필터 칩·결과 요약은 왼쪽 사이드로 옮겼다
+        {/* 접기 손잡이 — 차트를 넓게 보고 싶을 때 왼쪽 패널을 통째로 접는다 (오너 2026-08-09).
+            차트는 ResizeObserver 로 폭 변화를 스스로 따라간다. */}
+        <button
+          type="button"
+          className="side-toggle"
+          aria-expanded={sideOpen}
+          title={sideOpen ? '설정 패널 접기' : '설정 패널 펼치기'}
+          onClick={() => setSideOpen((v) => !v)}
+        >
+          <span aria-hidden>{sideOpen ? '‹' : '›'}</span>
+        </button>
+        {/* 차트는 패널 전체를 쓴다 — 필터 칩은 왼쪽 사이드로 옮겼다
             (오너 지시 2026-08-06: "전부 왼쪽 사이드 탭으로 넘겨, 차트 크기 키우자") */}
         <div className="sim-chart">
           <div className="sim-canvas">
-            <ProChart ref={proRef} initialSymbol={SIM_SYM} />
+            <ProChart ref={proRef} initialSymbol={SIM_SYM} onBaseBar={onBaseBar} />
           </div>
         </div>
       </div>

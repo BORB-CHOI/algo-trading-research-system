@@ -18,6 +18,7 @@ const ALL = '__all__'
 const RECENT = '__recent__'
 const BEST = '__best__'
 const RECENT_KEY = 'hts-recent-symbols'
+import { writeBoth } from '../store'
 const RECENT_MAX = 20
 
 function loadWl(): Watchlist {
@@ -115,7 +116,7 @@ export function WatchlistPanel() {
       onSymbolPick((s) => {
         setRecent((prev) => {
           const next = [s, ...prev.filter((p) => p.code !== s.code)].slice(0, RECENT_MAX)
-          localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+          writeBoth(RECENT_KEY, next)
           return next
         })
       }),
@@ -176,14 +177,14 @@ export function WatchlistPanel() {
 
   function save(next: Watchlist) {
     setWl(next)
-    localStorage.setItem(WL_KEY, JSON.stringify(next))
+    writeBoth(WL_KEY, next)
     notifyWatchlistChanged()
   }
 
   function toggleGroup(g: string) {
     setCollapsed((prev) => {
       const next = prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]
-      localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next))
+      writeBoth(COLLAPSE_KEY, next)
       return next
     })
   }

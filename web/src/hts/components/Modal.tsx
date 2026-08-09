@@ -7,6 +7,8 @@ export function Modal(props: {
   onClose: () => void
   title: string
   width?: number
+  /** 모달 상자에 붙일 추가 클래스 — 'chart' 는 본문 여백을 없애 차트를 꽉 채운다. */
+  className?: string
   footer?: React.ReactNode
   children: React.ReactNode
 }) {
@@ -31,7 +33,7 @@ export function Modal(props: {
           onMouseDown={props.onClose}
         >
           <motion.div
-            className="modal"
+            className={props.className ? `modal ${props.className}` : 'modal'}
             style={{ width: props.width ?? 560 }}
             initial={{ opacity: 0, scale: 0.97, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}

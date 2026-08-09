@@ -2,6 +2,7 @@
 // 전략(2단계)은 여기 저장된 검색식 하나를 골라 매매기법을 붙인다.
 
 import { migrateConditions, type SavedCondition, type ScreenLogic } from './strategyStore'
+import { writeBoth } from '../store'
 
 export const SCREEN_KEY = 'hts-screens'
 
@@ -26,13 +27,13 @@ export function loadScreens(): Screens {
 
 export function saveScreen(all: Screens, name: string, s: ScreenDef): Screens {
   const next = { ...all, [name]: s }
-  localStorage.setItem(SCREEN_KEY, JSON.stringify(next))
+  writeBoth(SCREEN_KEY, next)
   return next
 }
 
 export function deleteScreen(all: Screens, name: string): Screens {
   const next = { ...all }
   delete next[name]
-  localStorage.setItem(SCREEN_KEY, JSON.stringify(next))
+  writeBoth(SCREEN_KEY, next)
   return next
 }

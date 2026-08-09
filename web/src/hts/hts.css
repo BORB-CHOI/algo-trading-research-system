@@ -54,21 +54,31 @@ body {
   scrollbar-width: thin;
 }
 
-/* 스크롤바는 평소엔 안 보이고, 그 영역에 마우스가 올라갔을 때만 흐리게 뜬다.
-   (드로어가 열리면 세로 막대가 여러 개 겹쳐 보이던 문제) */
-.hts *::-webkit-scrollbar { width: 8px; height: 8px; }
-.hts *::-webkit-scrollbar-track { background: transparent; }
-.hts *::-webkit-scrollbar-thumb {
-  background: transparent;
+/* ── 스크롤바 (오너 2026-08-09: "기본 스크롤바 말고 이쁜 걸로, 전체적으로") ──
+   윈도우 기본 막대(회색 홈 + 사각 손잡이 + 화살표 버튼)를 완전히 덮는다.
+   홈·화살표 없이 **떠 있는 알약 손잡이**만 남기고, 평소엔 흐리게, 그 영역에 마우스가
+   올라가면 진해진다. 폭 10px 중 3px 은 여백이라 실제 손잡이는 4px 이다. */
+html, body, .hts, .hts * {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--hts-scrollbar) 55%, transparent) transparent;
+}
+html ::-webkit-scrollbar, .hts ::-webkit-scrollbar { width: 10px; height: 10px; }
+html ::-webkit-scrollbar-track, .hts ::-webkit-scrollbar-track { background: transparent; }
+html ::-webkit-scrollbar-button, .hts ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+html ::-webkit-scrollbar-corner, .hts ::-webkit-scrollbar-corner { background: transparent; }
+html ::-webkit-scrollbar-thumb, .hts ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--hts-scrollbar) 55%, transparent);
   border-radius: var(--r-pill);
-  border: 2px solid transparent;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  transition: background-color 120ms ease;
+}
+.hts *:hover > ::-webkit-scrollbar-thumb,
+html ::-webkit-scrollbar-thumb:hover,
+.hts ::-webkit-scrollbar-thumb:hover {
+  background: var(--hts-scrollbar-hov);
   background-clip: content-box;
 }
-.hts *:hover::-webkit-scrollbar-thumb { background: var(--hts-scrollbar); background-clip: content-box; }
-.hts *::-webkit-scrollbar-thumb:hover { background: var(--hts-scrollbar-hov); background-clip: content-box; }
-.hts *::-webkit-scrollbar-corner { background: transparent; }
-.hts { scrollbar-color: transparent transparent; }
-.hts *:hover { scrollbar-color: var(--hts-scrollbar) transparent; }
 
 /* ── 상단바 1행: 브랜드 · 통합검색 · 지수 티커 ─────────────────── */
 /* 헤더 다이어트(2026-08-06 오너): 고정 줄 높이를 줄여 ③ 차트가 스크롤 없이 들어가게 */
@@ -1154,15 +1164,62 @@ body {
    사이드로 옮겨 차트가 패널 높이를 다 쓴다 (오너 지시 2026-08-06). */
 .sim-split {
   display: grid;
-  grid-template-columns: minmax(288px, 330px) 1fr;
+  /* 왼쪽 컨트롤 · 접기 손잡이 · 차트 */
+  grid-template-columns: minmax(288px, 330px) 16px 1fr;
   grid-template-rows: minmax(0, 1fr);
-  gap: 12px;
+  gap: 0;
   align-items: stretch;
   height: 100%;
+  transition: grid-template-columns 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
+/* 접힌 상태 — 손잡이만 남고 차트가 폭을 다 쓴다 (오너 2026-08-09) */
+.sim-split.side-closed { grid-template-columns: 0 16px 1fr; }
 /* 왼쪽 컨트롤만 안에서 스크롤 — 차트는 항상 패널 높이 그대로 (100vh 계산 ❌: 도크 패널
    안에서 어긋나 차트가 짓눌렸다, 오너 보고 2026-08-06) */
-.sim-split .sim-side { min-height: 0; overflow-y: auto; }
+.sim-split .sim-side {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+.sim-split.side-closed .sim-side { visibility: hidden; }
+
+/* 접기 손잡이 — 패널과 차트 사이에 세로로 선다. 가운데 꺾쇠만 보이고,
+   마우스를 올리면 세로 막대가 진해져 "여기를 잡는다"가 읽힌다. */
+.sim-split .side-toggle {
+  all: unset;
+  position: relative;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+}
+.sim-split .side-toggle::before {
+  content: '';
+  position: absolute;
+  inset: 8px 7px;
+  border-radius: var(--r-pill);
+  background: var(--hts-line);
+  transition: background-color 140ms ease;
+}
+.sim-split .side-toggle:hover::before { background: var(--hts-scrollbar-hov); }
+.sim-split .side-toggle:focus-visible::before { background: var(--hts-accent); }
+.sim-split .side-toggle > span {
+  position: relative;
+  z-index: 1;
+  width: 16px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  border: 1px solid var(--hts-line);
+  background: var(--hts-panel);
+  color: var(--hts-text-3);
+  font-size: 11px;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+}
+.sim-split .side-toggle:hover > span { color: var(--hts-text); }
 /* 차트 컨테이너 구조는 건드리지 않는다 — flex 컬럼 + .sim-canvas(flex:1) 조합이 아니면
    klinecharts 가 오버레이(피보·지지저항·매수선)를 그리지 못한다 (실측 2026-08-06). */
 .sim-split .sim-chart {
@@ -1186,6 +1243,62 @@ body {
 .sim-split .sim-canvas {
   flex: 1;
   min-height: 0;
+}
+/* ── 차트 도구 막대 ─────────────────────────────────────────────
+   KLineChart Pro(껍데기)를 벗으면서 잃은 툴바를 우리가 다시 그린다(ADR-0005 개정).
+   기능은 엔진에 그대로 있고 여기서는 버튼만 그린다. */
+.pro-chart { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; }
+.pro-chart .pro-canvas { flex: 1; min-height: 0; }
+.pro-bar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--hts-line);
+  background: var(--hts-panel);
+  font-size: 11.5px;
+}
+.pro-bar .sym { font-size: 12.5px; font-weight: 700; margin-right: 2px; }
+.pro-bar .sym .code { font-weight: 500; color: var(--hts-text-3); font-variant-numeric: tabular-nums; }
+.pro-bar .grp { display: flex; gap: 2px; }
+.pro-bar .grp + .grp { border-left: 1px solid var(--hts-line); padding-left: 10px; }
+.hts .pro-bar button {
+  height: 22px;
+  padding: 0 8px;
+  background: var(--hts-elev);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--hts-text-2);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.hts .pro-bar button:hover { color: var(--hts-text-1); border-color: var(--hts-line); }
+.hts .pro-bar button.on {
+  background: var(--hts-accent-soft, rgba(47, 111, 237, 0.12));
+  border-color: var(--hts-accent, #2f6fed);
+  color: var(--hts-accent, #2f6fed);
+  font-weight: 600;
+}
+.pro-bar .dim { margin-left: auto; color: var(--hts-text-3); }
+
+/* ③ 종목 검색 결과 — 헤더 검색창과 같은 .sym-row 를 쓰되, 사이드 폭에 맞춰 띠로 눕힌다. */
+.sim-side .sim-sym-hits {
+  max-height: 190px;
+  margin: 2px 0 4px;
+  overflow-y: auto;
+  background: var(--hts-elev);
+  border: 1px solid var(--hts-line);
+  border-radius: var(--r-card, 8px);
+}
+.sim-side .sim-sym-hits .empty { padding: 10px; font-size: 11.5px; color: var(--hts-text-3); }
+/* 자주 쓰는 종목 바로가기 — 고정 목록이 아니라 지름길이다(검색이 정식 경로). */
+.sim-side .sim-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 2px 0 4px;
 }
 /* 요소별 표시 필터 — 사이드 카드 안 한 줄 */
 .sim-side .sim-layers {
@@ -1231,3 +1344,142 @@ body {
   .sim-split .sim-side { overflow-y: visible; }
   .sim-split .sim-chart { height: 480px; }
 }
+
+/* 차트 전략 고르기 — 차트 패널 맨 위 한 줄 (2026-08-08).
+   지지저항을 보려고 ③ 시뮬레이션까지 들어가야 했던 걸 없앤다. */
+.chart-strategy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line, #e5e7eb);
+  background: var(--panel, #fff);
+}
+.chart-strategy > select {
+  min-width: 160px;
+}
+.chart-strategy .dim {
+  font-size: 11px;
+  color: #6b7280;
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 값 칸은 접었다 편다 — 평소엔 차트가 최대한 넓어야 한다. */
+.chart-strategy-params {
+  flex-basis: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0 16px;
+  padding-top: 4px;
+}
+
+/* ④ 백테스트 — 종목 줄을 누르면 펴지는 근거 (오너 2026-08-09:
+   "클릭하면 뭔 기준으로 어떻게 사고 팔았는지"). */
+.grid tr[title]:hover > td {
+  background: #f6f8fb;
+}
+td.bt-detail {
+  background: #f9fafc;
+  border-top: 1px solid #e6e9ef;
+  padding: 10px 16px 14px;
+}
+.bt-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+}
+@media (max-width: 900px) {
+  .bt-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.bt-detail h5 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+  letter-spacing: 0.02em;
+}
+.bt-detail h5 + ul {
+  margin: 0 0 10px;
+  padding-left: 14px;
+}
+.bt-detail li {
+  font-size: 12px;
+  line-height: 1.7;
+}
+.bt-detail .dim {
+  color: #9aa1ac;
+}
+table.grid.tight th,
+table.grid.tight td {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+/* ── ④ 백테스팅: 행에서 바로 여는 차트 (오너 2026-08-10: "백테스트 화면에서 간략한
+   화면으로 보고 싶은 거라고. 딱 차트랑 선, 지표, 타점 그런 것만") ─────────────── */
+/* **상자 자체에 높이를 준다.** `.modal` 은 세로 flex 인데 높이가 max-height 뿐이라
+   높이가 '내용만큼'으로 정해진다. 그러면 안쪽 `.bd { flex: 1 }` 의 기준 크기(flex-basis)가
+   0 이 되고, 채울 여백도 없어서 차트가 눈금만 남고 납작해진다. 본문에 height 를 줘도
+   flex-basis 가 이기므로 소용없다 — 높이는 **바깥 상자**에 있어야 한다(실측 2026-08-10). */
+.modal.chart { height: 82vh; max-height: 92%; }
+.modal.chart > .bd { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.bt-chart-canvas { flex: 1; min-height: 0; position: relative; }
+.bt-chart-note {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--hts-border);
+  font-size: 11px;
+  color: var(--hts-text-2);
+}
+.bt-chart-note b { color: var(--hts-text-1); font-weight: 700; }
+
+/* ── ④ 전 기간 검사 진행 게이지 (오너 2026-08-10: "얼마나 진행중인지 실시간으로
+   갯수가 게이지 바로 뜨게") ─────────────────────────────────────── */
+.bt-gauge { margin-top: 10px; }
+.bt-gauge-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 5px;
+  font-size: 11px;
+  color: var(--hts-text-2);
+}
+.bt-gauge-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--hts-line);
+  overflow: hidden;
+}
+.bt-gauge-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--hts-accent);
+  transition: width 0.4s ease-out;
+}
+
+/* ── ④ 결과 표 거르기 · 쪽 나누기 (오너 2026-08-10: "전체를 볼 수 있게 해") ────── */
+.bt-filters {
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px;
+  align-items: center;
+}
+.bt-filters .omni { flex: 1; min-width: 0; }
+.bt-pager {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 16px 12px;
+  font-size: 11px;
+}
+.bt-pager button { padding: 3px 9px; }
+.bt-pager button:disabled { opacity: 0.4; cursor: default; }

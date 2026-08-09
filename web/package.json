@@ -10,7 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@klinecharts/pro": "^0.1.1",
     "dockview": "^7.0.4",
     "dockview-react": "^7.0.4",
     "echarts": "^6.1.0",

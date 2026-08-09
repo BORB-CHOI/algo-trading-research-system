@@ -1,8 +1,9 @@
 // 전략 저장소 — localStorage 'hts-strategies' 의 읽기/쓰기와 폼 드래프트 변환만 담당한다.
+import { writeBoth } from '../store'
 // 정량 값은 전부 사용자가 입력한 것만 저장한다 (ADR-0009 — 전략 숫자 하드코딩 금지).
 
 import type { ConditionParamDef } from '../../api'
-import { isFixedDefinition } from './strategyOne'
+import { DEFAULT_FIB_STOP_RATIO, FIB_STOP_CHOICES, isFixedDefinition } from './strategyOne'
 
 export const STORE_KEY = 'hts-strategies'
 
@@ -54,11 +55,13 @@ export type SellBasis = 'avg_entry' | 'lowest_fill' | 'anchor_high'
  *  옛 저장분은 toDraft 에서 사이클 저점으로 이관한다. */
 export type StopRule = {
   enabled: boolean
-  mode: 'pct' | 'support'
+  mode: 'pct' | 'support' | 'fib'
   pct?: number // mode=pct: 평단에서 몇 % 아래
   source: 'cycle_low' | 'custom' // mode=support 기준선
   customPrice?: number
   tickOffset: number // 기준선에서 ±N호가 (음수 = 아래)
+  /** mode=fib: 어느 되돌림 선에 걸까. 기본 0.786 = 5번째 선 (오너 2026-08-10). */
+  fibRatio?: number
 }
 
 export type Strategy = {
@@ -75,10 +78,16 @@ export type Strategy = {
     sellBasis: SellBasis
     buyTickOffset?: number // 지지/저항선에서 ±N호가 (음수 = 아래)
     sellTickOffset?: number
+    /** 매수 차수 사이 최소 간격(%). 없으면(옛 저장본) 0 = 안 씀.
+     *  오너 2026-08-09: "-10%나 -15%의 차이는 넘게 봐야한다". */
+    buyMinGapPct?: number
     roundTolerancePct?: number
   }
   /** 손절. 없으면(옛 저장본) 손절 미사용으로 연다. */
   stop?: StopRule
+  /** 다 팔고 나서 같은 자리에 또 오면 다시 살지. 없으면 안 산다(옛 저장본 = 그때 동작).
+   *  전 기간 백테스트에서만 뜻이 있다 — ③ 시뮬레이션은 라운드 하나만 그린다. */
+  reenterSameWave?: boolean
   /** 주문조건 — 주문조건 카드 삭제(2026-08-05)로 새 저장본에는 없다. 옛 저장본 호환용. */
   order?: {
     priceType: PriceType
@@ -108,7 +117,7 @@ export function loadStrategies(): Strategies {
 }
 
 export function persistStrategies(next: Strategies): Strategies {
-  localStorage.setItem(STORE_KEY, JSON.stringify(next))
+  writeBoth(STORE_KEY, next)
   return next
 }
 
@@ -135,12 +144,15 @@ export type StrategyDraft = {
   sellBasis: SellBasis
   buyTickOffset: string // 지지/저항선에서 ±N호가 (음수 = 아래)
   sellTickOffset: string
+  buyMinGapPct: string // 매수 차수 사이 최소 간격(%). '0' = 안 씀
   stopEnabled: boolean
-  stopMode: 'pct' | 'support'
+  stopMode: 'pct' | 'support' | 'fib'
   stopPct: string
   stopSource: 'cycle_low' | 'custom'
   stopCustom: string
   stopTicks: string // ±N호가 (음수 = 아래)
+  stopFibRatio: string // mode=fib: 되돌림 비율 ('0.786' = 5번째 선)
+  reenterSameWave: boolean // 다 팔고 같은 자리에 또 오면 다시 살지 (전 기간 백테스트)
   priceType: PriceType
   qtyType: QtyType
   qty: string
@@ -175,12 +187,15 @@ export function emptyDraft(): StrategyDraft {
     sellBasis: 'avg_entry',
     buyTickOffset: '0',
     sellTickOffset: '0',
+    buyMinGapPct: '10',
     stopEnabled: false,
     stopMode: 'pct',
     stopPct: '',
     stopSource: 'cycle_low',
     stopCustom: '',
     stopTicks: '0',
+    stopFibRatio: String(DEFAULT_FIB_STOP_RATIO),
+    reenterSameWave: false,
     priceType: 'limit',
     qtyType: 'shares',
     qty: '',
@@ -203,6 +218,8 @@ export function toDraft(s: Strategy): StrategyDraft {
     sellBasis: s.split?.sellBasis ?? 'avg_entry',
     buyTickOffset: String(s.split?.buyTickOffset ?? 0),
     sellTickOffset: String(s.split?.sellTickOffset ?? 0),
+    // 옛 저장본엔 없다 — 그때 계산된 값이 바뀌면 안 되니 0(안 씀)으로 연다.
+    buyMinGapPct: String(s.split?.buyMinGapPct ?? 0),
     stopEnabled: s.stop?.enabled ?? false,
     stopMode: s.stop?.mode ?? 'pct',
     stopPct: s.stop?.pct == null ? '' : String(s.stop.pct),
@@ -210,6 +227,8 @@ export function toDraft(s: Strategy): StrategyDraft {
     stopSource: s.stop?.source === 'custom' ? 'custom' : 'cycle_low',
     stopCustom: s.stop?.customPrice == null ? '' : String(s.stop.customPrice),
     stopTicks: String(s.stop?.tickOffset ?? 0),
+    stopFibRatio: String(s.stop?.fibRatio ?? DEFAULT_FIB_STOP_RATIO),
+    reenterSameWave: s.reenterSameWave ?? false,
     priceType: s.order?.priceType ?? 'limit',
     qtyType: s.order?.qtyType ?? 'shares',
     qty: s.order?.qty == null ? '' : String(s.order.qty),
@@ -321,6 +340,10 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
   if (!Number.isInteger(buyOff)) return { ok: false, error: '[매수 호가 오프셋] 정수를 입력하세요.' }
   const sellOff = Number(d.sellTickOffset || '0')
   if (!Number.isInteger(sellOff)) return { ok: false, error: '[매도 호가 오프셋] 정수를 입력하세요.' }
+  const minGap = Number(d.buyMinGapPct || '0')
+  if (!Number.isFinite(minGap) || minGap < 0 || minGap >= 100) {
+    return { ok: false, error: '[차수 사이 최소 간격] 0 이상 100 미만의 숫자를 입력하세요.' }
+  }
 
   let stop: StopRule | undefined
   if (d.stopEnabled) {
@@ -330,6 +353,18 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
       const pct = toNum('손절 %', d.stopPct, false)
       if (!pct.ok) return pct
       stop = { enabled: true, mode: 'pct', pct: pct.value, source: d.stopSource, tickOffset: ticks }
+    } else if (d.stopMode === 'fib') {
+      const ratio = Number(d.stopFibRatio)
+      if (!FIB_STOP_CHOICES.some((r) => Math.abs(r - ratio) < 1e-9)) {
+        return { ok: false, error: '[손절 되돌림 선] 목록에서 고르세요.' }
+      }
+      stop = {
+        enabled: true,
+        mode: 'fib',
+        source: d.stopSource,
+        tickOffset: ticks,
+        fibRatio: ratio,
+      }
     } else {
       let customPrice: number | undefined
       if (d.stopSource === 'custom') {
@@ -351,12 +386,14 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
       },
       ...(entry ? { entry } : {}),
       ...(stop ? { stop } : {}),
+      reenterSameWave: d.reenterSameWave,
       split: {
         buy: d.buy.map((b) => ({ ...b })),
         sell: d.sell.map((s) => ({ ...s })),
         sellBasis: d.sellBasis,
         buyTickOffset: buyOff,
         sellTickOffset: sellOff,
+        buyMinGapPct: minGap,
       },
       ...(order ? { order } : {}),
     },
