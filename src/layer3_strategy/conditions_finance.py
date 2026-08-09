@@ -103,7 +103,11 @@ def cond_profit_sign(hist, base: pd.DataFrame, p: dict) -> pd.Series:
     if f.empty or label not in f:
         return pd.Series(False, index=base.index)
     v = f[label]
-    return (v > 0).where(v.notna(), False) if p.get("구분", "흑자") == "흑자" else (v < 0).where(v.notna(), False)
+    return (
+        (v > 0).where(v.notna(), False)
+        if p.get("구분", "흑자") == "흑자"
+        else (v < 0).where(v.notna(), False)
+    )
 
 
 def cond_revenue_growth(hist, base: pd.DataFrame, p: dict) -> pd.Series:

@@ -68,17 +68,51 @@ class HistPanel:
         # (Date, Code) 중복이 있으면 pivot 의 aggfunc='last' 가 조용히 한 값을 고른다 —
         # 특히 _adj 누적곱은 하루 오염이 과거 전체를 잘못 스케일링하므로 즉시 실패시킨다.
         if self._hist.duplicated(["Date", "Code"]).any():
-            raise ValueError("일봉 패널에 (Date, Code) 중복 행이 있습니다 — 데이터 무결성 확인 필요.")
+            raise ValueError(
+                "일봉 패널에 (Date, Code) 중복 행이 있습니다 — 데이터 무결성 확인 필요."
+            )
         self._wide_cache: dict[str, pd.DataFrame] = {}
         self._adj_cache: pd.DataFrame | str | None = None
+        self._parent: HistPanel | None = None
+        self._window: int | None = None
+
+    def at(self, base_date: pd.Timestamp | str, *, window: int | None = None) -> HistPanel:
+        """기준일만 앞으로 당긴 **보기** — 원본의 와이드 표를 공유한다.
+
+        매일 검색식을 돌리는 백테스트(`walk_forward`)를 위한 것이다. 하루마다
+        `HistPanel(...)` 을 새로 만들면 매번 pivot 을 다시 한다 — 실측 2026-08-09:
+        1,729ms/일 × 1,620거래일 = **47분**. 표를 한 번만 만들고 행만 잘라 쓰면
+        그 비용이 사라진다.
+
+        `window` = 남길 행 수(룩백+1). 조건이 보는 것보다 긴 과거를 남기면 rolling 이
+        쓸데없이 전체를 굴린다 — 실측: 전체를 남기면 157ms/일, 룩백만 남기면 훨씬 싸다.
+        호출부(`required_lookback`)가 필요한 길이를 안다.
+
+        **분할 보정 계수는 다시 정규화한다** — 안 그러면 미래 분할을 미리 아는 게 된다.
+        `adj_at_d(i) = adj_full(i) / adj_full(d)` 가 정확히 "기준일 d 로 다시 계산한 값"과
+        같다(둘 다 1/Π{i<j≤d} f_j). 유도는 아래 `_adj` 주석 참조.
+        """
+        view = HistPanel.__new__(HistPanel)
+        view.base_date = pd.Timestamp(base_date)
+        view._hist = self._hist  # has() 만 쓴다 — 행 자르기는 _wide 가 한다
+        view._wide_cache = {}
+        view._adj_cache = None
+        view._parent = self if self._parent is None else self._parent
+        view._window = window
+        return view
 
     def has(self, col: str) -> bool:
         return col in self._hist.columns
 
     def _wide(self, col: str) -> pd.DataFrame:
         if col not in self._wide_cache:
-            w = self._hist.pivot_table(index="Date", columns="Code", values=col, aggfunc="last")
-            self._wide_cache[col] = w.sort_index()
+            if self._parent is not None:
+                # 원본 표를 기준일까지만 잘라 쓴다 — pivot 을 다시 하지 않는다.
+                cut = self._parent._wide(col).loc[: self.base_date]
+                self._wide_cache[col] = cut.tail(self._window) if self._window else cut
+            else:
+                w = self._hist.pivot_table(index="Date", columns="Code", values=col, aggfunc="last")
+                self._wide_cache[col] = w.sort_index()
         return self._wide_cache[col]
 
     @property
@@ -89,7 +123,21 @@ class HistPanel:
         Stocks 컬럼이 없으면(합성 테스트 등) 보정을 생략한다.
         """
         if self._adj_cache is None:
-            if not self.has("Stocks"):
+            if self._parent is not None:
+                # 보기(at)는 원본 계수를 기준일 행으로 나눠 쓴다.
+                #   adj_full(i)      = 1/Π_{j>i} f_j          (원본, 마지막 날 기준)
+                #   adj_at_d(i)      = 1/Π_{i<j≤d} f_j        (기준일 d 로 다시 계산한 값)
+                #   adj_full(i)/adj_full(d) = Π_{j>d}f / Π_{j>i}f = 1/Π_{i<j≤d}f = adj_at_d(i)
+                # 즉 나누기 한 번이 다시 계산과 **정확히 같다**. 기준일 뒤의 분할은 사라진다.
+                parent_adj = self._parent._adj
+                if isinstance(parent_adj, str):
+                    self._adj_cache = parent_adj
+                else:
+                    cut = parent_adj.loc[: self.base_date]
+                    if self._window:
+                        cut = cut.tail(self._window)
+                    self._adj_cache = cut / cut.iloc[-1] if len(cut) else cut
+            elif not self.has("Stocks"):
                 self._adj_cache = self._NO_ADJ
             else:
                 # ffill: 장기 정지·결측으로 행이 빈 종목은 "직전 실제 거래일" 값과 비교해야
@@ -100,7 +148,9 @@ class HistPanel:
                 share_ratio = stocks / stocks.shift(1)
                 price_ratio = close.shift(1) / close
                 big = (share_ratio >= SPLIT_SHARE_HI) | (share_ratio <= SPLIT_SHARE_LO)
-                matches = (price_ratio > 0) & ((share_ratio / price_ratio - 1).abs() < SPLIT_PRICE_MATCH)
+                matches = (price_ratio > 0) & (
+                    (share_ratio / price_ratio - 1).abs() < SPLIT_PRICE_MATCH
+                )
                 f = share_ratio.where(big & matches, 1.0).fillna(1.0)
                 geq = f.iloc[::-1].cumprod().iloc[::-1]  # Π_{j>=i}
                 self._adj_cache = 1.0 / geq.shift(-1).fillna(1.0)  # Π_{j>i}
@@ -478,9 +528,7 @@ def _make_pattern_fn(talib_name: str, direction: int) -> CondFn:
         o, h, low, c = hist.open, hist.high, hist.low, hist.close
         out: dict[str, bool] = {}
         for code in c.columns:
-            ohlc = pd.DataFrame(
-                {"o": o[code], "h": h[code], "l": low[code], "c": c[code]}
-            ).dropna()
+            ohlc = pd.DataFrame({"o": o[code], "h": h[code], "l": low[code], "c": c[code]}).dropna()
             # marcap 은 거래정지일을 O=H=L=0, Close=직전가로 채운다(BORB-32 실측).
             # dropna 로는 안 걸러지므로 0 이하 가격 행(가짜 캔들)을 명시적으로 제거한다 —
             # 안 하면 정지 해제 부근에서 장대양봉/장악형 허위 패턴이 잡힌다.
@@ -739,7 +787,16 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "price",
         "시세분석",
-        ["change_range", "cum_change", "new_high", "new_high_burst", "new_low", "gap_up", "consec_up", "consec_down"],
+        [
+            "change_range",
+            "cum_change",
+            "new_high",
+            "new_high_burst",
+            "new_low",
+            "gap_up",
+            "consec_up",
+            "consec_down",
+        ],
     ),
     (
         "technical",
@@ -826,7 +883,9 @@ def parse_conditions(raw: list[dict]) -> Parsed:
                 sv = str(v)
                 if p.choices and sv not in p.choices:
                     allowed = " / ".join(p.choices)
-                    raise ValueError(f"조건 '{cond.name}': '{p.label}' 은 {allowed} 중 하나여야 합니다.")
+                    raise ValueError(
+                        f"조건 '{cond.name}': '{p.label}' 은 {allowed} 중 하나여야 합니다."
+                    )
                 params[p.key] = sv
                 continue
             try:

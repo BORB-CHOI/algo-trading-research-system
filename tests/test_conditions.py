@@ -109,7 +109,9 @@ def test_categories_payload_matches_contract() -> None:
                 assert set(p) == {"key", "label", "type", "unit", "required", "desc", "choices"}
                 assert p["type"] in {"number", "int", "select"}
                 if p["type"] == "select":
-                    assert p["choices"], f"{c['key']}.{p['key']}: 선택지가 없으면 드롭다운을 못 그린다"
+                    assert p["choices"], (
+                        f"{c['key']}.{p['key']}: 선택지가 없으면 드롭다운을 못 그린다"
+                    )
                     assert p["unit"] == "", f"{c['key']}.{p['key']}: 드롭다운에 단위는 붙지 않는다"
                 else:
                     assert p["unit"] in {"원", "억", "%", "일", "배", "주"}
@@ -169,14 +171,10 @@ def test_parse_short_must_be_less_than_long() -> None:
 
 
 def test_parse_lookback_capped() -> None:
-    ok = parse_conditions(
-        [{"key": "new_high", "params": {"days": 250, "within": 250}}]
-    )
+    ok = parse_conditions([{"key": "new_high", "params": {"days": 250, "within": 250}}])
     assert required_lookback(ok) == 500
     with pytest.raises(ValueError, match=str(MAX_LOOKBACK)):
-        parse_conditions(
-            [{"key": "new_high", "params": {"days": 400, "within": 200}}]
-        )
+        parse_conditions([{"key": "new_high", "params": {"days": 400, "within": 200}}])
 
 
 # ─────────────────────────────────────────────────────────────
@@ -458,7 +456,15 @@ def test_api_run_golden_cross_plus_amount() -> None:
     if j["items"]:
         it = j["items"][0]
         assert set(it) == {
-            "code", "name", "market", "close", "chg", "amount", "marcap", "candles", "themes",
+            "code",
+            "name",
+            "market",
+            "close",
+            "chg",
+            "amount",
+            "marcap",
+            "candles",
+            "themes",
         }
         assert all(len(c) == 4 for c in it["candles"])  # [O,H,L,C]
 

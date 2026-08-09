@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from src.layer3_strategy.conditions import CONDITIONS, HistPanel, evaluate, parse_conditions
 
@@ -165,3 +166,75 @@ def test_pattern_short_history_is_false() -> None:
     base = hist[hist["Date"] == base_date].set_index("Code")
     parsed = parse_conditions([{"key": "pat_doji", "params": {"within": 2}}])
     assert not bool(evaluate(parsed, panel, base, "and").loc["000001"])
+
+
+# ── 기준일만 당긴 보기(at) — 매일 검색식을 돌리는 백테스트용 ────────────
+# 하루마다 HistPanel 을 새로 만들면 매번 pivot 을 다시 한다(실측 1,729ms/일).
+# 표를 공유하되 결과는 **완전히 같아야** 한다 — 다르면 백테스트가 거짓말을 한다.
+
+
+def _panel_frame() -> pd.DataFrame:
+    """분할이 낀 합성 패널 — 보정 계수 재정규화까지 확인하려고 Stocks 를 넣는다."""
+    dates = pd.bdate_range("2026-01-05", periods=40)
+    rows = []
+    for i, d in enumerate(dates):
+        # A: 20번째 날 1:2 액면분할 (주식수 2배·가격 절반)
+        split = i >= 20
+        rows.append(
+            {
+                "Date": d,
+                "Code": "AAA",
+                "Open": (10_000 + i * 100) / (2 if split else 1),
+                "High": (10_200 + i * 100) / (2 if split else 1),
+                "Low": (9_800 + i * 100) / (2 if split else 1),
+                "Close": (10_000 + i * 100) / (2 if split else 1),
+                "Volume": 1_000 * (2 if split else 1),
+                "Amount": 1e10,
+                "Marcap": 1e12,
+                "Stocks": 1_000_000 * (2 if split else 1),
+            }
+        )
+        rows.append(
+            {
+                "Date": d,
+                "Code": "BBB",
+                "Open": 5_000 + i * 10,
+                "High": 5_100 + i * 10,
+                "Low": 4_900 + i * 10,
+                "Close": 5_000 + i * 10,
+                "Volume": 500,
+                "Amount": 2e10,
+                "Marcap": 5e11,
+                "Stocks": 2_000_000,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("window", [None, 15])
+def test_보기는_새로_만든_것과_같은_결과를_낸다(window: int | None) -> None:
+    hist = _panel_frame()
+    conds = [{"key": "new_high", "params": {"days": 10, "within": 3}}]
+    parsed = parse_conditions(conds)
+    root = HistPanel(hist, hist["Date"].max())
+    for d in sorted(hist["Date"].unique())[-6:]:
+        base = hist[hist["Date"] == d].set_index("Code")
+        a = evaluate(parsed, root.at(d, window=window), base, "and")
+        b = evaluate(parsed, HistPanel(hist[hist["Date"] <= d], d), base, "and")
+        assert a.equals(b), f"{pd.Timestamp(d).date()} 에서 보기와 새로 만든 것이 다르다"
+
+
+def test_보기는_기준일_뒤_분할을_모른다() -> None:
+    """원본 계수를 그대로 쓰면 미래 분할을 미리 아는 게 된다 — 나눠서 지운다.
+
+    분할은 20번째 날이다. 15번째 날 기준으로 보면 그 분할은 아직 안 일어났으므로
+    보정 계수가 전부 1 이어야 한다(그날 종가가 원본 그대로여야 한다).
+    """
+    hist = _panel_frame()
+    dates = sorted(hist["Date"].unique())
+    root = HistPanel(hist, hist["Date"].max())
+    view = root.at(dates[14])
+    fresh = HistPanel(hist[hist["Date"] <= dates[14]], dates[14])
+    pd.testing.assert_frame_equal(view.close, fresh.close)
+    # 분할 전 구간이라 보정이 없다 = 원본 종가 그대로
+    assert view.close["AAA"].iloc[-1] == pytest.approx(10_000 + 14 * 100)

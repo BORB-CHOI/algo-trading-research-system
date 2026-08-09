@@ -31,7 +31,9 @@ class Test분할매수는_항상_내림차순:
     def test_허용폭을_넓혀도_뒤집히지_않는다(self, tol: float) -> None:
         levels = buy_levels(50_000, 100_000, ratios=[0.382, 0.5, 0.618], tolerance_pct=tol)
         prices = [x.price for x in levels]
-        assert prices == sorted(prices, reverse=True), f"허용폭 {tol}% 에서 차수가 뒤집혔다: {prices}"
+        assert prices == sorted(prices, reverse=True), (
+            f"허용폭 {tol}% 에서 차수가 뒤집혔다: {prices}"
+        )
         assert len(set(prices)) == len(prices), f"차수가 같은 가격에 겹쳤다: {prices}"
 
     @pytest.mark.parametrize(

@@ -108,6 +108,122 @@ def shift_ticks(price: float, n: int, kind: InstrumentKind = "stock") -> int:
     return int(p)
 
 
+def round_unit(price: float) -> int:
+    """라운드 피겨의 자릿수 단위 — **앞 두 자리만 살린다** (오너 규칙 2026-08-08).
+
+    "215,000 이면 22만이나 21만이고 176,000 이면 18만이나 17만이지" — 즉 사람이 의식하는
+    가격은 호가단위가 아니라 **가격의 자릿수**로 정해진다. 비싼 종목일수록 잔 호가는 아무도
+    안 본다. 호가단위(`tick_size`)로 잡으면 215,000 은 5,000 단위라 21만·22만이 안 나온다.
+
+    자릿수 − 2 자리가 단위다:
+
+        9,800 (4자리) → 100     → 9,800 · 9,900
+       45,000 (5자리) → 1,000   → 45,000 · 46,000
+      215,000 (6자리) → 10,000  → 210,000 · 220,000
+    1,574,850 (7자리) → 100,000 → 1,500,000 · 1,600,000
+
+    10의 거듭제곱은 KRX 호가단위(1·5·10·50·100·500·1000)의 배수라 결과는 항상 유효 호가다.
+    """
+    if price <= 0:
+        raise ValueError(f"가격은 0보다 커야 한다: {price}")
+    return max(1, 10 ** (len(str(int(price))) - 2))
+
+
+def roundness(price: int) -> int:
+    """그 가격을 나누어떨어지게 하는 **가장 굵은 단위** — 사람이 느끼는 "딱 떨어짐"의 세기.
+
+    250,000 은 5만으로 나누어떨어지고 260,000 은 1만까지만 떨어진다. 그래서 같은 구간에
+    둘이 같이 있으면 25만이 더 센 자리다 (오너 2026-08-09: "38% 되돌림 선에서는 26만원
+    보다는 25만원이 사람 심리적으로 라운드 피겨가 딱 맞아 떨어져서 더 맞는거고").
+
+    라운드 피겨의 세기가 자릿수 순이라는 건 시장 통념이자 문헌의 전제다
+    (Osler 2003, "Currency Orders and Exchange Rate Dynamics" — 주문이 00 자리에
+    몰린다). 우리는 그걸 "0 이 몇 개냐"로만 잰다.
+    """
+    if price <= 0:
+        raise ValueError(f"가격은 0보다 커야 한다: {price}")
+    for unit in _ROUNDNESS_UNITS:
+        if price % unit == 0:
+            return unit
+    return 1
+
+
+# 굵은 것부터. 10의 거듭제곱 사이에 절반(5·50·500…) 자리를 끼운다 — 250,000 이
+# 260,000 보다 굵다고 판정되려면 5만 자리가 있어야 한다.
+_ROUNDNESS_UNITS: tuple[int, ...] = (
+    10_000_000,
+    5_000_000,
+    1_000_000,
+    500_000,
+    100_000,
+    50_000,
+    10_000,
+    5_000,
+    1_000,
+    500,
+    100,
+    50,
+    10,
+    5,
+)
+
+
+def _multiples_in(low: float, high: float, unit: int, kind: InstrumentKind) -> list[int]:
+    first = int(-(-max(low, 1.0) // unit)) * unit  # low 이상 첫 배수 (올림)
+    return [p for p in range(first, int(high) + 1, unit) if p > 0 and is_valid_price(p, kind)]
+
+
+def round_figures_between(low: float, high: float, kind: InstrumentKind = "stock") -> list[int]:
+    """`low` ~ `high` 구간 안의 라운드 피겨 — 낮은 가격부터.
+
+    **굵은 단위부터 찾아 처음 나오는 굵기에서 멈춘다.** 앞 한 자리(10만·20만…)로 되면
+    그걸 쓰고, 안 되면 앞 두 자리(21만·22만…)로 내려온다. 오너 규칙(`round_unit`)이
+    하한이다.
+
+    굵은 것부터 보는 이유: 폭이 넓은 구간에서 앞 두 자리로 바로 가면 값이 우수수 나온다.
+    실측(2026-08-09) 삼성전자 지지저항 68,000~74,000 구간에서 68,000·69,000···74,000
+    일곱 개가 나와 라운드 가격이라는 말이 무의미해졌다. 굵은 단위부터 보면 70,000 하나다.
+
+    오너가 든 예시는 그대로 나온다 — 205,000~225,000 은 앞 한 자리(10만 단위)로 아무것도
+    안 걸려서 앞 두 자리로 내려오고, 거기서 210,000·220,000 이 나온다.
+
+    구간이 좁아 하나도 없으면 빈 목록이고, 호출부가 "이 자리엔 사람들이 볼 가격이 없다"로
+    판단한다 — 억지로 만들지 않는다.
+    """
+    if low > high:
+        raise ValueError(f"구간이 뒤집혔다: {low} ~ {high}")
+    if high <= 0:
+        return []
+    unit = round_unit((max(low, 0.0) + high) / 2.0)
+    for step in (unit * 10, unit):
+        found = _multiples_in(low, high, step, kind)
+        if found:
+            return found
+    return []
+
+
+def round_figures_all_between(low: float, high: float, kind: InstrumentKind = "stock") -> list[int]:
+    """`low`~`high` 안의 라운드 피겨 **전부** — 낮은 가격부터. 굵은 데서 안 멈춘다.
+
+    `round_figures_between` 과 쓰임이 다르다.
+
+    - `round_figures_between` = **라벨용**. 굵은 것 하나만 보여 준다. 68,000~74,000 에서
+      70,000 하나면 읽기 좋다.
+    - 이 함수 = **주문가 고르기용**. 굵은 데서 멈추면 후보가 하나뿐이라 고를 수가 없다.
+      실측 2026-08-09: 삼성전자 61.8% 자리 174,700~200,000 에서 굵은 데서 멈추니
+      10만 배수인 200,000 하나만 남아 18만·19만이 명단에 오르지도 못했다. 그 200,000 은
+      자리의 맨 윗끝(되돌림 선보다 +7.1%)이라 바로 위 차수와 9%밖에 안 벌어졌다.
+
+    고르는 건 호출부 몫이다 — `roundness` 로 굵은 순, 되돌림 선에서 너무 먼 건 제외
+    (오너 2026-08-09: "굵은 것 우선, 단 선에서 너무 멀면 뺀다").
+    """
+    if low > high:
+        raise ValueError(f"구간이 뒤집혔다: {low} ~ {high}")
+    if high <= 0:
+        return []
+    return _multiples_in(low, high, round_unit((max(low, 0.0) + high) / 2.0), kind)
+
+
 def round_figures_near(
     level: float,
     tolerance_pct: float,

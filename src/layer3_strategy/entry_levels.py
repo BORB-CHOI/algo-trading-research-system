@@ -340,7 +340,9 @@ def buy_targets_sr(
     *,
     ratios: Sequence[float],
     levels: Sequence[SRLevel],
+    min_gap_pct: float = 0.0,
     tick_offset: int = 0,
+    allow_partial: bool = False,
     kind: InstrumentKind = "stock",
 ) -> list[SRTarget]:
     """분할 매수 = 각 되돌림 레벨에서 **가장 가까운 지지/저항선** ± tick_offset 호가.
@@ -349,16 +351,28 @@ def buy_targets_sr(
     고르면 다음 차수는 그 아래 선으로 내려간다. 내려갈 선이 없으면 ValueError —
     지지/저항선이 부족하다는 뜻이고, 조용히 차수를 지우면 오너가 건 분할이 사라진다.
 
+    `min_gap_pct` = 다음 차수는 앞 차수보다 **최소 이만큼(%) 아래**여야 한다. 0 이면
+    끄고 예전대로 "앞 차수보다 낮기만 하면" 된다.
+
+    왜 필요한가 (오너 2026-08-09): "20만원 22만원 이거 매수 타점이 너무 좁잖아. 난 일단
+    -10%나 -15%의 차이는 넘게 봐야한다고 보는데." 실측 삼성전자 기준일 2026-08-04 에서
+    50% 차수 220,000 과 61.8% 차수 200,000 이 9.1% 밖에 안 벌어졌다. 붙어 있으면 분할
+    매수의 뜻(내려갈수록 싸게 더 담는다)이 사라진다. 값은 화면에서 받는다(ADR-0009).
+
     호가 반올림은 체결이 덜 되는 쪽(내림), 같은 거리면 낮은 선 — 백테스트가 낙관으로
     기울지 않게 한다. 신고가(high) 이상 가격은 후보에서 뺀다(추격 매수 방지).
     """
     _validate_wave(low, high)
+    if min_gap_pct < 0:
+        raise ValueError(f"차수 사이 최소 간격(%)은 0 이상이어야 한다: {min_gap_pct!r}")
     ordered = _ordered_params(ratios, "ratios")
     for ratio in ordered:
         if not 0.0 < ratio < 1.0:
             raise ValueError(f"되돌림 비율은 0 과 1 사이여야 한다(확장 비율 미지원): {ratio}")
     if not levels:
-        raise ValueError("지지/저항선이 없습니다 — 고점·저점 기준(일)을 줄이거나 같은 선 폭(%)을 늘려 보세요.")
+        raise ValueError(
+            "지지/저항선이 없습니다 — 고점·저점 기준(일)을 줄이거나 같은 선 폭(%)을 늘려 보세요."
+        )
 
     priced: list[tuple[int, float, int]] = []  # (지정가, 선 원값, 터치 수)
     for lv in levels:
@@ -375,13 +389,25 @@ def buy_targets_sr(
         target = _retracement(low, high, ratio)
         cands = [c for c in priced if c[0] < ceiling]
         if not cands:
+            # `allow_partial` = 걸 수 있는 데까지만 걸고 멈춘다. 백테스트가 이쪽이다 —
+            # 3차를 못 건다고 그 종목을 통째로 버리면 검사가 통째로 사라진다. 실측
+            # 2026-08-09: 24종목 중 20종목이 이 오류로 빠졌다(최소 간격 10% 설정).
+            # 몇 차수를 못 걸었는지는 호출부가 세어 화면에 알린다 — 조용히 지우지 않는다.
+            if allow_partial and out:
+                break
+            gap = (
+                ""
+                if min_gap_pct <= 0
+                else f" (차수 사이 최소 간격 {min_gap_pct:g}% 를 줄이면 걸릴 수 있습니다)"
+            )
             raise ValueError(
-                f"매수 {tranche}차에 걸 지지/저항선이 없습니다 — 앞 차수 아래 선이 부족합니다."
+                f"매수 {tranche}차에 걸 지지/저항선이 없습니다 — 앞 차수 아래 선이 부족합니다.{gap}"
             )
         # 가장 가까운 선, 같은 거리면 낮은 선(보수 방향).
-        best = min(cands, key=lambda c: (abs(c[1] - target), c[0]))
+        best = min(cands, key=lambda c, t=target: (abs(c[1] - t), c[0]))
         out.append(SRTarget(tranche=tranche, price=best[0], level_price=best[1], touches=best[2]))
-        ceiling = best[0]
+        # 다음 차수는 여기서 최소 간격만큼 더 내려간 곳부터 고른다.
+        ceiling = best[0] * (1.0 - min_gap_pct / 100.0)
     return out
 
 
@@ -406,7 +432,9 @@ def sell_targets_sr(
         if pct <= 0:
             raise ValueError(f"반등률은 0보다 커야 한다: {pct}")
     if not levels:
-        raise ValueError("지지/저항선이 없습니다 — 고점·저점 기준(일)을 줄이거나 같은 선 폭(%)을 늘려 보세요.")
+        raise ValueError(
+            "지지/저항선이 없습니다 — 고점·저점 기준(일)을 줄이거나 같은 선 폭(%)을 늘려 보세요."
+        )
 
     priced: list[tuple[int, float, int]] = []
     for lv in levels:

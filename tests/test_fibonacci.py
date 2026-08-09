@@ -2,9 +2,11 @@
 
 합성 일봉만 쓰므로 실데이터 없이 항상 돈다. API 계약 스모크는 test_api.py(slow).
 
-파동 = 상승장 사이클 (ADR-0013, 구 "베이스 탐지" 정의 폐기).
-기본 시나리오: 10,000 → 20,000 → 폭락 9,000(-55%) → 반등 확정 → 21,000 신고점 → 되돌림.
-drop_pct=50 기준 사이클 저점 = 9,000 바닥, 고점 = 21,000, 파동폭 12,000.
+파동 = **올라간 구간**(바닥→꼭대기). 바닥은 트레이딩뷰 내장 Auto Fib Retracement 규격으로
+찾는다(ADR-0013 5차 — 지어낸 낙폭·변동성 계산식 폐기).
+기본 시나리오: 10,000 → 20,000 → 폭락 9,000 → 21,000 신고점 → 되돌림.
+좌우 1봉·잔파동 20% 기준으로 꺾임점은 저(10,000) 고(20,000) 저(9,000) 고(21,000) 네 개이고,
+마지막 확정 바닥 = 9,000, 그 뒤 최고가 = 21,000, 파동폭 12,000.
 """
 
 from __future__ import annotations
@@ -70,13 +72,30 @@ RETRACE: list[Bar] = [
 ]
 
 # 파라미터는 테스트 데이터다 — 전략 하드코딩이 아니라 검증 입력값(ADR-0009와 무관).
+# 합성 봉이 열 개 남짓이라 좌우 봉수는 최소값(2 = 좌우 1봉)으로 둔다.
+# 기준 방식은 화면에서 오는 한국어 표기("고정")를 그대로 써서 그 경로도 함께 확인한다.
 P = {
-    "drop_pct": 50,
+    # 합성 봉엔 거래대금이 없어 평평한 구간 돌파를 판단할 수 없다 — 옛 방식으로 고정한다.
+    "start_mode": "상승 전환",
+    "start_box_bars": 20,
+    "start_volume_mult": 2,
+    "start_keep_mult": 2,
+    "zz_depth": 2,
+    "zz_deviation": 20,
+    "zz_deviation_mode": "고정",
+    # 피보나치 선 띠 (ADR-0014 2차 개정) — 합성 봉이 성겨서 넉넉한 폭으로 둔다.
+    "fib_band_mode": "파동폭",
+    "fib_band_value": 20,
+    "sr_scope": "전체",
+    "sr_source": "꺾임점",
     "sr_prd": 1,
-    "sr_channel_width_pct": 1.0,
     "sr_loopback": 290,
+    "sr_channel_width_pct": 3,
     "sr_min_strength": 1,
-    "sr_max_channels": 5,
+    # 띠와 같은 이유로 넉넉히 — 합성 봉의 꺾임점 20,000 은 23.6% 선(18,168)에서 10.1%
+    # 떨어져 있다. 실전 기본값(5%)을 그대로 쓰면 이 자리가 빠져 띠 판정 테스트가
+    # 엉뚱한 걸 재게 된다. 제외 규칙 자체는 test_fib_zone.py 에서 따로 본다.
+    "sr_round_max_gap_pct": 15,
 }
 
 
@@ -91,6 +110,8 @@ def test_anchors_are_cycle_low_and_high() -> None:
     assert (a["low_date"], a["low_price"]) == (df["Date"].iloc[4].strftime("%Y-%m-%d"), 9_000.0)
     assert (a["high_date"], a["high_price"]) == (df["Date"].iloc[6].strftime("%Y-%m-%d"), 21_000.0)
     assert a["confirmed"] is True
+    # 되돌림(21,000→15,000)이 시작 바닥 9,000 을 안 깼으니 추세는 아직 상승이다.
+    # 눌림은 추세를 꺾지 않는다 — 이게 ADR-0013 6차의 핵심이다.
     assert a["falling"] is False
 
 
@@ -102,19 +123,23 @@ def test_left_of_cut_only() -> None:
     assert (a["low_price"], a["high_price"]) == (9_000.0, 14_000.0)
 
 
-def test_no_drop_falls_back_to_range_min() -> None:
-    """drop_pct 하락이 없으면 구간 최저 Low + confirmed=False — 화면이 표시할 근거."""
-    df = make_ohlc([flat_bar(10_000), rally_bar(10_000, 14_000), rally_bar(14_000, 20_000)])
-    a = compute_overlay(df, P)["anchors"]
+def test_꺾임점이_없으면_구간_최저가로_대신하고_알린다() -> None:
+    """쭉 오르기만 해서 확정된 바닥이 없으면 구간 최저 Low + confirmed=False —
+    화면이 '기준을 낮춰 보라'고 안내할 근거다."""
+    rising = [rally_bar(10_000 + 1_000 * i, 11_000 + 1_000 * i) for i in range(6)]
+    a = compute_overlay(make_ohlc(rising), P)["anchors"]
     assert a["confirmed"] is False
-    assert (a["low_price"], a["high_price"]) == (10_000.0, 20_000.0)
+    assert (a["low_price"], a["high_price"]) == (10_000.0, 16_000.0)
 
 
-def test_drop_pct_range_validated() -> None:
+def test_파동_파라미터가_범위_밖이면_거부한다() -> None:
     df = make_ohlc(WAVE)
-    for bad in (0, 100, -5):
-        with pytest.raises(ValueError, match="drop_pct"):
-            compute_overlay(df, {**P, "drop_pct": bad})
+    for bad in (0, 1, -4):
+        with pytest.raises(ValueError, match="좌우"):
+            compute_overlay(df, {**P, "zz_depth": bad})
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="잔파동"):
+            compute_overlay(df, {**P, "zz_deviation": bad})
 
 
 # ─────────────────────────────────────────────────────────────
@@ -134,23 +159,40 @@ def test_fib_levels_exact() -> None:
 def test_anchor_lines_present() -> None:
     out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
     anchors = {ln["label"]: ln["price"] for ln in out["lines"] if ln["kind"] == "anchor"}
-    assert anchors == {"사이클 저점": 9_000.0, "사이클 고점": 21_000.0}
+    assert anchors == {"파동 바닥": 9_000.0, "파동 꼭대기": 21_000.0}
 
 
-def test_sr_zones_follow_channel_spec() -> None:
-    """지지/저항 존 = TradingView Support Resistance Channels 규격 (ADR-0014 개정).
+def test_지지저항은_되돌림_선_아래_자리에_붙는다() -> None:
+    """ADR-0014 7차 개정 — 자리를 먼저 만들고, 되돌림 선이 그 자리 안이면 그 자리,
+    자리 사이 빈틈이면 **바로 아래 자리**를 쓴다.
 
-    확정 피벗은 20,000(idx2 고점)·9,000(idx4 저점)·21,000(idx6 고점). 존 폭 한도
-    (21,000−9,000)×1% = 120원이라 서로 안 묶여 존 3개, 각각 피벗 1개(강도 20+터치 2).
-    구 방식과 달리 사이클로 자르지 않으므로 사이클 이전 20,000 피벗도 존이 된다
-    (원본 규격 = 최근 loopback 봉 전체).
+    합성 봉의 꺾임점은 20,000(idx2 고점) · 9,000(idx4 저점) · 21,000(idx6 고점) 셋뿐이라
+    자리도 셋이다. 되돌림 선은 21,000 − 비율×12,000 = 18,168 / 16,416 / 15,000 / 13,584 /
+    11,568 로 전부 9,000 과 20,000 **사이 빈틈**에 있다. 그래서 다섯 선 모두 아래 자리
+    9,000 을 받는다 — 위쪽 자리(20,000·21,000)는 절대 안 준다. 신고가 근처를 사는 게 되니까.
     """
     out = compute_overlay(make_ohlc(WAVE + RETRACE), P)
     sr = [ln for ln in out["lines"] if ln["kind"] == "sr"]
-    assert {ln["price"] for ln in sr} == {9_000.0, 20_000.0, 21_000.0}
-    assert all(ln["label"] == "지지저항 (고점·저점 1개)" for ln in sr)
-    # 존이라 top/bottom 이 실린다 — 피벗 1개짜리 존은 폭 0(top == bottom == mid).
-    assert all(ln["top"] == ln["bottom"] == ln["price"] for ln in sr)
+    assert [ln["price"] for ln in sr] == [9_000.0] * 5
+    assert all("되돌림 선 아래 첫 자리" in ln["label"] for ln in sr)
+    assert sr[0]["label"].startswith("23.6% 지지저항 · 닿은 봉 ")
+    # 지지저항은 **선**이다 — 띠(top/bottom)가 안 붙는다 (오너 2026-08-09:
+    # "왜 지지저항에 그려져 있지? 왜 두께가 다른 거야?").
+    assert "top" not in sr[0] and "bottom" not in sr[0]
+    # 피보나치 선은 근거와 무관하게 **항상 5개** 다 그린다 (오너 2026-08-08).
+    fibs = [ln for ln in out["lines"] if ln["kind"] == "fib"]
+    assert len(fibs) == 5
+    # 띠는 피보나치 선에 붙고, 파동폭 방식이라 다섯 선의 두께가 **모두 같다**(±2,400).
+    assert {round(ln["top"] - ln["bottom"], 6) for ln in fibs} == {4_800.0}
+    for ln in fibs:
+        assert ln["bottom"] < ln["price"] < ln["top"]
+
+
+def test_되돌림_선_아래에_자리가_없으면_안_그린다() -> None:
+    """쭉 오르기만 한 종목은 되돌림 선 아래에 받쳐 줄 자리가 없다 — 억지로 안 만든다."""
+    rising = [rally_bar(10_000 + 1_000 * i, 11_000 + 1_000 * i) for i in range(6)]
+    out = compute_overlay(make_ohlc(rising), P)
+    assert [ln for ln in out["lines"] if ln["kind"] == "sr"] == []
 
 
 def test_line_kinds_and_no_touches() -> None:
@@ -169,6 +211,8 @@ def test_catalog_payload_contract() -> None:
     """/api/strategies 본문 — 조건검색과 같은 param 스키마 형식 (계약 고정)."""
     payload = strategies_payload()
     by_key = {s["key"]: s for s in payload["strategies"]}
+    # 지지저항은 **차트 기능**이라 전략 목록에 없다 (오너 2026-08-09) —
+    # GET /api/support-resistance 로 따로 부른다.
     assert list(by_key) == ["ma_cross", "fib_retrace"]
 
     ma = by_key["ma_cross"]
@@ -179,16 +223,29 @@ def test_catalog_payload_contract() -> None:
     fib = by_key["fib_retrace"]
     assert (fib["signals"], fib["overlay"]) == (False, True)
     assert [p["key"] for p in fib["params"]] == [
-        "drop_pct",
+        "start_mode",  # ADR-0013 7차 — 평평한 구간 돌파 + 거래대금
+        "start_box_bars",
+        "start_volume_mult",
+        "start_keep_mult",
+        "zz_depth",  # ADR-0013 5차 — 트레이딩뷰 Auto Fib Retracement 규격
+        "zz_deviation_mode",
+        "zz_deviation",
+        "fib_band_mode",  # ADR-0014 2차 개정 — 피보나치 선 위아래 밴드
+        "fib_band_value",
+        "sr_source",
         "sr_prd",
-        "sr_channel_width_pct",
+        "sr_scope",
         "sr_loopback",
+        "sr_channel_width_pct",
         "sr_min_strength",
-        "sr_max_channels",
-    ]  # ADR-0014 개정 — 채널 규격
+        "sr_round_max_gap_pct",
+    ]  # '한 띠로 묶는 폭'·'띠 개수'는 폐기 — 밴드가 그 일을 한다 (오너 2026-08-09)
+    mode = next(p for p in fib["params"] if p["key"] == "zz_deviation_mode")
+    assert (mode["type"], mode["choices"]) == ("select", ["자동", "고정"])
     for s in payload["strategies"]:
         for p in s["params"]:
-            assert set(p) == {"key", "label", "type", "unit", "required"}  # /api/conditions 와 동일
+            # /api/conditions 와 동일한 param 스키마 — 프런트가 한 벌의 폼 코드로 그린다.
+            assert set(p) == {"key", "label", "type", "unit", "required", "desc", "choices"}
 
 
 def test_parse_params_validation() -> None:
@@ -205,19 +262,34 @@ def test_parse_params_validation() -> None:
 
     fib = STRATEGIES["fib_retrace"]
     fib_ok = {
-        "drop_pct": 50,
+        "start_mode": "평평한 구간 돌파",
+        "start_box_bars": 20,
+        "start_volume_mult": 2,
+        "start_keep_mult": 2,
+        "zz_depth": 10,
+        "zz_deviation": 3,
+        "zz_deviation_mode": "자동",
+        "fib_band_mode": "자동",
+        "fib_band_value": 0.5,
+        "sr_scope": "전체",
+        "sr_source": "고가·저가 전부",
         "sr_prd": 10,
-        "sr_channel_width_pct": 5,
         "sr_loopback": 290,
+        "sr_channel_width_pct": 3,
         "sr_min_strength": 1,
-        "sr_max_channels": 5,
+        "sr_round_max_gap_pct": 5,
     }
-    with pytest.raises(ValueError, match="0과 100 사이"):
-        parse_params(fib, {**fib_ok, "drop_pct": 120})
+    assert parse_params(fib, fib_ok)["zz_deviation_mode"] == "자동"  # 말은 숫자로 안 바꾼다
+    with pytest.raises(ValueError, match="좌우"):
+        parse_params(fib, {**fib_ok, "zz_depth": 11})
+    with pytest.raises(ValueError, match="자동 / 고정"):
+        parse_params(fib, {**fib_ok, "zz_deviation_mode": "대충"})
     with pytest.raises(ValueError, match="sr_prd"):
         parse_params(fib, {**fib_ok, "sr_prd": 0})
     with pytest.raises(ValueError, match="0보다"):
-        parse_params(fib, {**fib_ok, "sr_channel_width_pct": -1})
+        parse_params(fib, {**fib_ok, "fib_band_value": -1})
+    with pytest.raises(ValueError, match="자동 / 파동폭 / 가격"):
+        parse_params(fib, {**fib_ok, "fib_band_mode": "대충"})
     with pytest.raises(ValueError, match="sr_loopback"):
         parse_params(fib, {**fib_ok, "sr_loopback": 0})
 
