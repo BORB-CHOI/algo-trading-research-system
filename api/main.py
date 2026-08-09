@@ -18,14 +18,19 @@
 from __future__ import annotations
 
 import re
+import sqlite3
+import threading
+import uuid
+from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from src.layer1_data import kv_store, run_store
 from src.layer1_data.adjust import (
     SPLIT_PRICE_MATCH,
     SPLIT_SHARE_HI,
@@ -33,7 +38,7 @@ from src.layer1_data.adjust import (
     apply_split_adjustment,
 )
 from src.layer1_data.dart import load_financials
-from src.layer1_data.derived import load_adjusted
+from src.layer1_data.derived import drop_halted, load_adjusted
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
 from src.layer1_data.marcap_loader import available_years, load_years
@@ -43,19 +48,24 @@ from src.layer1_data.quotes_rt import realtime_quotes
 from src.layer1_data.recent import merge_with_marcap, recent_meta
 from src.layer1_data.themes import theme_map
 from src.layer3_strategy import conditions as cond_registry
+from src.layer3_strategy import fibonacci, price_zones, sr_overlay, support_resistance
 from src.layer3_strategy.case_overlay import (
     STRATEGIES,
     Strategy,
     parse_params,
     strategies_payload,
 )
-from src.layer3_strategy.entry_levels import average_entry, buy_targets_sr, sell_targets_sr
-from src.layer3_strategy.fibonacci import FIB_RATIOS
+from src.layer3_strategy.entry_levels import average_entry, buy_targets_sr
 from src.layer3_strategy.screening import ScreeningRule, screen
-from src.layer3_strategy.support_resistance import SRParams, find_channels
-from src.layer3_strategy.surge import find_52w_high, find_cycle_low, find_cycle_low_adaptive
-from src.layer3_strategy.tick_size import round_to_tick, shift_ticks
+from src.layer3_strategy.support_resistance import SRLevel
+from src.layer3_strategy.surge import find_52w_high
+from src.layer3_strategy.zigzag import last_atr
+from src.layer4_execution import stops
+from src.layer4_execution.fills import walk as fill_walk
+from src.layer4_execution.runner import aggregate_returns
+from src.layer4_execution.stops import DEFAULT_FIB_STOP_RATIO
 from src.layer4_execution.strategy_one import run_strategy_one
+from src.layer4_execution.walk_forward import Progress, run_walk_forward
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
 # Amount(거래대금)는 KLineChart 의 turnover 로. Stocks(상장주식수)는 액면분할 감지용(ADR-0006).
@@ -118,7 +128,7 @@ _FULL_COLS = ["Date", "Open", "High", "Low", "Close", "Volume", "Amount", "Stock
 
 @lru_cache(maxsize=16)
 def full_history_adjusted(code: str) -> pd.DataFrame:
-    """한 종목의 전체 이력(수정주가) — 사이클 저점·지지저항 탐색용(/api/simulate·overlay).
+    """한 종목의 전체 이력(수정주가) — 파동 바닥·지지저항 탐색용(/api/simulate·overlay).
 
     **빠른 길(기본)**: 사전 계산본(`data/derived/adjusted`, build_adjusted.py) 38ms +
     그 이후 꼬리만 이어붙인다. 이어붙인 전체에 apply_split_adjustment 를 한 번 더 태운다 —
@@ -177,7 +187,7 @@ def get_candles(code: str, start: str | None, end: str | None, adjust: bool = Tr
         df = df[df["Date"] >= pd.Timestamp(start)]
     if end:
         df = df[df["Date"] <= pd.Timestamp(end)]
-    return df
+    return drop_halted(df)
 
 
 def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
@@ -205,8 +215,19 @@ def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
 
 # 조건검색은 시총·소속부까지 필요해 캔들 캐시와 컬럼을 분리한다. Stocks 는 등락률 분할 보정용.
 _SCREEN_COLS = [
-    "Date", "Code", "Name", "Market", "Dept",
-    "Open", "High", "Low", "Close", "Volume", "Amount", "Marcap", "Stocks",
+    "Date",
+    "Code",
+    "Name",
+    "Market",
+    "Dept",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Amount",
+    "Marcap",
+    "Stocks",
 ]
 
 
@@ -239,6 +260,53 @@ def health() -> dict:
         "marcap_last": meta.get("marcap_last"),
         "recent_dates": meta.get("dates", []),
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# 화면 설정 저장소 (오너 지시 2026-08-09: "간단하게 로컬 DB 구현해라")
+#
+# 전략·검색식·관심종목이 브라우저 localStorage 에만 있어서, 주소가 localhost ↔ 127.0.0.1
+# 로 바뀌자 통째로 안 보였다. 이제 `data/app.db` 에 둔다 — 주소가 바뀌든 캐시를 지우든
+# 다른 브라우저로 열든 살아남는다.
+#
+# 매매 데이터가 아니라 **화면 설정**이다. 주문·포지션은 여기 안 들어온다(CLAUDE.md).
+# ─────────────────────────────────────────────────────────────
+
+
+class StoreValue(BaseModel):
+    value: Any
+
+
+@app.get("/api/store")
+def api_store_all() -> dict:
+    """저장된 것 전부 — 화면이 뜰 때 한 번 받아 간다."""
+    return {"items": kv_store.snapshot()}
+
+
+@app.get("/api/store/{key}")
+def api_store_get(key: str) -> dict:
+    """없으면 `value: null`. 404 로 하지 않는다 — "아직 저장 안 함"은 오류가 아니다."""
+    try:
+        return {"key": key, "value": kv_store.get(key)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.put("/api/store/{key}")
+def api_store_put(key: str, body: StoreValue) -> dict:
+    try:
+        kv_store.put(key, body.value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"key": key, "ok": True}
+
+
+@app.delete("/api/store/{key}")
+def api_store_delete(key: str) -> dict:
+    try:
+        return {"key": key, "deleted": kv_store.delete(key)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @lru_cache(maxsize=1)
@@ -294,7 +362,9 @@ def api_symbols(
     hit["_kind"] = hit["Name"].astype(str).map(_kind_of)
     if kind:
         if kind not in _KIND_RULES:
-            raise HTTPException(status_code=400, detail=f"kind 는 {', '.join(_KIND_RULES)} 중 하나여야 합니다.")
+            raise HTTPException(
+                status_code=400, detail=f"kind 는 {', '.join(_KIND_RULES)} 중 하나여야 합니다."
+            )
         hit = hit[hit["_kind"] == kind]
     if hit.empty:
         return {"symbols": [], "total": 0}
@@ -308,7 +378,9 @@ def api_symbols(
         "total": total,
         "symbols": [
             {"ticker": c, "name": n, "market": mk, "kind": k, "kindLabel": _KIND_RULES[k]}
-            for c, n, mk, k in zip(hit["Code"], hit["Name"], hit["Market"], hit["_kind"], strict=True)
+            for c, n, mk, k in zip(
+                hit["Code"], hit["Name"], hit["Market"], hit["_kind"], strict=True
+            )
         ],
     }
 
@@ -448,7 +520,9 @@ _HIST_COLS = ["Date", "Code", "Open", "High", "Low", "Close", "Volume", "Stocks"
 
 class ConditionSpec(BaseModel):
     key: str
-    params: dict[str, float | int | None] = Field(default_factory=dict)
+    # 드롭다운(select) 값은 "흑자"·"자동" 같은 **말**이라 str 도 받는다 — 숫자만 받으면
+    # 그런 조건·파라미터는 422 로 튕긴다(조건검색 흑자/적자도 같은 이유로 막혀 있었다).
+    params: dict[str, float | int | str | None] = Field(default_factory=dict)
 
 
 class ScreenRunRequest(BaseModel):
@@ -563,7 +637,9 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
 _SPARK_N = 30
 
 
-def _recent_rows(year: int, codes: set[str], years: list[int], base_date: pd.Timestamp | None = None) -> pd.DataFrame:
+def _recent_rows(
+    year: int, codes: set[str], years: list[int], base_date: pd.Timestamp | None = None
+) -> pd.DataFrame:
     """codes 의 최근 _SPARK_N 거래일 행. 표시 전용이라 분할 보정은 하지 않는다."""
     frames = []
     have = 0
@@ -680,9 +756,7 @@ def api_heatmap(
     # 업종은 시총합 내림차순, 업종 안 종목은 시총 내림차순 — 트리맵 타일 배치 기준.
     sectors = [
         {"name": name, "items": sorted(items, key=lambda x: -x["marcap"])}
-        for name, items in sorted(
-            groups.items(), key=lambda kv: -sum(x["marcap"] for x in kv[1])
-        )
+        for name, items in sorted(groups.items(), key=lambda kv: -sum(x["marcap"] for x in kv[1]))
     ]
     return {
         "date": base_date.strftime("%Y-%m-%d"),
@@ -703,7 +777,9 @@ def api_heatmap(
 class SignalsRequest(BaseModel):
     code: str
     strategy: str
-    params: dict[str, float | int | None] = Field(default_factory=dict)
+    # 드롭다운(select) 값은 "흑자"·"자동" 같은 **말**이라 str 도 받는다 — 숫자만 받으면
+    # 그런 조건·파라미터는 422 로 튕긴다(조건검색 흑자/적자도 같은 이유로 막혀 있었다).
+    params: dict[str, float | int | str | None] = Field(default_factory=dict)
     start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
@@ -711,7 +787,9 @@ class SignalsRequest(BaseModel):
 class OverlayRequest(BaseModel):
     code: str
     strategy: str
-    params: dict[str, float | int | None] = Field(default_factory=dict)
+    # 드롭다운(select) 값은 "흑자"·"자동" 같은 **말**이라 str 도 받는다 — 숫자만 받으면
+    # 그런 조건·파라미터는 422 로 튕긴다(조건검색 흑자/적자도 같은 이유로 막혀 있었다).
+    params: dict[str, float | int | str | None] = Field(default_factory=dict)
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -768,7 +846,9 @@ def api_ranking(
 ) -> dict:
     """최신 거래일 기준 순위 (marcap 일봉). 실시간이 아니라 종가 기준이다."""
     if kind not in _RANK_KINDS:
-        raise HTTPException(status_code=400, detail=f"kind 는 {', '.join(_RANK_KINDS)} 중 하나여야 합니다.")
+        raise HTTPException(
+            status_code=400, detail=f"kind 는 {', '.join(_RANK_KINDS)} 중 하나여야 합니다."
+        )
     years = available_years()
     if not years:
         raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
@@ -798,7 +878,12 @@ def api_ranking(
     if field == "chg":
         rows = [r for r in rows if r["chg"] is not None]
     rows.sort(key=lambda r: r[field], reverse=not asc)
-    return {"date": base_date.strftime("%Y-%m-%d"), "kind": kind, "label": label, "items": rows[:limit]}
+    return {
+        "date": base_date.strftime("%Y-%m-%d"),
+        "kind": kind,
+        "label": label,
+        "items": rows[:limit],
+    }
 
 
 @app.get("/api/news")
@@ -860,7 +945,7 @@ def api_overlay(req: OverlayRequest) -> dict:
     strat = _get_strategy(req.strategy, need="overlay")
     params = _parse_params_or_400(strat, dict(req.params))
     if strat.full_history:
-        # 사이클 정의(ADR-0013) — 저점이 수년 전 바닥일 수 있다. end 를 주면 그날까지만
+        # 파동 정의(ADR-0013 5차) — 바닥이 수년 전일 수 있다. end 를 주면 그날까지만
         # 잘라 look-ahead 를 막는다(왼쪽만 본다). 안 주면 기준일 = 최신 거래일.
         df = full_history_adjusted(req.code)
         if not df.empty and req.end:
@@ -881,6 +966,283 @@ def api_overlay(req: OverlayRequest) -> dict:
     return {"code": req.code.strip().zfill(6), "strategy": strat.key, **result}
 
 
+def _visible_bars(df: pd.DataFrame, start: str | None, fallback: int) -> int:
+    """화면에 보이는 구간이 **일봉 몇 개**인가.
+
+    차트 도구(지지저항·오더블록·가격 빈틈)는 전부 일봉으로 계산한다. 화면이 주봉·월봉이면
+    보이는 봉 개수와 일봉 개수가 다르므로, 왼쪽 끝 봉의 날짜를 받아 실제 일봉 수를 센다.
+    `start` 가 없으면(옛 호출·일봉) 넘어온 봉 수를 그대로 쓴다.
+    """
+    if not start:
+        return fallback
+    n = int((df["Date"] >= pd.Timestamp(start)).sum())
+    return max(n, 1)
+
+
+# ── 백테스트 보관함 (오너 2026-08-09) ──────────────────────────
+# 돌린 결과를 남겨 두고 나중에 잘라 본다 — "이 달에 산 건 다 깨졌다" 를 찾는 입구.
+# 저장은 /api/backtest 가 자동으로 한다. 여기는 꺼내 보는 쪽.
+
+
+@app.get("/api/runs")
+def api_runs(limit: int = Query(50, ge=1, le=500)) -> dict:
+    """보관해 둔 백테스트 목록 — 최근 순."""
+    return {"runs": run_store.list_runs(limit=limit)}
+
+
+@app.get("/api/runs/{run_id}")
+def api_run(run_id: int) -> dict:
+    """한 번 돌린 것 전체 — 요약 + 종목별 줄 + **처음 산 달로 묶은 성적**."""
+    got = run_store.load_run(run_id)
+    if got is None:
+        raise HTTPException(status_code=404, detail=f"{run_id}번 결과가 없습니다.")
+    return {**got, "by_month": run_store.by_month(run_id)}
+
+
+@app.get("/api/runs/{run_id}/result")
+def api_run_result(run_id: int) -> dict:
+    """보관해 둔 결과를 **④ 화면이 그대로 그릴 수 있는 모양**으로 돌려준다.
+
+    저장은 되는데 꺼내 볼 입구가 없었다(오너 2026-08-10: "저장할 수 있으면 뭐하냐
+    불러오지를 못하는데"). 화면 계약은 POST /api/backtest 응답과 같다 — 불러온 결과와
+    방금 돌린 결과가 같은 표·같은 지표로 보여야 한다.
+
+    한 주도 못 산 줄은 순수익률이 없다(NULL) — 그걸로 갈라 담는다.
+    """
+    got = run_store.load_run(run_id)
+    if got is None:
+        raise HTTPException(status_code=404, detail=f"{run_id}번 결과가 없습니다.")
+
+    results: list[dict] = []
+    no_fill: list[dict] = []
+    for p in got["picks"]:
+        row = {
+            "code": p["code"],
+            "name": p["name"],
+            "n_buys": p["n_buys"],
+            "stopped": bool(p["stopped"]),
+            "avg_entry": p["avg_entry"],
+            "exit_value": p["exit_value"],
+            "net_return": p["net_return"],
+            "first_fill": p["first_fill"],
+            "last_exit": p["last_exit"],
+            "wave_low": p["wave_low"],
+            "wave_high": p["wave_high"],
+            **p["detail"],  # 걸어 둔 값·체결·손절선·미청산 표시·라운드 시작일
+        }
+        (results if p["net_return"] is not None else no_fill).append(row)
+
+    closed = [float(r["net_return"]) for r in results if not r.get("open")]
+    return {
+        "run_id": run_id,
+        "label": got["label"],
+        "ran_at": got["ran_at"],
+        "screen": got["screen"],
+        "split": got["split"],
+        "split_start": got["split_start"],
+        "split_end": got["split_end"],
+        "base_date": got["base_date"] or None,  # 전 기간 검사는 고른 날이 하루가 아니다
+        "picked": got["picked"],
+        "picked_names": [],  # 목록은 안 담는다 — 표에 있는 줄이면 충분하다
+        "universe": got["picked"],
+        "results": results,
+        "no_fill": len(no_fill),
+        "no_fill_rows": no_fill,
+        "skipped": {},  # 검사 못 한 사유는 안 담았다 — 옛 저장분과 계약을 맞춘다
+        "metrics": aggregate_returns([float(r["net_return"]) for r in results]),
+        "closed_metrics": aggregate_returns(closed),
+        "open_rounds": sum(1 for r in results if r.get("open")),
+        "params": got["params"],
+    }
+
+
+@app.delete("/api/runs/{run_id}")
+def api_run_delete(run_id: int) -> dict:
+    return {"deleted": run_store.delete_run(run_id)}
+
+
+class RunNote(BaseModel):
+    scope: str  # period | code | run
+    key: str  # '2020-03' | '005930' | run id
+    body: str
+
+
+@app.post("/api/runs/notes")
+def api_run_note(note: RunNote) -> dict:
+    """구간·종목에 메모를 붙인다 — "2020-03 코로나 폭락" 같은 재료.
+
+    나중에 재료 분석 결과를 여기 쌓아 두면 성적 표와 나란히 놓고 볼 수 있다.
+    """
+    try:
+        nid = run_store.add_note(
+            note.scope,
+            note.key,
+            note.body,
+            added_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"id": nid}
+
+
+@app.get("/api/runs/notes/{scope}/{key}")
+def api_run_notes(scope: str, key: str) -> dict:
+    return {"notes": run_store.notes_for(scope, key)}
+
+
+@app.get("/api/support-resistance")
+def api_support_resistance(
+    code: str = Query(..., description="종목코드 6자리"),
+    end: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="기준일"),
+    prd: int = Query(..., ge=1, description="고점·저점 잡는 폭(좌우 N봉)"),
+    width_pct: float = Query(..., gt=0, description="한 자리로 묶는 폭 — 그 자리 가격 대비 %"),
+    bars: int = Query(..., ge=1, description="거슬러 볼 봉 수 = 화면에 보이는 봉 수(일봉 기준)"),
+    start: str | None = Query(
+        None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="화면 **왼쪽 끝** 봉의 날짜. 주면 bars 대신 이 날짜부터 본다",
+    ),
+    min_turns: int = Query(..., ge=1, description="최소로 닿아야 하는 횟수"),
+    source: str = Query(
+        default=support_resistance.SEED_ALL,
+        description="자리 후보 — '고가·저가 전부'(기본) | '꺾임점'",
+    ),
+    max_lines: int | None = Query(
+        default=None, ge=1, description="남길 자리 수. 안 주면 보이는 봉 안의 자리를 전부 그린다"
+    ),
+) -> dict:
+    """지지저항 — **차트 기능**이지 전략이 아니다 (오너 2026-08-09).
+
+    거래량·MACD 처럼 도구 막대에서 켜고 끈다. 그래서 `/api/strategies` 카탈로그에 없다.
+    피보나치 되돌림 기법의 지지저항과는 계산이 다르다 — 그쪽은 피보나치 선 위아래 밴드
+    안에서만 찾고, 이쪽은 화면 전체에서 찾는다.
+
+    `end` 오른쪽은 보지 않는다(미래 데이터 훔쳐보기 금지). 안 주면 최신 거래일이 기준.
+
+    **`start` 를 왜 받나 (2026-08-09).** 이 계산은 언제나 일봉으로 한다. 그런데 화면이
+    주봉·월봉이면 "보이는 봉 200개"가 일봉 200개가 아니라 200주·200달이다. `bars` 만
+    받던 때는 2010~2026 이 보이는 월봉 화면에 **최근 200일** 자리를 그려서, 선이 오른쪽
+    끝 몇 봉에만 몰렸다(오너 지적 2026-08-09: "지지저항 고장났네"). 화면 왼쪽 끝 봉의
+    날짜를 그대로 받으면 어떤 주기에서도 보이는 구간과 정확히 같아진다.
+    """
+    df = full_history_adjusted(code)
+    if not df.empty and end:
+        df = df.loc[df["Date"] <= pd.Timestamp(end)].reset_index(drop=True)
+    df = drop_halted(df)
+    if df.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{code.strip().zfill(6)}' {end or '전체'} 까지 데이터가 없습니다.",
+        )
+    try:
+        result = sr_overlay.compute_overlay(
+            df,
+            {
+                "sr_prd": prd,
+                "sr_channel_width_pct": width_pct,
+                "sr_loopback": _visible_bars(df, start, bars),
+                "sr_min_strength": min_turns,
+                "sr_source": source,
+                "sr_max_channels": max_lines,
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"code": code.strip().zfill(6), **result}
+
+
+@app.get("/api/price-zones")
+def api_price_zones(
+    code: str = Query(..., description="종목코드 6자리"),
+    kind: str = Query(..., description="오더블록 | 가격 빈틈"),
+    end: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="기준일"),
+    bars: int = Query(..., ge=1, description="볼 봉 수 = 화면에 보이는 봉 수(일봉 기준)"),
+    start: str | None = Query(
+        None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="화면 **왼쪽 끝** 봉의 날짜. 주면 bars 대신 이 날짜부터 본다",
+    ),
+    push_pct: float = Query(..., gt=0, description="오더블록: 몸통이 이만큼(%) 움직여야"),
+    min_gap_pct: float = Query(..., gt=0, description="빈틈: 이만큼(%) 이상 벌어져야"),
+    lookback_bars: int = Query(..., ge=1, description="오더블록: 반대색 봉을 몇 봉 뒤까지"),
+    alive_only: bool = Query(
+        default=False, description="켜면 이미 지나간 자리를 뺀다. 기본은 흐리게라도 다 보여준다"
+    ),
+) -> dict:
+    """오더블록 · 가격 빈틈(FVG) — **차트 기능** (오너 2026-08-09).
+
+    지지저항(`/api/support-resistance`)과 **따로** 켜고 끈다. 셋이 서로 다른 자리를
+    짚기 때문이다(ADR-0014 5차 개정의 실측 표 참조).
+
+    `end` 오른쪽은 보지 않는다. 빈틈은 세 번째 봉이, 오더블록은 밀어낸 봉이 나와야
+    보이므로 구조적으로도 미래를 못 본다.
+
+    `start` 는 지지저항과 같은 뜻이다 — 주봉·월봉 화면에서 구간이 어긋나는 걸 막는다
+    (`_visible_bars` 주석 참조).
+    """
+    if kind not in (price_zones.ORDER_BLOCK, price_zones.FAIR_VALUE_GAP):
+        raise HTTPException(
+            status_code=400,
+            detail=f"모르는 종류입니다: {kind!r} "
+            f"(쓸 수 있는 값: {price_zones.ORDER_BLOCK}, {price_zones.FAIR_VALUE_GAP})",
+        )
+    df = full_history_adjusted(code)
+    if not df.empty and end:
+        df = df.loc[df["Date"] <= pd.Timestamp(end)].reset_index(drop=True)
+    df = drop_halted(df)
+    df = df.tail(_visible_bars(df, start, bars)).reset_index(drop=True)
+    if df.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{code.strip().zfill(6)}' {end or '전체'} 까지 데이터가 없습니다.",
+        )
+    p = {
+        "zone_push_pct": push_pct,
+        "zone_min_gap_pct": min_gap_pct,
+        "zone_lookback_bars": lookback_bars,
+        "zone_alive_only": alive_only,
+    }
+    try:
+        params = price_zones.zone_params_from(p)
+        finder = (
+            price_zones.find_order_blocks
+            if kind == price_zones.ORDER_BLOCK
+            else price_zones.find_fair_value_gaps
+        )
+        zones = finder(df, params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    lines = [
+        {
+            "price": z.mid,
+            "label": price_zones.zone_label(z),
+            "kind": "ob" if z.kind == price_zones.ORDER_BLOCK else "fvg",
+            "top": z.top,
+            "bottom": z.bottom,
+            # 이미 지나간 자리는 화면에서 흐리게 그린다 (오너 2026-08-09: "일단 보이게 해봐")
+            "dim": not z.alive,
+            # 그 자리가 **생긴 날**. 화면에서 이 봉부터 오른쪽으로만 띠를 그린다 —
+            # 오더블록·빈틈은 생기기 전 과거엔 존재하지 않던 자리다(표준 지표도 그렇게 그린다).
+            "start": z.date.strftime("%Y-%m-%d"),
+        }
+        for z in zones
+    ]
+    return {
+        "code": code.strip().zfill(6),
+        "anchors": {
+            "low_date": df["Date"].iloc[0].strftime("%Y-%m-%d"),
+            "high_date": df["Date"].iloc[-1].strftime("%Y-%m-%d"),
+            "low_price": float(df["Low"].min()),
+            "high_price": float(df["High"].max()),
+            "confirmed": bool(zones),
+            "falling": False,
+        },
+        "lines": lines,
+        "touches": [],
+    }
+
+
 # ─────────────────────────────────────────────────────────────
 # 전략 1호 시뮬레이션 (ADR-0011, BORB-52) — 시각 전용, 주문 아님
 # ─────────────────────────────────────────────────────────────
@@ -896,35 +1258,62 @@ class SimStage(BaseModel):
 
 
 class SimStop(BaseModel):
-    """손절 정의 — 평단 대비 % 또는 기준선(±N호가). 전부 데이터(ADR-0009)."""
+    """손절 정의 — 평단 대비 % / 기준선 / 되돌림 선(±N호가). 전부 데이터(ADR-0009).
+
+    계산 정본은 `layer4_execution.stops.stop_price` 하나다 — ③·④·전 구간이 같은 값을 쓴다.
+    """
 
     enabled: bool = False
-    mode: str = "pct"  # pct(평단 -%) | support(기준선)
+    mode: str = "pct"  # pct(평단 -%) | support(기준선) | fib(되돌림 선)
     pct: float | None = None  # mode=pct: 평단에서 몇 % 아래
     source: str = "cycle_low"  # cycle_low | custom (avwap·anchor_start 는 옛 저장분 → cycle_low)
     custom_price: float | None = None
     tick_offset: int = 0  # 기준선에서 ±N호가 (음수 = 아래)
+    # mode=fib: 어느 되돌림 선에 걸까. 기본 0.786 = 5번째 선 (오너 2026-08-10).
+    fib_ratio: float = DEFAULT_FIB_STOP_RATIO
+
+    def to_cfg(self) -> dict:
+        """`stops.stop_price` 가 받는 평범한 dict — layer4 에 pydantic 을 들이지 않는다."""
+        return {
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "pct": self.pct,
+            "source": "custom" if self.source == "custom" else "cycle_low",
+            "custom_price": self.custom_price,
+            "tick_offset": self.tick_offset,
+            "fib_ratio": self.fib_ratio,
+        }
 
 
 class SimulateRequest(BaseModel):
     code: str
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    cycle_drop_pct: float  # 사이클 하락 기준(%) — 이만큼 안 빠진 구간 = 한 상승장(ADR-0013)
-    # 변동성 방식(ADR-0013 개정 3차) — 주면 이쪽을 쓴다. 종목마다 기준이 자동으로 달라진다.
-    cycle_vol_mult: float | None = None  # 낙폭이 평소 변동성의 몇 배면 사이클이 끊기는가
-    cycle_min_bars: int | None = None  # 그 하락이 최소 몇 봉 끌어야 하는가
-    cycle_lookback_bars: int | None = None  # 신고가로부터 몇 봉까지 거슬러 볼 것인가
+    # 시작점 — 평평한 구간 돌파 + 거래대금 (ADR-0013 7차, base_breakout)
+    start_mode: str = "평평한 구간 돌파"  # 평평한 구간 돌파 | 상승 전환(옛 방식)
+    start_box_bars: int = 20
+    start_volume_mult: float = 2.0
+    start_keep_mult: float = 2.0
+    # 파동(올라간 구간) — TradingView 내장 Auto Fib Retracement 포팅(ADR-0013 5차)
+    zz_depth: int  # 꼭대기·바닥 판단 — 좌우 zz_depth÷2 봉 창의 극값
+    zz_deviation: float  # 이만큼은 움직여야 한 파동 (배 또는 %)
+    zz_deviation_mode: str = "auto"  # auto|자동 = 하루 변동폭의 배수 / pct|고정 = 고정 %
+    # 피보나치 선 위아래 띠 — 이 안에서 지지저항을 찾는다 (ADR-0014 2차 개정)
+    fib_band_mode: str  # 자동(하루 변동폭 배수) | 파동폭(%) | 가격(%)
+    fib_band_value: float
+    sr_scope: str  # 파동 구간 | 최근 N봉 | 띠 안만
+    sr_source: str = support_resistance.SEED_ALL  # 고가·저가 전부 | 꺾임점
     # 지지/저항 존 — TradingView Support Resistance Channels 포팅(ADR-0014 개정)
-    sr_prd: int  # 피벗 기준(좌우 N거래일)
-    sr_channel_width_pct: float  # 존 최대 폭 — 최근 300봉 가격폭 대비 %
-    sr_loopback: int  # 피벗 탐색 구간(봉)
-    sr_min_strength: int  # 최소 강도(피벗 20점 단위)
-    sr_max_channels: int  # 남길 존 수(강도순)
+    sr_prd: int  # 고점·저점 잡는 폭(좌우 N봉)
+    sr_loopback: int  # '최근 N봉' 범위일 때 거슬러 볼 봉 수
+    sr_channel_width_pct: float  # 한 자리로 묶는 폭 — 그 자리 가격 대비 %
+    sr_min_strength: int  # 그 자리에 최소 몇 번은 닿아야
+    sr_round_max_gap_pct: float  # 주문가가 되돌림 선에서 떨어져도 되는 폭(%)
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
-    sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high(사이클 고점)
+    sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high(파동 꼭대기)
     buy_tick_offset: int = 0  # 매수 = 선택된 지지/저항선 ±N호가
     sell_tick_offset: int = 0
+    buy_min_gap_pct: float = 0.0  # 매수 차수 사이 최소 간격(%) — 0 이면 안 씀
     # ② 주문수량 — 주면 체결 내역에 수량·금액·손익까지 계산한다 (표시 전용, 비용 미포함)
     qty: float | None = None
     qty_type: str = "shares"  # shares(주) | amount(원)
@@ -933,34 +1322,28 @@ class SimulateRequest(BaseModel):
 
 @app.post("/api/simulate")
 def api_simulate(req: SimulateRequest) -> dict:
-    """전략 1호(상승장 사이클 피보나치 + 분할) 시뮬레이션 — 사이클·목표가·체결 마커·앵커 VWAP.
+    """전략 1호(올라간 구간 피보나치 + 분할) 시뮬레이션 — 파동·목표가·체결 마커.
 
     **시각화 전용 결정론 계산.** 주문 전송·매매 판단 없음(CLAUDE.md). 모든 전략 숫자는
     요청에서 받는다(ADR-0009). end 를 기준일로 주면 그 시점까지만 본다(look-ahead 방지).
 
-    파동 = **상승장 사이클** 하나뿐이다(ADR-0013 개정, 오너 확정 2026-08-06 — "급등" 폐기).
-    분할 목표가 = 각 되돌림 레벨에서 가장 가까운 **지지/저항선 ±N호가**(ADR-0014) —
-    라운드 피겨·앵커 VWAP 방식은 폐기했다.
+    파동 = **올라간 구간**(바닥→꼭대기) 하나. 바닥 = **이번 상승장이 시작된 지점**
+    (ADR-0013 6차 — 추세 한복판의 눌림을 시작점으로 잡던 문제를 고쳤다).
+    분할 목표가 = 각 되돌림 레벨에서 가장 가까운 **지지/저항선 ±N호가**(ADR-0014).
     """
     code = req.code.strip().zfill(6)
-    # 사이클 저점은 수년 전 바닥일 수 있다 — 이 종목의 전체 이력을 읽는다(기준일까지).
+    # 파동 바닥은 수년 전일 수 있다 — 이 종목의 전체 이력을 읽는다(기준일까지).
     full = full_history_adjusted(code)
     if full.empty:
         raise HTTPException(status_code=404, detail=f"'{code}' 데이터가 없습니다.")
     if req.end:
         full = full.loc[full["Date"] <= pd.Timestamp(req.end)].reset_index(drop=True)
         if full.empty:
-            raise HTTPException(status_code=404, detail=f"'{code}' {req.end} 까지 데이터가 없습니다.")
-    try:
-        if req.cycle_vol_mult:
-            cycle = find_cycle_low_adaptive(
-                full,
-                vol_mult=req.cycle_vol_mult,
-                min_bars=req.cycle_min_bars or 0,
-                lookback_bars=req.cycle_lookback_bars or len(full),
+            raise HTTPException(
+                status_code=404, detail=f"'{code}' {req.end} 까지 데이터가 없습니다."
             )
-        else:
-            cycle = find_cycle_low(full, drop_pct=req.cycle_drop_pct)
+    try:
+        cycle = fibonacci.wave_start_of(full, req.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     rise = full.loc[full["Date"] >= cycle.date].reset_index(drop=True)
@@ -971,46 +1354,48 @@ def api_simulate(req: SimulateRequest) -> dict:
     if fib_span <= 0:
         raise HTTPException(
             status_code=400,
-            detail=f"사이클 저점({cycle.price:,.0f})과 고점({high_price:,.0f})이 같습니다 — 하락 기준을 조정하세요.",
+            detail=(
+                f"파동 바닥({cycle.price:,.0f})과 꼭대기({high_price:,.0f})가 같습니다 — "
+                "좌우 봉수나 잔파동 기준을 조정하세요."
+            ),
         )
-    # 참고 정보 — 사이클 고점이 52주 신고가인가 (시장 표준, 전략 판단은 호출부/오너 몫)
+    # 참고 정보 — 파동 꼭대기가 52주 신고가인가 (시장 표준, 전략 판단은 호출부/오너 몫)
     _, w52_price = find_52w_high(full)
     is_52w = abs(high_price - w52_price) < 1e-9
 
     warnings: list[str] = []
     if cycle.falling:
         warnings.append(
-            f"하락 기준(-{req.cycle_drop_pct:g}%)을 넘는 하락이 진행 중 — 직전 상승장 기준으로 "
-            "그렸습니다. 바닥은 반등이 확인돼야 저점으로 갱신됩니다."
+            "추세가 아래로 꺾였습니다 — 직전 상승장의 시작 바닥에서 그 뒤 최고가까지 "
+            "그렸습니다. 새 상승장은 직전 꼭대기를 종가로 넘어야 시작된 것으로 봅니다."
+        )
+    if not cycle.confirmed:
+        warnings.append(
+            "상승 전환이 확인된 적이 없어 시작 바닥을 못 찾았습니다 — 구간 최저가로 대신 "
+            "그렸습니다. 좌우 봉수나 잔파동 기준을 낮춰 보세요."
         )
 
-    # 지지/저항 존 — TradingView "Support Resistance Channels" 포팅(ADR-0014 개정,
-    # 오너 지시 2026-08-06: 자체 계산식 폐기·표준 채택). 최근 loopback 봉의 피벗을
-    # 최근 가격폭 비례 폭의 존으로 묶고, 강도순 최대 max_channels 개만 남긴다 —
-    # 원본 규격 자체가 개수를 줄여 주므로 별도의 표시용 선별이 필요 없다.
-    fib_prices = [high_price - ratio * fib_span for ratio in FIB_RATIOS]
+    # 지지/저항 띠 — **피보나치 선 근처의 지지저항의 라운드 피겨** (ADR-0014 2차 개정,
+    # 오너 규칙 2026-08-08). 딴 데서 찾은 선은 아예 안 만든다: 옛 방식은 최근 290봉
+    # 전체에서 찾아서, 그 사이 7배가 오른 종목에 작년 가격대의 선이 떴다.
+    # ③ 화면·차트 오버레이가 같은 함수(fibonacci.fib_zones_for)를 쓴다.
     try:
-        channels = find_channels(
+        fib_map, zones = fibonacci.fib_zones_for(
             full,
-            SRParams(
-                prd=req.sr_prd,
-                channel_width_pct=req.sr_channel_width_pct,
-                loopback=req.sr_loopback,
-                min_strength=req.sr_min_strength,
-                max_channels=req.sr_max_channels,
-            ),
+            req.model_dump(),
+            low=cycle.price,
+            high=high_price,
+            wave_start=cycle.date,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    # 목표가 스냅 대표값 = 존 중앙(임시 정책 — 존 경계 vs 중앙은 오너 확정 대기).
-    # **목표가 후보는 피보 구간(78.6% 레벨~고점) 안만** — 존은 최근 loopback 봉 전체에서
-    # 나오므로, 필터 없이는 되돌림 목표가가 사이클 밖 존에 스냅될 수 있다(검증 지적).
-    # 화면 표시(lines)는 존 전체를 그대로 그린다 — 표준 규격이 이미 ≤max_channels 개.
-    fib_floor = min(fib_prices)
+    # 목표가 후보 = 각 띠의 라운드 피겨. 존 중앙(계산에서 나온 소수점 값)이 아니라
+    # 사람들이 실제로 주문을 쌓는 가격이다 (오너 확정 2026-08-08, Osler 2003).
+    # ±호가는 ② 매매전략의 buy/sell_tick_offset 이 뒤에서 적용한다.
     sr = [
-        lv
-        for lv in (ch.to_level() for ch in channels)
-        if fib_floor <= lv.price <= high_price
+        SRLevel(price=float(z.order_price), touches=z.pivots)
+        for z in zones
+        if z.order_price is not None
     ]
 
     buys = sorted(
@@ -1026,44 +1411,43 @@ def api_simulate(req: SimulateRequest) -> dict:
     # 합이 100 미만이면 나머지는 미배분(현금 대기), 100 초과는 과매수라 여기서 거부한다.
     buy_wsum = sum(s.weight for s in buys if s.weight > 0)
     if buy_wsum > 100:
-        raise HTTPException(status_code=400, detail=f"매수 비중 합이 {buy_wsum:g}% — 100%를 넘을 수 없습니다.")
+        raise HTTPException(
+            status_code=400, detail=f"매수 비중 합이 {buy_wsum:g}% — 100%를 넘을 수 없습니다."
+        )
     sell_wsum = sum(s.weight for s in sells if s.weight > 0)
     if sell_wsum > 100:
-        raise HTTPException(status_code=400, detail=f"매도 비중 합이 {sell_wsum:g}% — 100%를 넘을 수 없습니다.")
+        raise HTTPException(
+            status_code=400, detail=f"매도 비중 합이 {sell_wsum:g}% — 100%를 넘을 수 없습니다."
+        )
 
     computed: dict[str, int] = {}
     # 피보나치는 차트 그리기 도구(피보나치 선분)처럼 0~100% 표준 레벨을 **전부** 긋는다 —
     # 매수 차수로 고른 비율만 그리면 "사이 선이 5개 나와야 하지 않나"가 된다(오너 2026-08-06).
     lines: list[dict] = [
-        {"price": cycle.price, "label": "사이클 저점 (100%)", "kind": "anchor"},
+        {"price": cycle.price, "label": "파동 바닥 (100%)", "kind": "anchor"},
         {
             "price": high_price,
-            "label": "사이클 고점 (0%) · 52주 신고가" if is_52w else "사이클 고점 (0%)",
+            "label": "파동 꼭대기 (0%) · 52주 신고가" if is_52w else "파동 꼭대기 (0%)",
             "kind": "anchor",
         },
     ]
-    for ratio, fib_price in zip(FIB_RATIOS, fib_prices, strict=True):
-        lines.append({"price": fib_price, "label": f"{ratio * 100:.1f}%", "kind": "fib"})
-    for ch in channels:  # 존(띠)으로 그린다 — top/bottom 이 있으면 프런트가 띠+중앙선
-        lines.append(
-            {
-                "price": ch.mid,
-                "label": f"지지저항 (고점·저점 {ch.pivots}개)",
-                "kind": "sr",
-                "top": ch.top,
-                "bottom": ch.bottom,
-            }
-        )
+    # 피보나치 선 + 밴드, 지지저항 선 — 차트 오버레이(fibonacci.compute_overlay)와
+    # **같은 함수**를 쓴다. 두 화면에서 다르게 보이면 어느 쪽을 믿을지 알 수 없다.
+    lines += fibonacci.fib_lines(
+        fib_map, req.model_dump(), span=high_price - cycle.price, atr=last_atr(full)
+    )
+    lines += fibonacci.sr_lines(zones)
 
-    # 목표가를 못 걸어도 전체를 실패시키지 않는다 — 그릴 수 있는 것(사이클·피보·지지저항)은
+    # 목표가를 못 걸어도 전체를 실패시키지 않는다 — 그릴 수 있는 것(파동·피보·지지저항)은
     # 다 그리고, 못 건 쪽만 경고로 알린다 (오너 지적 2026-08-06: "오류만 띄우면 뭘 고칠지 몰라").
     try:
         blevels = (
             buy_targets_sr(
-                cycle.price,  # 피보 구간 = 사이클 저점 → 고점 (ADR-0013)
+                cycle.price,  # 피보 구간 = 파동 바닥 → 꼭대기 (ADR-0013 5차)
                 high_price,
                 ratios=[s.ratio for s in buys],
                 levels=sr,
+                min_gap_pct=req.buy_min_gap_pct,
                 tick_offset=req.buy_tick_offset,
             )
             if buys
@@ -1073,101 +1457,119 @@ def api_simulate(req: SimulateRequest) -> dict:
         warnings.append(f"매수 목표가를 못 걸었습니다 — {e}")
         buys, blevels = [], []
 
-    # 체결 스캔은 사이클 고점 다음 날부터 — 고점 이전 하락은 이 전략의 눌림이 아니다.
+    # 체결 스캔은 파동 꼭대기 다음 날부터 — 고점 이전 하락은 이 전략의 눌림이 아니다.
     after = full.loc[full["Date"] > high_date].reset_index(drop=True)
-    fills: list[dict] = []
-    buy_fills: list[tuple[float, float]] = []  # (가격, 비중) — 평단 계산용
-    lowest_fill: float | None = None
-    last_fill_date = None
-    # 주문수량 → 차수별 수량 = 총량 × (비중/100). 비중이 전부 비면 균등 분할.
-    # 주수는 항상 내림(초과 매수 방지).
-    trade_buys: list[dict] = []
-    trade_sells: list[dict] = []
+    # 봉을 날짜순으로 지나가며 채운다 — **1차만 걸려도 매도가 나가고**, 평단이 내려가면
+    # 매도 주문도 따라 내려간다 (오너 지적 2026-08-09: "3차 매수까지 다 해야지만 매도
+    # 신청을 넣고 있는데, 평단가 수익 기준으로 설정했는데도 왜 이러지").
+    # ④ 백테스트도 **같은 엔진**을 쓴다 — 두 화면이 다르면 어느 쪽을 믿을지 알 수 없다.
+    buy_px: list[float] = []
     for stage, level in zip(buys, blevels, strict=True):
         computed[stage.id] = level.price
-        eff = stage.price_override if stage.price_override is not None else level.price
+        eff = float(stage.price_override if stage.price_override is not None else level.price)
+        buy_px.append(eff)
         lines.append({"price": eff, "label": f"매수 {level.tranche}차", "kind": "buy"})
-        hit = after.loc[after["Low"] <= eff]
-        if not hit.empty:
-            d0 = hit.iloc[0]
-            fills.append({"time": d0["Date"].strftime("%Y-%m-%d"), "price": float(eff), "side": "buy", "stage": level.tranche})
-            buy_fills.append((float(eff), stage.weight or 1.0))
-            lowest_fill = eff if lowest_fill is None else min(lowest_fill, eff)
-            last_fill_date = d0["Date"] if last_fill_date is None else max(last_fill_date, d0["Date"])
-            if req.qty:
-                frac = (stage.weight / 100.0) if buy_wsum > 0 else 1 / len(buys)
-                shares = int(req.qty * frac) if req.qty_type == "shares" else int(req.qty * frac / eff)
-                trade_buys.append({
-                    "stage": level.tranche, "time": fills[-1]["time"], "price": float(eff),
-                    "shares": shares, "amount": shares * float(eff),
-                })
 
+    walked = fill_walk(
+        after,
+        buy_px,
+        [s.weight or 1.0 for s in buys],
+        sell_rebounds=[s.rebound_pct for s in sells],
+        sell_basis=req.sell_basis,
+        anchor_high=high_price,
+        levels=sr,
+        sell_tick_offset=req.sell_tick_offset,
+        sell_overrides=[s.price_override for s in sells],
+    )
     # 매도 기준가는 응답으로도 내보낸다 — 화면에 안 보이면 "평단 기준인 줄 알았다"가 반복된다
-    # (실측 2026-08-06: 기준점이 사이클 고점인 걸 모르고 매도가가 왜 40만이냐는 오해).
-    sell_basis_price: float | None = None
-    if sells:
-        if req.sell_basis == "anchor_high":
-            basis = high_price
-        elif req.sell_basis == "lowest_fill":
-            basis = lowest_fill
-        else:
-            basis = average_entry(buy_fills) if buy_fills else None
-        sell_basis_price = basis
-        if basis is not None:
-            try:
-                slevels = sell_targets_sr(
-                    basis,
-                    rebound_pcts=[s.rebound_pct for s in sells],
-                    levels=sr,
-                    tick_offset=req.sell_tick_offset,
-                )
-            except ValueError as e:
-                warnings.append(f"매도 목표가를 못 걸었습니다 — {e}")
-                slevels, sells = [], []
-            sell_scan = after if last_fill_date is None else after.loc[after["Date"] > last_fill_date]
-            position = sum(t["shares"] for t in trade_buys)
-            avg_cost = (
-                sum(t["price"] * t["shares"] for t in trade_buys) / position if position else None
+    # (실측 2026-08-06: 기준점이 파동 꼭대기인 걸 모르고 매도가가 왜 40만이냐는 오해).
+    sell_basis_price = walked.basis
+    for stage, px in zip(sells, walked.sell_prices, strict=True):
+        if px is None:
+            continue  # 아직 못 거는 차수(보유 없음·기준가 위 선 부족) — 선도 안 그린다
+        computed[stage.id] = px
+        lines.append({"price": px, "label": f"매도 {sells.index(stage) + 1}차", "kind": "sell"})
+    if sells and all(px is None for px in walked.sell_prices) and walked.basis is not None:
+        warnings.append("매도 목표가를 못 걸었습니다 — 기준가 위에 지지/저항선이 없습니다.")
+
+    # 체결을 시간순으로 훑어 수량·평단·손익을 만든다. 매도 손익은 **그 시점 평단** 기준이다
+    # (나중에 산 물량으로 계산하면 이미 판 것의 손익이 바뀐다).
+    fills: list[dict] = []
+    trade_buys: list[dict] = []
+    trade_sells: list[dict] = []
+    events = sorted(
+        [(f.date, 1, f) for f in walked.buys] + [(f.date, 0, f) for f in walked.sells],
+        key=lambda e: (e[0], e[1]),  # 같은 날이면 매도 먼저 — 엔진의 판정 순서와 맞춘다
+    )
+    position = 0
+    cost = 0.0
+    for day, is_buy, f in events:
+        when = day.strftime("%Y-%m-%d")
+        side = "buy" if is_buy else "sell"
+        fills.append({"time": when, "price": f.price, "side": side, "stage": f.tranche})
+        if not req.qty:
+            continue
+        if is_buy:
+            stage = buys[f.index]
+            frac = (stage.weight / 100.0) if buy_wsum > 0 else 1 / len(buys)
+            shares = (
+                int(req.qty * frac) if req.qty_type == "shares" else int(req.qty * frac / f.price)
             )
-            for stage, level in zip(sells, slevels, strict=True):
-                computed[stage.id] = level.price
-                eff = stage.price_override if stage.price_override is not None else level.price
-                lines.append({"price": eff, "label": f"매도 {level.tranche}차", "kind": "sell"})
-                if buy_fills:  # 보유가 없으면 매도 체결은 없다 — 선만 그린다
-                    hit = sell_scan.loc[sell_scan["High"] >= eff]
-                    if not hit.empty:
-                        d0 = hit.iloc[0]
-                        fills.append({"time": d0["Date"].strftime("%Y-%m-%d"), "price": float(eff), "side": "sell", "stage": level.tranche})
-                        if position and avg_cost is not None:
-                            # 매도 비중은 보유 포지션 대비 절대 % — 합<100 이면 잔여는 계속 보유
-                            frac = (stage.weight / 100.0) if sell_wsum > 0 else 1 / len(sells)
-                            shares = min(int(position * frac), position - sum(t["shares"] for t in trade_sells))
-                            if shares > 0:
-                                trade_sells.append({
-                                    "stage": level.tranche, "time": fills[-1]["time"], "price": float(eff),
-                                    "shares": shares, "amount": shares * float(eff),
-                                    "pnl_pct": (float(eff) / avg_cost - 1) * 100,
-                                    "pnl": (float(eff) - avg_cost) * shares,
-                                })
+            if shares <= 0:
+                continue
+            position += shares
+            cost += shares * f.price
+            trade_buys.append(
+                {
+                    "stage": f.tranche,
+                    "time": when,
+                    "price": f.price,
+                    "shares": shares,
+                    "amount": shares * f.price,
+                }
+            )
+        elif position > 0:
+            avg_cost = cost / position
+            # 매도 비중은 보유 포지션 대비 절대 % — 합<100 이면 잔여는 계속 보유
+            frac = (sells[f.index].weight / 100.0) if sell_wsum > 0 else 1 / len(sells)
+            shares = min(int(position * frac), position)
+            if shares <= 0:
+                continue
+            cost -= shares * avg_cost
+            position -= shares
+            trade_sells.append(
+                {
+                    "stage": f.tranche,
+                    "time": when,
+                    "price": f.price,
+                    "shares": shares,
+                    "amount": shares * f.price,
+                    "pnl_pct": (f.price / avg_cost - 1) * 100,
+                    "pnl": (f.price - avg_cost) * shares,
+                }
+            )
+    buy_fills = [(f.price, buys[f.index].weight or 1.0) for f in walked.buys]
 
     # ── 손절 — 평단 -% 또는 기준선 ±N호가. 첫 매수 체결일부터 Low ≤ 손절가 첫 날 발동 ──
-    stop_price: int | None = None
-    if req.stop and req.stop.enabled and buy_fills:
-        s = req.stop
-        if s.mode == "pct":
-            if not s.pct or s.pct <= 0:
-                raise HTTPException(status_code=400, detail="손절 %는 0보다 커야 합니다.")
-            stop_price = round_to_tick(average_entry(buy_fills) * (1 - s.pct / 100), "down")
-        else:
-            if s.source == "custom":
-                if not s.custom_price or s.custom_price <= 0:
-                    raise HTTPException(status_code=400, detail="손절 기준 가격을 입력하세요.")
-                base_px = s.custom_price
-            else:  # cycle_low (avwap·anchor_start 옛 저장분도 여기로 — VWAP 폐기, ADR-0014)
-                base_px = cycle.price
-            stop_price = shift_ticks(base_px, s.tick_offset)
-        lines.append({"price": stop_price, "label": "손절", "kind": "stop"})
+    # 손절가 공식은 ④ 백테스팅과 **같은 함수**(layer4.stops)다 — 두 화면이 같은 설정으로
+    # 다른 자리를 그리면 안 된다. 되돌림 선 기준(fib)은 파동만 정해지면 자리가 정해지므로
+    # 매수 체결이 없어도 그린다 — "어디서 자를 건지"를 사기 전에 봐야 한다(오너 2026-08-10).
+    stop_cfg = req.stop.to_cfg() if req.stop else None
+    stop_px: int | None = None
+    if req.stop and req.stop.enabled and (buy_fills or req.stop.mode == "fib"):
+        try:
+            stop_px = stops.stop_price(
+                stop_cfg,
+                avg_entry=average_entry(buy_fills) if buy_fills else None,
+                cycle_low=cycle.price,
+                wave_high=high_price,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if stop_px is not None:
+            lines.append({"price": stop_px, "label": stops.stop_label(stop_cfg), "kind": "stop"})
 
+    stop_price = stop_px if buy_fills else None  # 산 게 없으면 발동 판정도 없다
     if stop_price is not None:
         first_buy = min(f["time"] for f in fills if f["side"] == "buy")
         scan = after.loc[after["Date"] >= pd.Timestamp(first_buy)]
@@ -1177,23 +1579,31 @@ def api_simulate(req: SimulateRequest) -> dict:
             # 손절 이후 체결은 취소. 당일 겹침은 장중 순서를 모르니 보수적으로 —
             # 매수는 유지(사자마자 손절 = 손실 커짐), 매도는 취소(익절 못 한 걸로 본다).
             fills = [
-                f for f in fills
+                f
+                for f in fills
                 if (f["side"] == "buy" and f["time"] <= stop_time)
                 or (f["side"] == "sell" and f["time"] < stop_time)
             ]
             trade_buys = [t for t in trade_buys if t["time"] <= stop_time]
             trade_sells = [t for t in trade_sells if t["time"] < stop_time]
-            fills.append({"time": stop_time, "price": float(stop_price), "side": "sell", "stage": 0})
+            fills.append(
+                {"time": stop_time, "price": float(stop_price), "side": "sell", "stage": 0}
+            )
             bought0 = sum(t["shares"] for t in trade_buys)
             held = bought0 - sum(t["shares"] for t in trade_sells)
             if held > 0:
                 avg0 = sum(t["price"] * t["shares"] for t in trade_buys) / bought0
-                trade_sells.append({
-                    "stage": 0, "time": stop_time, "price": float(stop_price),
-                    "shares": held, "amount": held * float(stop_price),
-                    "pnl_pct": (float(stop_price) / avg0 - 1) * 100,
-                    "pnl": (float(stop_price) - avg0) * held,
-                })
+                trade_sells.append(
+                    {
+                        "stage": 0,
+                        "time": stop_time,
+                        "price": float(stop_price),
+                        "shares": held,
+                        "amount": held * float(stop_price),
+                        "pnl_pct": (float(stop_price) / avg0 - 1) * 100,
+                        "pnl": (float(stop_price) - avg0) * held,
+                    }
+                )
 
     # 곡선 없음 — 앵커 VWAP 은 폐기(ADR-0014, 오너: "지지저항 그게 아닌 거 같은데").
     # 계약(series 필드)은 유지한다 — 프런트가 빈 배열이면 아무것도 안 그린다.
@@ -1204,9 +1614,7 @@ def api_simulate(req: SimulateRequest) -> dict:
     if req.qty:
         bought = sum(t["shares"] for t in trade_buys)
         sold = sum(t["shares"] for t in trade_sells)
-        avg_cost = (
-            sum(t["price"] * t["shares"] for t in trade_buys) / bought if bought else None
-        )
+        avg_cost = sum(t["price"] * t["shares"] for t in trade_buys) / bought if bought else None
         remain = bought - sold
         last_close = float(full["Close"].iloc[-1])
         trades = {
@@ -1221,14 +1629,14 @@ def api_simulate(req: SimulateRequest) -> dict:
 
     return {
         "code": code,
-        # 상승장 사이클 = 피보 구간. confirmed=False = 하락 기준 미충족 — 구간 최저가로 대신함.
+        # 올라간 구간 = 피보 구간. confirmed=False = 확정된 바닥 없음 — 구간 최저가로 대신함.
+        # falling=True = 꼭대기 찍고 내려오는 중.
         "cycle": {
             "low_date": cycle.date.strftime("%Y-%m-%d"),
             "low_price": cycle.price,
             "high_date": high_date.strftime("%Y-%m-%d"),
             "high_price": high_price,
             "gain_pct": (high_price / cycle.price - 1) * 100,
-            "drop_pct": req.cycle_drop_pct,
             "confirmed": cycle.confirmed,
             "falling": cycle.falling,
             "is_52w_high": is_52w,
@@ -1252,21 +1660,94 @@ class BacktestRequest(BaseModel):
     split: str  # train | validate | test(명시 동의 필요)
     conditions: list[dict] = Field(default_factory=list)  # POST /api/screen/run 과 동일 형식
     logic: str = "and"
-    cycle_drop_pct: float
-    # 지지/저항 존 파라미터 — SimulateRequest 와 동일(ADR-0014 개정)
+    # 시작점 — SimulateRequest 와 동일(ADR-0013 7차)
+    start_mode: str = "평평한 구간 돌파"
+    start_box_bars: int = 20
+    start_volume_mult: float = 2.0
+    start_keep_mult: float = 2.0
+    # 파동 파라미터 — SimulateRequest 와 동일(ADR-0013 5차)
+    zz_depth: int
+    zz_deviation: float
+    zz_deviation_mode: str = "auto"
+    # 피보나치 선 띠 + 지지/저항 존 파라미터 — SimulateRequest 와 동일(ADR-0014 2차 개정)
+    fib_band_mode: str
+    fib_band_value: float
+    sr_scope: str
+    sr_source: str = support_resistance.SEED_ALL
     sr_prd: int
-    sr_channel_width_pct: float
     sr_loopback: int
+    sr_channel_width_pct: float
     sr_min_strength: int
-    sr_max_channels: int
+    sr_round_max_gap_pct: float
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"
     buy_tick_offset: int = 0
     sell_tick_offset: int = 0
+    buy_min_gap_pct: float = 0.0
     stop: SimStop | None = None
     # §4.1 Test 는 단 1회 — UI 의 명시 체크 없이는 서버가 거부한다(가드 정본 slice_split).
     i_know_test_is_once: bool = False
+    # 보관함에 남길 이름·검색식 (오너 2026-08-09: "백테스트 돌린 거 어디에 저장해둘 수
+    # 있게 해서, 데이터 분석을 너가 가능하도록 해"). 안 주면 이름 없이 담는다.
+    label: str = ""
+    screen_name: str = ""
+    # 「전 구간」 — 구간 시작 하루가 아니라 **거래일마다** 검색식을 다시 돌린다
+    # (walk_forward, 오너 2026-08-10: "그때부터 하루씩 지금까지 매매 가능해야지").
+    # split 대신 이 두 날짜를 쓴다. 몇 분 걸리므로 /api/backtest/all 로만 받는다.
+    start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    # 다 팔고 나서 같은 자리에 또 오면 다시 살지 (전 기간 검사에서만 뜻이 있다).
+    # 끄면 새 고점이 나와 되돌림 선이 다시 그어져야 산다 (오너 2026-08-10).
+    reenter_same_wave: bool = False
+
+
+def _strategy_kwargs(req: BacktestRequest) -> dict:
+    """요청 → 엔진 인자. `run_strategy_one` 과 `run_walk_forward` 가 같은 값을 받는다.
+
+    두 엔진의 차이는 "종목을 언제 고르나"뿐이다 — 전략 값은 한 곳에서 만든다.
+    """
+    if not req.conditions:
+        raise HTTPException(
+            status_code=400, detail="조건검색식이 비었습니다 — ①에서 검색식을 고르세요."
+        )
+    return {
+        "zz": {
+            "zz_depth": req.zz_depth,
+            "zz_deviation": req.zz_deviation,
+            "zz_deviation_mode": req.zz_deviation_mode,
+            "start_mode": req.start_mode,
+            "start_box_bars": req.start_box_bars,
+            "start_volume_mult": req.start_volume_mult,
+            "start_keep_mult": req.start_keep_mult,
+        },
+        "sr": {
+            "fib_band_mode": req.fib_band_mode,
+            "fib_band_value": req.fib_band_value,
+            "sr_scope": req.sr_scope,
+            "sr_source": req.sr_source,
+            "sr_prd": req.sr_prd,
+            "sr_loopback": req.sr_loopback,
+            "sr_channel_width_pct": req.sr_channel_width_pct,
+            "sr_min_strength": req.sr_min_strength,
+            "sr_round_max_gap_pct": req.sr_round_max_gap_pct,
+        },
+        "buy": [
+            {"ratio": s.ratio, "weight": s.weight}
+            for s in req.buy
+            if s.enabled and s.ratio is not None and 0 < s.ratio < 1
+        ],
+        "sell": [
+            {"rebound_pct": s.rebound_pct, "weight": s.weight}
+            for s in req.sell
+            if s.enabled and s.rebound_pct is not None and s.rebound_pct > 0
+        ],
+        "sell_basis": req.sell_basis,
+        "buy_tick_offset": req.buy_tick_offset,
+        "sell_tick_offset": req.sell_tick_offset,
+        "buy_min_gap_pct": req.buy_min_gap_pct,
+        "stop": req.stop.to_cfg() if req.stop and req.stop.enabled else None,
+    }
 
 
 @app.post("/api/backtest")
@@ -1276,49 +1757,130 @@ def api_backtest(req: BacktestRequest) -> dict:
     **분석 전용 결정론 계산, 주문 없음(CLAUDE.md).** 세팅은 기준일(선별일) 왼쪽만,
     체결은 오른쪽만 — look-ahead 는 구조로 차단(strategy_one docstring).
     비용은 왕복 정액률(ADR-0004 placeholder) 포함. N<30 은 reliable=False 로 표시.
+
+    종목을 고르는 건 구간 시작 직전 **하루**뿐이다. 거래일마다 다시 고르는 검사는
+    `/api/backtest/all`(전 구간).
     """
-    if not req.conditions:
-        raise HTTPException(status_code=400, detail="조건검색식이 비었습니다 — ①에서 검색식을 고르세요.")
-    buys = [
-        {"ratio": s.ratio, "weight": s.weight}
-        for s in req.buy
-        if s.enabled and s.ratio is not None and 0 < s.ratio < 1
-    ]
-    sells = [
-        {"rebound_pct": s.rebound_pct, "weight": s.weight}
-        for s in req.sell
-        if s.enabled and s.rebound_pct is not None and s.rebound_pct > 0
-    ]
-    stop = None
-    if req.stop and req.stop.enabled:
-        stop = {
-            "enabled": True,
-            "mode": req.stop.mode,
-            "pct": req.stop.pct,
-            "source": "custom" if req.stop.source == "custom" else "cycle_low",
-            "custom_price": req.stop.custom_price,
-            "tick_offset": req.stop.tick_offset,
-        }
     try:
-        return run_strategy_one(
+        result = run_strategy_one(
             req.conditions,
             req.logic,
             req.split,
-            cycle_drop_pct=req.cycle_drop_pct,
-            sr={
-                "sr_prd": req.sr_prd,
-                "sr_channel_width_pct": req.sr_channel_width_pct,
-                "sr_loopback": req.sr_loopback,
-                "sr_min_strength": req.sr_min_strength,
-                "sr_max_channels": req.sr_max_channels,
-            },
-            buy=buys,
-            sell=sells,
-            sell_basis=req.sell_basis,
-            buy_tick_offset=req.buy_tick_offset,
-            sell_tick_offset=req.sell_tick_offset,
-            stop=stop,
             i_know_test_is_once=req.i_know_test_is_once,
+            **_strategy_kwargs(req),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # 보관함에 남긴다 — 나중에 "이 달에 산 건 다 깨졌다" 를 찾으려면 결과가 남아 있어야 한다.
+    return _archive(result, req)
+
+
+def _archive(result: dict, req: BacktestRequest) -> dict:
+    """결과를 보관함에 남긴다. **저장 실패가 결과를 못 보게 만들면 안 된다** — 경고만."""
+    try:
+        result["run_id"] = run_store.save_run(
+            result,
+            ran_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            params=req.model_dump(exclude={"conditions"}),
+            label=req.label,
+            screen=req.screen_name,
+        )
+    except (OSError, sqlite3.Error, ValueError, TypeError) as e:
+        result["run_id"] = None
+        result.setdefault("warnings", []).append(f"결과 보관 실패 — {e}")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
+# ④-b 전 구간 — 거래일마다 다시 고르는 검사 (layer4 walk_forward)
+#
+# 몇 분 걸린다(실측 5~10분). 한 번의 HTTP 요청으로 붙들고 있으면 브라우저가 먼저
+# 끊어 버리고, 오너는 "멈춘 건지 도는 건지" 알 수 없다. 그래서 **시작 / 진행 확인**
+# 두 요청으로 나눈다. 진행률은 엔진이 주는 Progress 를 그대로 옮긴다.
+#
+# 무거운 계산이라 **한 번에 하나만** 돌린다 — 두 개가 겹치면 둘 다 느려지고 메모리가 는다.
+# ─────────────────────────────────────────────────────────────
+
+_WF_JOBS: dict[str, dict] = {}
+_WF_LOCK = threading.Lock()
+_WF_KEEP = 5  # 최근 몇 개의 결과를 메모리에 들고 있을지
+
+
+def _wf_worker(job_id: str, req: BacktestRequest, start: str, end: str) -> None:
+    """작업 스레드 — 진행률을 job 에 적고, 끝나면 결과(또는 오류)를 담는다."""
+
+    def on_progress(p: Progress) -> None:
+        with _WF_LOCK:
+            job = _WF_JOBS.get(job_id)
+            if job is not None:
+                job.update(phase=p.phase, done=p.done, total=p.total)
+
+    try:
+        result = run_walk_forward(
+            req.conditions,
+            req.logic,
+            start=start,
+            end=end,
+            progress=on_progress,
+            reenter_same_wave=req.reenter_same_wave,
+            **_strategy_kwargs(req),
+        )
+        # 전 구간 검사도 보관함에 남긴다 — 화면 계약은 ④와 같다(run_id).
+        _archive(result, req)
+        with _WF_LOCK:
+            _WF_JOBS[job_id].update(status="done", result=result)
+    except (ValueError, FileNotFoundError, HTTPException) as e:
+        detail = e.detail if isinstance(e, HTTPException) else str(e)
+        with _WF_LOCK:
+            _WF_JOBS[job_id].update(status="error", detail=str(detail))
+    except Exception as e:  # noqa: BLE001 — 스레드에서 터지면 화면이 영영 '도는 중'이 된다
+        with _WF_LOCK:
+            _WF_JOBS[job_id].update(status="error", detail=f"검사 중 오류 — {e}")
+
+
+@app.post("/api/backtest/all")
+def api_backtest_all(req: BacktestRequest) -> dict:
+    """전 구간 검사 **시작**. 바로 job_id 를 주고, 진행은 GET 으로 확인한다.
+
+    거래일마다 검색식을 다시 돌린다(walk_forward) — "2020~2023 검사"인데 실제로는
+    2019-12-30 하루에 걸린 종목만 보던 문제를 없앤 검사다. 돈 무한 전제라 동시 보유
+    한도가 없다. 이 숫자는 계좌 수익률이 아니라 "한 종목에 들어갔을 때 평균 어땠나"다.
+    """
+    if not req.start or not req.end:
+        raise HTTPException(status_code=400, detail="검사 시작일과 종료일을 주세요.")
+    if req.start >= req.end:
+        raise HTTPException(status_code=400, detail="시작일이 종료일보다 앞서야 합니다.")
+    _strategy_kwargs(req)  # 검색식·전략 값 검증을 스레드 밖에서 먼저 — 400 을 바로 준다
+
+    job_id = uuid.uuid4().hex[:12]
+    with _WF_LOCK:
+        if any(j["status"] == "running" for j in _WF_JOBS.values()):
+            raise HTTPException(
+                status_code=409, detail="이미 전 구간 검사가 돌고 있습니다 — 끝나면 다시 누르세요."
+            )
+        # 오래된 결과부터 버린다 — 결과 하나가 수 MB 라 쌓이면 메모리를 먹는다.
+        for old in list(_WF_JOBS)[: max(0, len(_WF_JOBS) - _WF_KEEP + 1)]:
+            _WF_JOBS.pop(old, None)
+        _WF_JOBS[job_id] = {
+            "status": "running",
+            "phase": "시작하는 중",
+            "done": 0,
+            "total": 0,
+            "start": req.start,
+            "end": req.end,
+        }
+    threading.Thread(
+        target=_wf_worker, args=(job_id, req, req.start, req.end), daemon=True
+    ).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/backtest/all/{job_id}")
+def api_backtest_all_status(job_id: str) -> dict:
+    """전 구간 검사 진행 확인. status=running|done|error. done 이면 result 가 실린다."""
+    with _WF_LOCK:
+        job = _WF_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="그 검사 기록이 없습니다 — 다시 실행하세요.")
+        return dict(job)
