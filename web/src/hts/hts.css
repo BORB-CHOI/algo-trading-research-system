@@ -1483,3 +1483,101 @@ table.grid.tight td {
 }
 .bt-pager button { padding: 3px 9px; }
 .bt-pager button:disabled { opacity: 0.4; cursor: default; }
+
+/* ── 차트 위에 얹는 겹치기 켜고끄기 (오너 2026-08-10) ────────────────
+   차트 왼쪽 위에 떠 있다. 사이드 패널이 없는 화면에서도 선을 끌 수 있어야 한다. */
+.pro-canvas { position: relative; }
+.pro-layers {
+  position: absolute;
+  z-index: 5;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-width: 40%;
+}
+.hts .pro-layers button {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--hts-border);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--hts-panel) 88%, transparent);
+  color: var(--hts-text-3);
+  font-size: 11px;
+  line-height: 1;
+}
+.hts .pro-layers button.on {
+  border-color: color-mix(in srgb, var(--hts-accent) 55%, transparent);
+  background: var(--hts-panel);
+  color: var(--hts-text);
+  font-weight: 600;
+}
+.hts .pro-layers button:hover { border-color: var(--hts-accent); }
+
+/* ── ④ 성적 (표보다 먼저 보는 것) ─────────────────────────────── */
+.bt-what { margin: 0 0 12px; font-size: 12px; color: var(--hts-text-2); }
+.bt-what b { color: var(--hts-text); font-weight: 700; }
+
+.bt-tiles { display: flex; flex-wrap: wrap; gap: 10px; }
+.bt-tile {
+  flex: 1 1 150px;
+  min-width: 140px;
+  padding: 12px 14px;
+  background: var(--hts-elev);
+  border: 1px solid var(--hts-border);
+  border-radius: var(--r-card);
+}
+.bt-tile .lb { display: block; font-size: 11px; color: var(--hts-text-2); }
+/* 큰 숫자는 비례폭 — tabular 로 하면 자릿수가 헐렁해 보인다 */
+.bt-tile .v { display: block; margin-top: 3px; font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+.bt-tile .v.up { color: var(--hts-up); }
+.bt-tile .v.down { color: var(--hts-down); }
+.bt-tile .sb { display: block; margin-top: 2px; font-size: 11px; color: var(--hts-text-3); }
+
+.bt-panes { display: flex; flex-wrap: wrap; gap: 22px; margin-top: 16px; }
+.bt-panes > section { flex: 1 1 320px; min-width: 280px; }
+.bt-panes h5 { margin: 0 0 2px; font-size: 12px; font-weight: 700; }
+.bt-panes .hint { margin: 0 0 8px; }
+
+/* 0을 가운데 둔 막대 — SVG 는 막대만, 글자는 옆줄이 그린다(늘어나 찌그러지지 않게) */
+.bt-chart2 { display: flex; align-items: flex-start; gap: 10px; }
+.bt-bars { flex: 0 0 42%; height: auto; }
+.bt-barlabels { flex: 1; min-width: 0; }
+.bt-barlabels .row { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.bt-barlabels .k { width: 42px; color: var(--hts-text-2); font-variant-numeric: tabular-nums; }
+.bt-barlabels .v { width: 58px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+.bt-barlabels .n { color: var(--hts-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.bt-hist .row { display: flex; align-items: center; gap: 8px; height: 22px; font-size: 11px; }
+.bt-hist .k { width: 84px; color: var(--hts-text-2); }
+.bt-hist .track { flex: 1; min-width: 0; height: 12px; background: var(--hts-line); border-radius: 2px; }
+.bt-hist .fill { display: block; height: 100%; border-radius: 2px; }
+.bt-hist .n { width: 48px; text-align: right; font-variant-numeric: tabular-nums; color: var(--hts-text-2); }
+
+/* ── ④ 종목(1단) → 매매(2단) 표 ──────────────────────────────── */
+.bt-grid th.sortable { padding: 0; }
+.hts .bt-grid th.sortable button {
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  font-weight: 700;
+  color: var(--hts-text-2);
+  text-align: inherit;
+}
+.bt-grid th.num.sortable button { text-align: right; }
+.hts .bt-grid th.sortable button:hover { background: var(--hts-hover); color: var(--hts-text); }
+.hts .bt-grid th.sortable button.on { color: var(--hts-accent-down); }
+.bt-grid th.sortable .arrow { margin-left: 3px; font-size: 9px; opacity: 0.55; }
+.bt-grid tr.group { cursor: pointer; }
+.bt-grid tr.group:hover { background: var(--hts-hover); }
+.bt-grid tr.group.open { background: var(--hts-accent-soft); }
+.bt-grid tr.round { cursor: pointer; background: var(--hts-elev); }
+.bt-grid tr.round:hover { background: var(--hts-hover); }
+.bt-grid tr.round > td { border-top: 1px solid var(--hts-line); }
+.bt-grid tr.round .ind { padding-left: 26px; color: var(--hts-text-2); }
+.bt-grid .chip { margin-left: 6px; }

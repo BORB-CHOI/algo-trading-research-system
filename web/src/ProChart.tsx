@@ -181,6 +181,17 @@ const TOOL_LAYERS: readonly (readonly [ToolLayer, string])[] = [
 ] as const
 const VWAP_COLOR = '#7c3aed' // 앵커 VWAP — 피보나치/매매선과 겹치지 않는 보라
 
+/** 차트 위에 얹는 겹치기 — 라벨은 쉬운 말로. 정본 타입은 simVisibility.OverlayVisibility. */
+const OVERLAY_LAYERS: readonly (readonly [keyof OverlayVisibility, string])[] = [
+  ['fib', '되돌림'],
+  ['sr', '지지저항'],
+  ['anchor', '파동'],
+  ['buy', '매수 건 값'],
+  ['sell', '매도 건 값'],
+  ['stop', '손절'],
+  ['fills', '사고판 자리'],
+] as const
+
 /** 차트 도구 겹치기 — 각각 따로 켜고 끈다 (오너 2026-08-09: "둘 다 넣되 따로 켜고 끔"). */
 export type ToolLayer = '지지저항' | '오더블록' | '가격 빈틈'
 
@@ -240,24 +251,30 @@ function drawSeries(c: DrawCtx, list: SeriesDraw[]): void {
 const PRICE_LABEL_KINDS = new Set<OverlayLine['kind']>(['stop', 'anchor', 'fib'])
 
 /** 아직 안 걸린 매수·매도 목표가 — 오른쪽 끝에 화살표 하나와 가격만. */
+/** 걸어 둔 주문 표식 — **주문을 낸 그 봉 자리**에, 그 가격 높이로 찍는다.
+ *
+ *  오너 2026-08-10: "오른쪽 끝 표식 말고 캔들 봉 위 아래로 하라고."
+ *  오른쪽 끝에 몰아 놓으면 (1) 어느 날 건 주문인지 안 보이고 (2) 여러 차수가 세로로
+ *  쌓여 읽히지도 않았다. 이제 기준일 봉에 매달아, 매수는 봉 **아래쪽**(가격이 내려와야
+ *  체결되니까), 매도는 봉 **위쪽**에 놓는다 — 방향이 그림으로 읽힌다.
+ *
+ *  가로선은 긋지 않는다. 선은 되돌림·지지저항·손절만 긋는다. */
 function drawTargets(c: DrawCtx, list: OverlayLine[]): void {
   const { ctx, bounding, yAxis } = c
   for (const ln of list) {
-    // 선 **위**에 올린다 — 피보나치·지지저항 라벨은 선 아래에 그려지므로 같은 값이
-    // 겹쳐도 두 줄로 갈라져 읽힌다 (실측 2026-08-09: 겹쳐서 못 읽었다).
-    const y = Math.round(yAxis.convertToPixel(ln.price)) - 9
-    if (y < 6 || y > bounding.height - 6) continue
+    const y = Math.round(yAxis.convertToPixel(ln.price))
+    if (y < 8 || y > bounding.height - 8) continue
     const color = OVERLAY_COLORS[ln.kind]
+    // 주문을 낸 봉. 화면 밖(왼쪽)이면 왼쪽 끝에 붙여 둔다 — 아예 안 그리면
+    // "얼마에 걸었는데 안 왔다"를 못 본다(오너 2026-08-10).
+    const x = startX(c, ln.start)
     const text = `${ln.label} ${ln.price.toLocaleString('ko-KR')}`
-    const w = ctx.measureText(text).width
-    const x = bounding.width - w - 18
-    ctx.fillStyle = 'rgba(255,255,255,0.92)'
-    ctx.fillRect(x - 3, y - 7, w + 20, 14)
     ctx.fillStyle = color
+    // ▷◁ = "이 값에 주문이 걸려 있다"(빈 화살표). 체결(▲▼ 꽉 찬 화살표)과 모양을 달리해
+    // 걸어만 둔 것과 실제로 사고판 것이 헷갈리지 않게 한다.
     ctx.textAlign = 'left'
-    ctx.fillText(text, x, y + 4)
-    // ◀ = "이 값에 주문이 걸려 있다". 체결 화살표(▲▼)와 모양을 달리해 헷갈리지 않게.
-    ctx.fillText('◀', x + w + 3, y + 4)
+    ctx.fillText('▷', x + 2, y + 4)
+    ctx.fillText(text, x + 14, y + 4)
   }
 }
 
@@ -327,8 +344,6 @@ function drawLines(c: DrawCtx, list: OverlayLine[]): void {
     const pad = 3
     const w = ctx.measureText(label).width
     const x = bounding.width - w - pad * 2 - 2
-    ctx.fillStyle = 'rgba(255,255,255,0.85)'
-    ctx.fillRect(x, y + 2, w + pad * 2, 14)
     ctx.fillStyle = color
     ctx.textAlign = 'left'
     ctx.fillText(label, x + pad, y + 13)
@@ -403,13 +418,8 @@ function createOverlayIndicator(): OverlayStore {
         ctx.fillStyle = isStop ? OVERLAY_COLORS.stop : OVERLAY_COLORS[f.side]
         ctx.fillText(buy ? '▲' : '▼', x, buy ? y + 14 : y - 6)
         ctx.font = 'bold 10px sans-serif'
-        // 숫자 뒤에 흰 바탕을 깔아 캔들과 겹쳐도 읽히게 한다.
-        const w = ctx.measureText(price).width
+        // 흰 바탕 없이 글자만 — 박스가 캔들을 가렸다(오너 2026-08-10).
         const ty = buy ? y + 26 : y - 17
-        ctx.save()
-        ctx.fillStyle = 'rgba(255,255,255,0.85)'
-        ctx.fillRect(x - w / 2 - 2, ty - 9, w + 4, 12)
-        ctx.restore()
         ctx.fillText(price, x, ty)
         ctx.font = 'bold 9px sans-serif'
         ctx.fillText(isStop ? '손절' : `${f.stage}차`, x, buy ? y + 36 : y - 27)
@@ -645,6 +655,9 @@ type ProChartProps = {
   initialSymbol?: { code: string; name: string; market: string }
   /** 위쪽 도구 막대를 숨긴다 — ③ 시뮬 화면처럼 조작을 왼쪽 사이드가 다 가진 경우. */
   hideToolbar?: boolean
+  /** 차트 왼쪽 위에 겹치기 켜고끄기 버튼을 띄운다. 사이드 패널이 없는 화면에서
+   *  선이 겹쳐 캔들이 안 보일 때 끌 방법이 필요하다 (오너 2026-08-10). */
+  layerToggles?: boolean
   /** 처음 보여줄 봉 개수. 기본 500 (오너가 차트를 보는 단위). */
   initialBars?: BarCount
   /** 화면 오른쪽 끝 봉이 바뀔 때마다 알려준다 — 스크롤·확대·주기 전환·종목 전환 전부.
@@ -723,6 +736,9 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   })
   const toolsRef = useRef(tools)
   const [busy, setBusy] = useState(false)
+  // 차트가 스스로 들고 있는 겹치기 상태 — `layerToggles` 를 켠 화면에서만 쓴다.
+  // 바깥에서 setOverlayVisibility 로 덮어써도 되지만, 그건 사이드 패널이 있는 ③ 얘기다.
+  const [layerVis, setLayerVis] = useState<OverlayVisibility>(allVisible)
 
   /** 화면을 다시 그린다. 데이터를 다시 안 받으므로 줌·스크롤이 유지된다.
    *  (Pro 를 쓸 땐 window resize 를 쏘는 우회가 필요했는데, 엔진은 resize() 를 직접 준다.) */
@@ -1131,7 +1147,32 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
           {busy && <span className="dim">불러오는 중…</span>}
         </div>
       )}
-      <div className="pro-canvas" ref={elRef} />
+      <div className="pro-canvas" ref={elRef}>
+        {/* 겹치기 켜고 끄기 — **차트 왼쪽 위에** 띄운다 (오너 2026-08-10: "차트 왼쪽에
+            각각 오버레이 키고 끌수 있는 버튼 추가해"). 선이 여러 겹 깔리면 캔들이 안
+            보이는데, 사이드 패널이 없는 화면(백테스트 결과 차트)에서는 끌 방법이
+            아예 없었다. 차트가 스스로 들고 있어야 어느 화면에 놓아도 따라온다. */}
+        {props.layerToggles && (
+          <div className="pro-layers">
+            {OVERLAY_LAYERS.map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                className={layerVis[k] ? 'on' : ''}
+                title={`${label} 켜기/끄기`}
+                onClick={() => {
+                  const next = { ...layerVis, [k]: !layerVis[k] }
+                  setLayerVis(next)
+                  overlayRef.current?.setVisibility(next)
+                  repaint()
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 })

@@ -1463,12 +1463,17 @@ def api_simulate(req: SimulateRequest) -> dict:
     # 매도 주문도 따라 내려간다 (오너 지적 2026-08-09: "3차 매수까지 다 해야지만 매도
     # 신청을 넣고 있는데, 평단가 수익 기준으로 설정했는데도 왜 이러지").
     # ④ 백테스트도 **같은 엔진**을 쓴다 — 두 화면이 다르면 어느 쪽을 믿을지 알 수 없다.
+    # 주문 표식을 **기준일 봉**에 매단다 — 오른쪽 끝에 몰아 놓으면 어느 날 건 건지 안 보인다
+    # (오너 2026-08-10: "오른쪽 끝 표식 말고 캔들 봉 위 아래로 하라고").
+    plan_day = full["Date"].iloc[-1].strftime("%Y-%m-%d")
     buy_px: list[float] = []
     for stage, level in zip(buys, blevels, strict=True):
         computed[stage.id] = level.price
         eff = float(stage.price_override if stage.price_override is not None else level.price)
         buy_px.append(eff)
-        lines.append({"price": eff, "label": f"매수 {level.tranche}차", "kind": "buy"})
+        lines.append(
+            {"price": eff, "label": f"매수 {level.tranche}차", "kind": "buy", "start": plan_day}
+        )
 
     walked = fill_walk(
         after,
@@ -1488,7 +1493,14 @@ def api_simulate(req: SimulateRequest) -> dict:
         if px is None:
             continue  # 아직 못 거는 차수(보유 없음·기준가 위 선 부족) — 선도 안 그린다
         computed[stage.id] = px
-        lines.append({"price": px, "label": f"매도 {sells.index(stage) + 1}차", "kind": "sell"})
+        lines.append(
+            {
+                "price": px,
+                "label": f"매도 {sells.index(stage) + 1}차",
+                "kind": "sell",
+                "start": plan_day,
+            }
+        )
     if sells and all(px is None for px in walked.sell_prices) and walked.basis is not None:
         warnings.append("매도 목표가를 못 걸었습니다 — 기준가 위에 지지/저항선이 없습니다.")
 

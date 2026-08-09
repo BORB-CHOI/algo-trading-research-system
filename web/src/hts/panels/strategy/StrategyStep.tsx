@@ -3,12 +3,7 @@ import type { Dispatch, ReactNode, SetStateAction } from 'react'
 import type { ConditionDef, StrategyDef } from '../../../api'
 import { Card, KV } from '../../components/ui'
 import { BuyStages, SellStages, type ComputedPrices } from '../SplitStages'
-import {
-  DEFAULT_FIB_STOP_RATIO,
-  FIB_STOP_CHOICES,
-  STRATEGY_ONE_WAVE,
-  isFixedDefinition,
-} from '../strategyOne'
+import { FIB_STOP_CHOICES, STRATEGY_ONE_WAVE, isFixedDefinition } from '../strategyOne'
 import type { ScreenDef, Screens } from '../screenStore'
 import {
   deleteStrategy,

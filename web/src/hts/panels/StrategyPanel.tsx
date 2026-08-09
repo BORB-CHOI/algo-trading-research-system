@@ -148,10 +148,6 @@ export function StrategyPanel() {
         draft={draft}
         setDraft={setDraft}
         onGoStrategy={() => setStep('strategy')}
-        onOpenSim={(code, symName, date) => {
-          setSimJump((j) => ({ code, name: symName, date, seq: (j?.seq ?? 0) + 1 }))
-          setStep('sim')
-        }}
       />
     </div>
   )
