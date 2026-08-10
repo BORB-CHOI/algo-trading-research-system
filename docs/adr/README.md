@@ -26,3 +26,9 @@
 | [0009](0009-strategy-as-data.md) | 전략·조건은 데이터로 정의 (숨은 하드코딩 금지) | 수락 |
 | [0010](0010-kis-broker-adapter.md) | KIS 브로커 어댑터 (조회 전용) | 수락 (조회만 / 주문 미착수) |
 | [0011](0011-strategy-one-anchor-and-splits.md) | 전략 1호 — 급등 앵커 피보나치 + 분할 매수/매도 | 수락 (계산 코어만 / 체결·UI 미착수) |
+| [0012](0012-supply-demand-data-source.md) | 수급 데이터 소스 (KIS 투자자매매동향) | 제안 |
+| [0013](0013-fib-start-cycle-low.md) | 전략 1호 파동 = 상승장 사이클 | 수락 → [개정](0013-fib-start-cycle-low-revision.md)(6차, 2026-08-07) |
+| [0014](0014-support-resistance-targets.md) | 목표가 = 지지/저항 존 (라운드 피겨·VWAP 폐기) | 수락 (개정 2 적용) |
+| [0015](0015-strategy-one-backtest-v1.md) | ④ 백테스팅 — 전략 1호 전수 검사 v1 | 수락 |
+| [0016](0016-industry-momentum.md) | 업종/산업 모멘텀 | 제안 |
+| [0017](0017-daily-wave-replan.md) | 백테스트 라운드 중 파동 매일 갱신 (주문 정정) | 수락 |

@@ -267,7 +267,9 @@ def test_simulate_looks_left_of_base_date_only() -> None:
         "zz_deviation_mode": "자동",
         "fib_band_mode": "자동",
         "fib_band_value": 0.5,
-        "sr_scope": "전체",
+        # "전체" 범위는 30년 이력 종목에서 재계획마다 전체를 훑어 분 단위로 느리다 —
+        # ② 기본값(파동 구간)으로 검사한다. 이 테스트의 관심사는 look-ahead 뿐이다.
+        "sr_scope": "파동 구간",
         "sr_prd": 10,
         "sr_loopback": 290,
         "sr_channel_width_pct": 3,

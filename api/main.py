@@ -55,17 +55,18 @@ from src.layer3_strategy.case_overlay import (
     parse_params,
     strategies_payload,
 )
-from src.layer3_strategy.entry_levels import average_entry, buy_targets_sr
+from src.layer3_strategy.entry_levels import buy_targets_sr
 from src.layer3_strategy.screening import ScreeningRule, screen
 from src.layer3_strategy.support_resistance import SRLevel
 from src.layer3_strategy.surge import find_52w_high
 from src.layer3_strategy.zigzag import last_atr
 from src.layer4_execution import stops
-from src.layer4_execution.fills import walk as fill_walk
+from src.layer4_execution.costs import CostModel
+from src.layer4_execution.fills import _basis_of, _sell_prices
 from src.layer4_execution.runner import aggregate_returns
 from src.layer4_execution.stops import DEFAULT_FIB_STOP_RATIO
 from src.layer4_execution.strategy_one import run_strategy_one
-from src.layer4_execution.walk_forward import Progress, run_walk_forward
+from src.layer4_execution.walk_forward import Progress, _rounds_for_code, run_walk_forward
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
 # Amount(거래대금)는 KLineChart 의 turnover 로. Stocks(상장주식수)는 액면분할 감지용(ADR-0006).
@@ -1457,12 +1458,6 @@ def api_simulate(req: SimulateRequest) -> dict:
         warnings.append(f"매수 목표가를 못 걸었습니다 — {e}")
         buys, blevels = [], []
 
-    # 체결 스캔은 파동 꼭대기 다음 날부터 — 고점 이전 하락은 이 전략의 눌림이 아니다.
-    after = full.loc[full["Date"] > high_date].reset_index(drop=True)
-    # 봉을 날짜순으로 지나가며 채운다 — **1차만 걸려도 매도가 나가고**, 평단이 내려가면
-    # 매도 주문도 따라 내려간다 (오너 지적 2026-08-09: "3차 매수까지 다 해야지만 매도
-    # 신청을 넣고 있는데, 평단가 수익 기준으로 설정했는데도 왜 이러지").
-    # ④ 백테스트도 **같은 엔진**을 쓴다 — 두 화면이 다르면 어느 쪽을 믿을지 알 수 없다.
     # 주문 표식을 **기준일 봉**에 매단다 — 오른쪽 끝에 몰아 놓으면 어느 날 건 건지 안 보인다
     # (오너 2026-08-10: "오른쪽 끝 표식 말고 캔들 봉 위 아래로 하라고").
     plan_day = full["Date"].iloc[-1].strftime("%Y-%m-%d")
@@ -1475,104 +1470,119 @@ def api_simulate(req: SimulateRequest) -> dict:
             {"price": eff, "label": f"매수 {level.tranche}차", "kind": "buy", "start": plan_day}
         )
 
-    walked = fill_walk(
-        after,
-        buy_px,
-        [s.weight or 1.0 for s in buys],
-        sell_rebounds=[s.rebound_pct for s in sells],
-        sell_basis=req.sell_basis,
-        anchor_high=high_price,
-        levels=sr,
-        sell_tick_offset=req.sell_tick_offset,
-        sell_overrides=[s.price_override for s in sells],
-    )
-    # 매도 기준가는 응답으로도 내보낸다 — 화면에 안 보이면 "평단 기준인 줄 알았다"가 반복된다
-    # (실측 2026-08-06: 기준점이 파동 꼭대기인 걸 모르고 매도가가 왜 40만이냐는 오해).
-    sell_basis_price = walked.basis
-    for stage, px in zip(sells, walked.sell_prices, strict=True):
-        if px is None:
-            continue  # 아직 못 거는 차수(보유 없음·기준가 위 선 부족) — 선도 안 그린다
-        computed[stage.id] = px
-        lines.append(
+    # ── 체결 재현 = ④ 백테스트와 **같은 엔진**(walk_forward._rounds_for_code) ──
+    # 그날그날의 계획으로 하루씩 걷고, 파동이 바뀌면 주문을 정정하며(ADR-0017), 다 팔면
+    # 라운드를 닫고 파동이 바뀐 뒤 다시 연다. 전에는 기준일(오늘) 계획을 과거로 소급해
+    # 체결을 그렸다 — 파동이 새로 그어지면 **과거 체결 표식까지 움직였다**
+    # (오너 2026-08-10: "매수 타점은 왜 미래시를 쓰고 바뀌냐"). 이제 과거 체결은
+    # 그 시점까지의 데이터로만 정해지므로 기준일을 옮겨도 안 바뀐다.
+    p_engine = {
+        "zz_depth": req.zz_depth,
+        "zz_deviation": req.zz_deviation,
+        "zz_deviation_mode": req.zz_deviation_mode,
+        "start_mode": req.start_mode,
+        "start_box_bars": req.start_box_bars,
+        "start_volume_mult": req.start_volume_mult,
+        "start_keep_mult": req.start_keep_mult,
+        "fib_band_mode": req.fib_band_mode,
+        "fib_band_value": req.fib_band_value,
+        "sr_scope": req.sr_scope,
+        "sr_source": req.sr_source,
+        "sr_prd": req.sr_prd,
+        "sr_loopback": req.sr_loopback,
+        "sr_channel_width_pct": req.sr_channel_width_pct,
+        "sr_min_strength": req.sr_min_strength,
+        "sr_round_max_gap_pct": req.sr_round_max_gap_pct,
+        "buy": [
+            {"ratio": s_.ratio, "weight": s_.weight or 0.0, "price_override": s_.price_override}
+            for s_ in buys
+        ],
+        "sell": [
             {
-                "price": px,
-                "label": f"매도 {sells.index(stage) + 1}차",
-                "kind": "sell",
-                "start": plan_day,
+                "rebound_pct": s_.rebound_pct,
+                "weight": s_.weight or 0.0,
+                "price_override": s_.price_override,
             }
-        )
-    if sells and all(px is None for px in walked.sell_prices) and walked.basis is not None:
-        warnings.append("매도 목표가를 못 걸었습니다 — 기준가 위에 지지/저항선이 없습니다.")
+            for s_ in sells
+        ],
+        "sell_basis": req.sell_basis,
+        "buy_tick_offset": req.buy_tick_offset,
+        "sell_tick_offset": req.sell_tick_offset,
+        "buy_min_gap_pct": req.buy_min_gap_pct,
+        "stop": req.stop.to_cfg() if req.stop and req.stop.enabled else None,
+    }
+    rounds: list[dict] = []
+    if buys:  # 매수 차수가 없으면 걷지 않는다 — 선만 그린다
+        # 거래정지일(OHLC 0원)을 빼고 걷는다 — ④ 와 동일(BORB-32: 저가 0원이면 어떤
+        # 지정가든 체결로 잡힌다). 걷는 구간은 기준일 기준 최근 750거래일(약 3년) —
+        # 계획(파동·선)은 전체 이력으로 계산하되, 체결 재현까지 30년을 걸으면 삼성전자
+        # 같은 종목에서 분 단위로 걸린다(실측 2026-08-10: 전체 이력 걷기 5분+).
+        # 더 옛날 매매 기록은 ④ 전 기간 검사로 본다.
+        walk_df = drop_halted(full).sort_values("Date").reset_index(drop=True)
+        for rnd, _trade in _rounds_for_code(
+            code,
+            walk_df,
+            list(walk_df["Date"].iloc[-750:]),  # 검색식 없이 — 구간 안 거래일 전부가 후보
+            end=walk_df["Date"].iloc[-1],
+            p=p_engine,
+            cost=CostModel(round_trip_rate=0.0),  # ③ 은 표시 전용 — 비용은 ④ 소관
+        ):
+            rounds.append(rnd)
 
-    # 체결을 시간순으로 훑어 수량·평단·손익을 만든다. 매도 손익은 **그 시점 평단** 기준이다
-    # (나중에 산 물량으로 계산하면 이미 판 것의 손익이 바뀐다).
     fills: list[dict] = []
-    trade_buys: list[dict] = []
-    trade_sells: list[dict] = []
-    events = sorted(
-        [(f.date, 1, f) for f in walked.buys] + [(f.date, 0, f) for f in walked.sells],
-        key=lambda e: (e[0], e[1]),  # 같은 날이면 매도 먼저 — 엔진의 판정 순서와 맞춘다
-    )
-    position = 0
-    cost = 0.0
-    for day, is_buy, f in events:
-        when = day.strftime("%Y-%m-%d")
-        side = "buy" if is_buy else "sell"
-        fills.append({"time": when, "price": f.price, "side": side, "stage": f.tranche})
-        if not req.qty:
-            continue
-        if is_buy:
-            stage = buys[f.index]
-            frac = (stage.weight / 100.0) if buy_wsum > 0 else 1 / len(buys)
-            shares = (
-                int(req.qty * frac) if req.qty_type == "shares" else int(req.qty * frac / f.price)
-            )
-            if shares <= 0:
-                continue
-            position += shares
-            cost += shares * f.price
-            trade_buys.append(
+    for rnd in rounds:
+        for f in rnd.get("fills", []):
+            if f.get("eval"):
+                continue  # 미청산 잔량의 마지막 종가 평가 — 체결이 아니라 표식을 안 찍는다
+            fills.append(
                 {
-                    "stage": f.tranche,
-                    "time": when,
-                    "price": f.price,
-                    "shares": shares,
-                    "amount": shares * f.price,
+                    "time": f["time"],
+                    "price": f["price"],
+                    "side": f["side"],
+                    "stage": int(f.get("stage") or 0),  # 0 = 손절
                 }
             )
-        elif position > 0:
-            avg_cost = cost / position
-            # 매도 비중은 보유 포지션 대비 절대 % — 합<100 이면 잔여는 계속 보유
-            frac = (sells[f.index].weight / 100.0) if sell_wsum > 0 else 1 / len(sells)
-            shares = min(int(position * frac), position)
-            if shares <= 0:
-                continue
-            cost -= shares * avg_cost
-            position -= shares
-            trade_sells.append(
-                {
-                    "stage": f.tranche,
-                    "time": when,
-                    "price": f.price,
-                    "shares": shares,
-                    "amount": shares * f.price,
-                    "pnl_pct": (f.price / avg_cost - 1) * 100,
-                    "pnl": (f.price - avg_cost) * shares,
-                }
-            )
-    buy_fills = [(f.price, buys[f.index].weight or 1.0) for f in walked.buys]
+    fills.sort(key=lambda f: (f["time"], 0 if f["side"] == "sell" else 1))
 
-    # ── 손절 — 평단 -% 또는 기준선 ±N호가. 첫 매수 체결일부터 Low ≤ 손절가 첫 날 발동 ──
-    # 손절가 공식은 ④ 백테스팅과 **같은 함수**(layer4.stops)다 — 두 화면이 같은 설정으로
-    # 다른 자리를 그리면 안 된다. 되돌림 선 기준(fib)은 파동만 정해지면 자리가 정해지므로
-    # 매수 체결이 없어도 그린다 — "어디서 자를 건지"를 사기 전에 봐야 한다(오너 2026-08-10).
+    last_round = rounds[-1] if rounds else None
+    open_last = bool(last_round and last_round.get("open"))
+
+    # ── 지금 걸려 있을 매도 주문 — 미청산 라운드가 있으면 그 라운드의 실제 주문,
+    #    없으면(보유 없음) 기준가가 서는 방식(파동 꼭대기 기준)만 선을 그린다.
+    if open_last and last_round.get("sell_orders"):
+        sell_basis_price = last_round.get("sell_basis_price")
+        sell_px_now: dict[int, float] = {
+            o["tranche"]: float(o["price"])
+            for o in last_round["sell_orders"]
+            if o.get("price") is not None
+        }
+    else:
+        basis0 = _basis_of(req.sell_basis, [], high_price)
+        prices0 = _sell_prices(
+            basis0,
+            [s_.rebound_pct for s_ in sells],
+            req.sell_tick_offset,
+            "stock",
+            [s_.price_override for s_ in sells],
+        )
+        sell_basis_price = basis0
+        sell_px_now = {k + 1: float(px) for k, px in enumerate(prices0) if px is not None}
+    for k, stage in enumerate(sells):
+        px = sell_px_now.get(k + 1)
+        if px is None:
+            continue  # 아직 못 거는 차수(보유 없음 등 기준가 미확정) — 선도 안 그린다
+        computed[stage.id] = px
+        lines.append({"price": px, "label": f"매도 {k + 1}차", "kind": "sell", "start": plan_day})
+
+    # ── 손절선 — 공식은 ④ 와 같은 함수(layer4.stops). 되돌림 선 기준(fib)은 파동만
+    #    정해지면 자리가 정해지므로 매수 전에도 그린다(오너 2026-08-10). 평단 기준(pct)은
+    #    미청산 라운드가 있을 때만 그릴 수 있다.
     stop_cfg = req.stop.to_cfg() if req.stop else None
-    stop_px: int | None = None
-    if req.stop and req.stop.enabled and (buy_fills or req.stop.mode == "fib"):
+    if req.stop and req.stop.enabled:
         try:
             stop_px = stops.stop_price(
                 stop_cfg,
-                avg_entry=average_entry(buy_fills) if buy_fills else None,
+                avg_entry=last_round.get("avg_entry") if open_last else None,
                 cycle_low=cycle.price,
                 wave_high=high_price,
             )
@@ -1581,39 +1591,52 @@ def api_simulate(req: SimulateRequest) -> dict:
         if stop_px is not None:
             lines.append({"price": stop_px, "label": stops.stop_label(stop_cfg), "kind": "stop"})
 
-    stop_price = stop_px if buy_fills else None  # 산 게 없으면 발동 판정도 없다
-    if stop_price is not None:
-        first_buy = min(f["time"] for f in fills if f["side"] == "buy")
-        scan = after.loc[after["Date"] >= pd.Timestamp(first_buy)]
-        hit = scan.loc[scan["Low"] <= stop_price]
-        if not hit.empty:
-            stop_time = hit.iloc[0]["Date"].strftime("%Y-%m-%d")
-            # 손절 이후 체결은 취소. 당일 겹침은 장중 순서를 모르니 보수적으로 —
-            # 매수는 유지(사자마자 손절 = 손실 커짐), 매도는 취소(익절 못 한 걸로 본다).
-            fills = [
-                f
-                for f in fills
-                if (f["side"] == "buy" and f["time"] <= stop_time)
-                or (f["side"] == "sell" and f["time"] < stop_time)
-            ]
-            trade_buys = [t for t in trade_buys if t["time"] <= stop_time]
-            trade_sells = [t for t in trade_sells if t["time"] < stop_time]
-            fills.append(
-                {"time": stop_time, "price": float(stop_price), "side": "sell", "stage": 0}
-            )
-            bought0 = sum(t["shares"] for t in trade_buys)
-            held = bought0 - sum(t["shares"] for t in trade_sells)
-            if held > 0:
-                avg0 = sum(t["price"] * t["shares"] for t in trade_buys) / bought0
+    # ── 수량을 받았으면 체결을 시간순으로 훑어 수량·평단·손익을 만든다.
+    #    매도 손익은 **그 시점 평단** 기준(나중에 산 물량으로 계산하면 이미 판 것의 손익이
+    #    바뀐다). 라운드가 여러 개면 각 라운드가 다 팔고 끝나므로 수량도 자연히 0 으로
+    #    돌아온다 — 이어서 세도 안전하다.
+    trade_buys: list[dict] = []
+    trade_sells: list[dict] = []
+    position = 0
+    cost_amt = 0.0
+    if req.qty:
+        for f in fills:
+            when, px = f["time"], float(f["price"])
+            if f["side"] == "buy":
+                stage_b = buys[f["stage"] - 1]
+                frac = (stage_b.weight / 100.0) if buy_wsum > 0 else 1 / len(buys)
+                shares = int(req.qty * frac) if req.qty_type == "shares" else int(req.qty * frac / px)
+                if shares <= 0:
+                    continue
+                position += shares
+                cost_amt += shares * px
+                trade_buys.append(
+                    {"stage": f["stage"], "time": when, "price": px, "shares": shares, "amount": shares * px}
+                )
+            elif position > 0:
+                avg_cost = cost_amt / position
+                k = f["stage"]
+                if k == 0:  # 손절 — 잔량 전부
+                    shares = position
+                else:
+                    # 매도 비중은 절대 % — 합<100 이면 잔여 보유. 합이 100 이면 마지막
+                    # 차수는 잔량 전부(④ 와 같은 규칙, 오너 2026-08-10).
+                    frac = (sells[k - 1].weight / 100.0) if sell_wsum > 0 else 1 / len(sells)
+                    sweep = k == len(sells) and sell_wsum >= 100
+                    shares = position if sweep else min(int(position * frac), position)
+                if shares <= 0:
+                    continue
+                cost_amt -= shares * avg_cost
+                position -= shares
                 trade_sells.append(
                     {
-                        "stage": 0,
-                        "time": stop_time,
-                        "price": float(stop_price),
-                        "shares": held,
-                        "amount": held * float(stop_price),
-                        "pnl_pct": (float(stop_price) / avg0 - 1) * 100,
-                        "pnl": (float(stop_price) - avg0) * held,
+                        "stage": k,
+                        "time": when,
+                        "price": px,
+                        "shares": shares,
+                        "amount": shares * px,
+                        "pnl_pct": (px / avg_cost - 1) * 100,
+                        "pnl": (px - avg_cost) * shares,
                     }
                 )
 
@@ -1624,19 +1647,19 @@ def api_simulate(req: SimulateRequest) -> dict:
     # 체결 요약 — 평단·실현손익·잔여 평가(기준일 종가). 비용·슬리피지 미포함(ADR-0004 소관).
     trades = None
     if req.qty:
-        bought = sum(t["shares"] for t in trade_buys)
-        sold = sum(t["shares"] for t in trade_sells)
-        avg_cost = sum(t["price"] * t["shares"] for t in trade_buys) / bought if bought else None
-        remain = bought - sold
+        # 라운드가 여러 개일 수 있다 — "평단"은 전체 매수 평균이 아니라 **지금 들고 있는
+        # 물량의 평단**(cost_amt/position)이어야 잔여 평가가 맞는다.
+        remain = position
+        avg_open = cost_amt / position if position > 0 else None
         last_close = float(full["Close"].iloc[-1])
         trades = {
             "buys": trade_buys,
             "sells": trade_sells,
-            "avg_entry": avg_cost,
+            "avg_entry": avg_open,
             "realized_pnl": sum(t["pnl"] for t in trade_sells),
             "remain_shares": remain,
             "last_close": last_close,
-            "unrealized_pnl": (last_close - avg_cost) * remain if remain and avg_cost else 0.0,
+            "unrealized_pnl": (last_close - avg_open) * remain if remain and avg_open else 0.0,
         }
 
     return {
@@ -1709,8 +1732,8 @@ class BacktestRequest(BaseModel):
     # split 대신 이 두 날짜를 쓴다. 몇 분 걸리므로 /api/backtest/all 로만 받는다.
     start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    # 다 팔고 나서 같은 자리에 또 오면 다시 살지 (전 기간 검사에서만 뜻이 있다).
-    # 끄면 새 고점이 나와 되돌림 선이 다시 그어져야 산다 (오너 2026-08-10).
+    # (2026-08-10 폐기) reenter_same_wave — 이제 검색식에 걸린 날마다 무조건 라운드를
+    # 열므로(중복 허용) 켜고 끌 것이 없다. 옛 저장본이 보내와도 무시한다.
     reenter_same_wave: bool = False
 
 
@@ -1835,7 +1858,6 @@ def _wf_worker(job_id: str, req: BacktestRequest, start: str, end: str) -> None:
             start=start,
             end=end,
             progress=on_progress,
-            reenter_same_wave=req.reenter_same_wave,
             **_strategy_kwargs(req),
         )
         # 전 구간 검사도 보관함에 남긴다 — 화면 계약은 ④와 같다(run_id).

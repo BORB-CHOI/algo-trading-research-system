@@ -2,8 +2,8 @@
 
 실데이터 경로는 test_api.py(slow). 여기는 규칙만 본다:
   1. 거래일마다 검색식을 돌린다
-  2. 새 라운드는 **파동이 바뀌었을 때만**
-  3. 매매 중이면 새로 안 시작한다
+  2. 똑같은 파동은 한 번만 매매, 파동이 바뀌면 재진입 — 기준은 마지막 매수 시점 파동
+  3. 매매 중이면 새로 안 시작한다 · 라운드 안에서는 파동이 바뀌면 매일 주문 정정 (ADR-0017)
   4. 구간 끝까지 안 팔린 건 **미청산 표시**를 남기고 완료분과 따로 센다
 """
 
@@ -88,7 +88,7 @@ WAVE: list[tuple[float, float, float, float]] = [
 ]
 
 
-def _run(panel: pd.DataFrame, *, start: str, end: str, **kw) -> dict:
+def _run(panel: pd.DataFrame, *, start: str, end: str, conditions=None, **kw) -> dict:
     dailies = {c: _daily(panel, c) for c in panel["Code"].unique()}
     args = {
         "zz": ZZ,
@@ -102,7 +102,8 @@ def _run(panel: pd.DataFrame, *, start: str, end: str, **kw) -> dict:
         **kw,
     }
     return run_walk_forward(
-        [{"key": "price_range", "params": {"min": 1}}],  # 전부 통과 — 규칙만 본다
+        # 기본은 전부 통과 — 규칙만 본다. 라운드 하나짜리 시나리오는 조건을 좁혀 쓴다.
+        conditions or [{"key": "price_range", "params": {"min": 1}}],
         "and",
         start=start,
         end=end,
@@ -125,15 +126,41 @@ def test_거래일마다_검색식을_돌린다() -> None:
     assert got == {"01-07": 2, "01-09": 2, "01-12": 2, "01-13": 2, "01-14": 2}
 
 
-def test_파동이_그대로면_새_라운드를_안_연다() -> None:
-    """규칙 2 — 오너 2026-08-10: "피보나치가 그대로면 다시 볼 필요 없지."
+def test_똑같은_파동은_한_번만_매매한다() -> None:
+    """규칙 2 — 오너 2026-08-10: "똑같은 파동을 매매하는 거랑은 다르지."
 
-    매일 검색식에 걸리지만 파동(10,000→20,000)이 안 바뀌므로 라운드는 하나뿐이어야 한다.
+    매일 검색식에 걸리지만, 파동(10,000→20,000)에서 사고 판 뒤 파동이 안 바뀌므로
+    라운드는 하나뿐이어야 한다.
     """
     panel = _panel({"AAA": WAVE})
     out = _run(panel, start="2026-01-07", end="2026-01-14")
     rounds = out["results"] + out["no_fill_rows"]
     assert len(rounds) == 1, [r["plan_date"] for r in rounds]
+
+
+def test_들고_있다_급등하면_판_뒤_새_파동으로_재진입한다() -> None:
+    """오너 2026-08-10: "들고 있는 상태에서 급등해서 파동 갱신되면 익절하고 새로운
+    매매로 시작해야 해."
+
+    옛 파동(W1)에서 사고, 급등(신고가 22,000)으로 파동이 W2로 갱신되며 전략 매도
+    (평단+10%)가 체결된다. W2는 아직 매매한 적이 없으니 다시 걸리면 재진입한다 —
+    재진입 판단은 라운드가 끝난 시점 파동이 아니라 **마지막 매수 시점 파동** 기준.
+    """
+    bars = [
+        *WAVE[:3],  # 바닥 10,000 → 꼭대기 20,000 (W1)
+        (20_000, 20_000, 13_500, 14_000),  # W1 라운드 매수 14,000 체결
+        (14_000, 22_000, 14_000, 21_000),  # 매도 15,400 체결 + 신고가 → W2 로 갱신
+        (21_000, 21_000, 16_000, 16_500),  # W2 라운드가 열려 새 되돌림 자리로 매수를 건다
+        (16_500, 17_000, 15_800, 16_800),
+        (16_800, 17_200, 16_200, 17_000),
+    ]
+    panel = _panel({"AAA": bars})
+    out = _run(panel, start="2026-01-07", end="2026-01-14")
+    rounds = sorted(out["results"] + out["no_fill_rows"], key=lambda r: r["plan_date"])
+    assert len(rounds) == 2, [r["plan_date"] for r in rounds]
+    assert rounds[0]["wave_high"] == 20_000.0  # W1 에서 사고
+    assert rounds[0].get("open") is False  # 급등에서 전략 매도로 팔렸다
+    assert rounds[1]["wave_high"] == 22_000.0  # W2 로 재진입
 
 
 def test_매매가_끝나면_다시_시작할_수_있다() -> None:
@@ -166,7 +193,15 @@ def test_안_팔린_라운드는_미청산으로_남는다() -> None:
     강제 청산이 아니라 표시가 남고, 완료분만 센 성적(`closed_metrics`)에서는 빠진다.
     """
     panel = _panel({"AAA": WAVE})
-    out = _run(panel, start="2026-01-07", end="2026-01-14")
+    # 종가 19,000 이상 = 1/7 하루만 걸린다 — 라운드 하나짜리 시나리오 유지.
+    # 반등 40% → 목표 19,600 — 구간 고가 18,500 이라 안 팔린다(미청산 시나리오 유지).
+    out = _run(
+        panel,
+        start="2026-01-07",
+        end="2026-01-14",
+        conditions=[{"key": "price_range", "params": {"min": 19_000}}],
+        sell=[{"rebound_pct": 40, "weight": 100}],
+    )
     assert len(out["results"]) == 1
     r = out["results"][0]
     assert r["open"] is True
@@ -183,7 +218,12 @@ def test_미래를_안_본다() -> None:
     전부 보고 계산하면 50% 자리가 달라진다 — 그날까지의 꼭대기·바닥으로만 그어야 한다.
     """
     panel = _panel({"AAA": WAVE})
-    out = _run(panel, start="2026-01-07", end="2026-01-14")
+    out = _run(
+        panel,
+        start="2026-01-07",
+        end="2026-01-14",
+        conditions=[{"key": "price_range", "params": {"min": 19_000}}],  # 1/7 하루만
+    )
     r = out["results"][0]
     assert r["plan_date"] == "2026-01-07"
     assert (r["wave_low"], r["wave_high"]) == (10_000.0, 20_000.0)
@@ -198,6 +238,7 @@ def test_손절이_걸리면_완료로_센다() -> None:
         panel,
         start="2026-01-07",
         end="2026-01-14",
+        conditions=[{"key": "price_range", "params": {"min": 19_000}}],  # 1/7 하루만
         stop={"enabled": True, "mode": "pct", "pct": 1},  # 평단 -1% → 바로 걸린다
     )
     r = out["results"][0]
@@ -213,7 +254,7 @@ def test_매수가_안_걸린_라운드는_따로_담긴다() -> None:
     panel = _panel({"AAA": flat})
     out = _run(panel, start="2026-01-07", end="2026-01-14")
     assert out["results"] == []
-    assert out["no_fill"] == 1
+    assert out["no_fill"] >= 1  # 걸린 날마다 라운드 하나 — 전부 미체결로 남는다
     assert out["no_fill_rows"][0]["buy_orders"]  # 얼마에 걸었는지는 남는다
 
 
@@ -253,40 +294,69 @@ def test_거래정지일은_체결로_안_친다() -> None:
     panel = _panel({"AAA": halted})
     out = _run(panel, start="2026-01-07", end="2026-01-14")
     assert out["results"] == []  # 정지일에 체결된 걸로 잡히면 안 된다
-    assert out["no_fill"] == 1
+    assert out["no_fill"] >= 1
 
 
-def test_다_팔고_같은_자리에_또_오면_다시_산다() -> None:
-    """`reenter_same_wave=True` — ②의 켜고 끄는 값 (오너 2026-08-10).
+# "다 팔고 같은 자리에 또 오면"(reenter_same_wave) 토글 테스트 둘은 삭제 —
+# 걸린 날마다 무조건 라운드를 열게 되면서(2026-08-10) 토글 자체가 사라졌다.
 
-    기본(끔)은 파동이 바뀌어야 다시 산다. 켜면 다 판 뒤 또 걸릴 때 같은 값에 다시 건다.
+
+def test_라운드_중_신고가가_나면_주문을_새_선으로_옮긴다() -> None:
+    """ADR-0017 — 오너 지적 2026-08-10: "한 번 파동 잡혔다고 매매 끝날 때까지 옛 파동을
+    유지하라는 게 아니야."
+
+    1/7 에 계획(파동 10,000→20,000, 매수 14,000)을 세우고 아직 안 산 상태에서 신고가
+    (40,000)가 나온다 — 매수 주문이 새 파동(10,000→40,000)의 선(옛 꼭대기 20,000 자리)
+    으로 옮겨져야 한다. 옛 구조는 14,000 주문이 그대로 살아 있어 20,000 눌림에 안 걸렸다.
     """
-    panel = _panel({"AAA": WAVE})
-    off = _run(
+    bars = [
+        *WAVE[:3],  # 바닥 10,000 → 꼭대기 20,000 — 1/7 에 계획
+        (20_000, 20_000, 19_000, 19_500),  # 눌림이 얕아 14,000 미체결
+        (19_500, 40_000, 19_500, 40_000),  # 신고가 → 파동이 다시 그어진다
+        (40_000, 40_000, 20_000, 21_000),  # 새 50% 근처 자리(옛 꼭대기 20,000)까지 눌림
+        (21_000, 21_500, 20_500, 21_000),
+        (21_000, 21_500, 20_800, 21_200),
+    ]
+    panel = _panel({"AAA": bars})
+    out = _run(
         panel,
         start="2026-01-07",
         end="2026-01-14",
-        stop={"enabled": True, "mode": "pct", "pct": 1},  # 바로 손절 → 라운드가 끝난다
+        conditions=[{"key": "price_range", "params": {"min": 19_600, "max": 20_500}}],  # 종가 20,000 = 1/7 하루만
     )
-    on = _run(
-        panel,
-        start="2026-01-07",
-        end="2026-01-14",
-        stop={"enabled": True, "mode": "pct", "pct": 1},
-        reenter_same_wave=True,
-    )
-    off_rounds = off["results"] + off["no_fill_rows"]
-    on_rounds = on["results"] + on["no_fill_rows"]
-    assert len(off_rounds) == 1, [r["plan_date"] for r in off_rounds]
-    assert len(on_rounds) > 1, [r["plan_date"] for r in on_rounds]
-    # 같은 파동을 다시 그은 것이다 — 꼭대기가 같아야 한다.
-    assert {r["wave_high"] for r in on_rounds} == {20_000.0}
-
-
-def test_안_팔린_채로는_켜도_다시_안_산다() -> None:
-    """청산이 안 됐으면 아직 매매 중이다 — 켜도 새 라운드는 없다(규칙 3은 그대로)."""
-    panel = _panel({"AAA": WAVE})
-    out = _run(panel, start="2026-01-07", end="2026-01-14", reenter_same_wave=True)
     rounds = out["results"] + out["no_fill_rows"]
-    assert len(rounds) == 1
-    assert rounds[0]["open"] is True
+    [r] = rounds  # 라운드 하나짜리로 좁혔다 — 정정 동작만 본다
+    assert r["replans"] >= 1
+    assert r["wave_end"]["high"] == 40_000.0
+    assert r["n_buys"] == 1
+    assert r["fills"][0]["price"] > 14_000.0  # 옛 선(14,000)이 아니라 새 파동의 선에서 체결
+    assert r["fills"][0]["time"] >= "2026-01-12"  # 정정은 신고가 다음 날부터 적용
+
+
+def test_신고가_뒤에는_평단_위_매도_선이_생긴다() -> None:
+    """오너 실측 2026-08-10: "평단 +5% 조건인데 꼭대기 2배를 가도 안 팔림 처리."
+
+    옛 구조는 매도 선 목록이 처음 파동의 되돌림 선에서 안 바뀌어, 평단 위에 선이 없으면
+    매도 주문이 조용히 안 걸렸다(None). 파동을 매일 갱신하면 신고가로 선이 다시 그어져
+    팔린다.
+    """
+    bars = [
+        *WAVE[:3],
+        (20_000, 20_000, 13_500, 14_000),  # 1/8 매수 14,000 체결
+        (14_000, 22_000, 14_000, 21_000),  # 신고가 22,000 — 파동·선이 다시 그어진다
+        (21_000, 30_000, 20_500, 29_000),  # 반등 계속 — 새 선(평단+10% 위)에 매도 체결
+        (29_000, 30_000, 28_000, 29_500),
+        (29_500, 30_000, 28_500, 29_000),
+    ]
+    panel = _panel({"AAA": bars})
+    out = _run(
+        panel,
+        start="2026-01-07",
+        end="2026-01-14",
+        conditions=[{"key": "price_range", "params": {"min": 19_600, "max": 20_500}}],  # 1/7 하루만
+    )
+    assert len(out["results"]) == 1
+    r = out["results"][0]
+    assert r["open"] is False, r  # 미청산이 아니라 **팔렸다**
+    assert r["net_return"] == pytest.approx(0.10)  # 평단 14,000 × 1.1 = 15,400 에 매도
+    assert out["closed_metrics"]["n_trades"] == 1

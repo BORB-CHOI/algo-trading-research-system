@@ -10,10 +10,12 @@
 ## 규칙
 
 1. **거래일마다 검색식을 돌린다.** 그날 걸린 종목이 그날의 후보다.
-2. **새 라운드는 파동이 바뀌었을 때만.** 오너 2026-08-10: "연속으로 걸린다는 게 신고가가
-   나왔다는 건가? 피보나치가 그대로면 다시 볼 필요 없지." 파동(바닥·꼭대기)이 그대로면
-   되돌림 선도 매수 지정가도 그대로다 — 이미 걸어 둔 주문이 살아 있는 것이라 다시 안 긋는다.
-3. **매매 중이면 새로 안 시작한다.** 다 팔고 난 뒤 다시 걸리면 그때 새 라운드.
+2. **똑같은 파동은 한 번만 매매한다. 파동이 바뀌면 다시 산다.** 재진입 판단 기준은
+   직전 라운드가 **마지막 매수를 넣었던 시점의 파동**(`wave_traded`)이다 — 사서 들고
+   있는 사이 급등으로 파동이 갱신되고 매도가 나갔으면(오너: "익절하고 새로운 매매로
+   시작"), 그 새 파동은 매매한 적이 없으니 걸리면 바로 재진입한다. 라운드 안에서는
+   파동이 바뀌면 매일 주문을 정정한다(ADR-0017).
+3. **매매 중이면 새로 안 시작한다.** 다 팔고 난 뒤 다시 걸리면 규칙 2로 판단.
 4. **돈은 무한.** 동시 보유 종목 수·비중 배분을 따지지 않는다. 승률과 종목당 수익률만 본다.
    (자본 배분·동시 보유 한도는 후속 — 이 숫자를 "실제 계좌 수익률"로 읽으면 안 된다.)
 5. **구간 끝까지 안 팔린 건 계속 들고 있는 것으로 둔다.** 오너: "계속 들고있는 걸로 하자.
@@ -140,13 +142,14 @@ def _rounds_for_code(
     end: pd.Timestamp,
     p: dict,
     cost: CostModel,
-    reenter_same_wave: bool = False,
 ) -> Iterator[tuple[dict, Trade | None]]:
-    """한 종목의 라운드들 — 규칙 2·3 (파동이 바뀌었고, 매매 중이 아닐 때만 새로 시작).
+    """한 종목의 라운드들 — 규칙 2·3 (같은 파동 재매매 금지, 매매 중 새 시작 없음).
 
-    `reenter_same_wave=True` 면 규칙 2를 **청산 뒤에는 풀어 준다** — 다 팔고 나서 다시
-    걸리면 되돌림 선이 그대로여도 새로 산다(오너 2026-08-10, ②의 켜고 끄는 값).
-    끄면(기본) 다 판 뒤 새 고점이 나와 파동이 다시 그어져야만 산다.
+    **재진입 기준 = 직전 라운드가 마지막 매수를 넣었던 시점의 파동**(`wave_traded`).
+    사서 들고 있는 사이 급등으로 파동이 갱신되고 매도가 나갔다면(오너: "익절하고
+    새로운 매매로 시작"), 갱신된 파동은 아직 매매한 적이 없으니 걸리면 바로 재진입한다.
+    같은 파동에서 사고 판 뒤 그 파동에 또 걸리면 안 산다 — 파동이 바뀌어야 새 라운드
+    (오너 확정 2026-08-10). 라운드 안에서는 파동이 바뀌면 매일 주문을 정정한다(ADR-0017).
 
     파동은 `wave_series` 로 **종목당 한 번** 구한다. 7차 규칙(평평한 구간 돌파,
     `base_breakout.refine_start`)은 날짜별로 한 번 더 태운다 — 그건 1.5ms 라 감당된다.
@@ -161,45 +164,68 @@ def _rounds_for_code(
     pos = {pd.Timestamp(d): i for i, d in enumerate(ws["Date"])}
     idx = {pd.Timestamp(d): i for i, d in enumerate(df["Date"])}
 
-    prev_wave: tuple | None = None
+    prev_wave: tuple | None = None  # 직전 라운드가 실제로 매매한 파동
     busy_until: pd.Timestamp | None = None
 
+    # 시작점 다시 긋기(refine_start, ~1.5ms)는 **바닥이 바뀌었거나 신고가가 나온 날**만
+    # 한다 — ③ 시뮬레이션이 전 거래일을 후보로 넘기면(수천 일) 매일 긋는 건 수 초가
+    # 걸린다(실측 5.9s → 아래 캐시로 1초 미만). 트리거는 `_run_symbol` 의 정정 조건과
+    # 같다. 평평한 구간 돌파가 신고가 없는 날 새로 생기는 경우만 못 보는데, 그 근사는
+    # 엔진 쪽과 동일하게 감수한다(BORB-73).
+    highs = df["High"].to_numpy()
+    cached_raw: tuple | None = None
+    cycle: WaveLow | None = None
+    cur_hi = 0.0  # 현재 바닥 이후 최고 고가
+    pending_hi = 0.0  # 아직 반영 안 된(건너뛴 날 포함) 최고 고가
+    last_i: int | None = None
+
     for d in screened:
-        if busy_until is not None and d <= busy_until:
-            continue  # 규칙 3 — 매매 중
         i = idx.get(d)
         wi = pos.get(d)
         if i is None or wi is None:
             continue
-        left = df.iloc[: i + 1]
+        seg_lo = 0 if last_i is None else last_i + 1
+        if i >= seg_lo:
+            pending_hi = max(pending_hi, float(highs[seg_lo : i + 1].max()))
+        last_i = i
+        if busy_until is not None and d <= busy_until:
+            continue  # 규칙 3 — 매매 중(주문·보유가 살아 있다)
         r = ws.iloc[wi]
-        base = WaveLow(
-            date=pd.Timestamp(r["low_date"]),
-            price=float(r["low_price"]),
-            confirmed=bool(r["confirmed"]),
-            falling=bool(r["falling"]),
-        )
-        try:
-            cycle, _ = refine_start(left, base, p)
-        except ValueError:
-            continue
-        high = float(left.loc[left["Date"] >= cycle.date, "High"].max())
-        wave = (cycle.date, round(cycle.price, 4), round(high, 4))
+        raw_key = (r["low_date"], float(r["low_price"]), bool(r["confirmed"]), bool(r["falling"]))
+        if cycle is None or raw_key != cached_raw or pending_hi > cur_hi:
+            left = df.iloc[: i + 1]
+            base = WaveLow(
+                date=pd.Timestamp(r["low_date"]),
+                price=float(r["low_price"]),
+                confirmed=bool(r["confirmed"]),
+                falling=bool(r["falling"]),
+            )
+            try:
+                cycle, _ = refine_start(left, base, p)
+            except ValueError:
+                cycle = None
+                cached_raw = None
+                continue
+            cached_raw = raw_key
+            cur_hi = float(left.loc[left["Date"] >= cycle.date, "High"].max())
+            pending_hi = cur_hi
+        wave = (cycle.date, round(float(cycle.price), 4), round(cur_hi, 4))
         if wave == prev_wave:
-            continue  # 규칙 2 — 파동이 그대로면 이미 걸어 둔 주문이 살아 있다
-        prev_wave = wave
+            continue  # 규칙 2 — 똑같은 파동을 두 번 매매하지 않는다
         try:
-            row, trade = _run_symbol(code, df, d, end, p, cost, cycle=cycle)
+            row, trade = _run_symbol(code, df, d, end, p, cost, cycle=cycle, waves=ws)
         except ValueError:
             continue  # 이 날짜로는 계획을 못 세운다 (선 부족 등) — 다음 기회에
         row["plan_date"] = d.strftime("%Y-%m-%d")
         yield row, trade
-        if trade is not None:
-            # 미청산이면 구간 끝까지 들고 있는 것 — 그 종목은 더 시작하지 않는다.
-            busy_until = end if row.get("open") else pd.Timestamp(row["last_exit"])
-            if reenter_same_wave and not row.get("open"):
-                # 다 팔았으면 이 파동은 "끝난 주문"이다 — 다시 걸리면 새로 건다.
-                prev_wave = None
+        if trade is None:
+            # 매수가 한 번도 안 걸렸다 — 이 라운드의 주문이 이미 구간 끝까지 파동을
+            # 따라다녔으니(ADR-0017), 뒤 날짜에 또 열면 같은 걸음을 두 번 세게 된다.
+            return
+        # 미청산이면 구간 끝까지 들고 있는 것 — 그 종목은 더 시작하지 않는다.
+        busy_until = end if row.get("open") else pd.Timestamp(row["last_exit"])
+        wt = row["wave_traded"]
+        prev_wave = (pd.Timestamp(wt["date"]), wt["low"], wt["high"])
 
 
 def run_walk_forward(
@@ -217,7 +243,6 @@ def run_walk_forward(
     sell_tick_offset: int = 0,
     buy_min_gap_pct: float = 0.0,
     stop: dict | None = None,
-    reenter_same_wave: bool = False,
     cost: CostModel = DEFAULT_COST,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
     hist: pd.DataFrame | None = None,
@@ -293,9 +318,7 @@ def run_walk_forward(
             skipped[code] = "거래정지일만 있음"
             continue
         got = 0
-        for row, trade in _rounds_for_code(
-            code, df, days, end=end_ts, p=p, cost=cost, reenter_same_wave=reenter_same_wave
-        ):
+        for row, trade in _rounds_for_code(code, df, days, end=end_ts, p=p, cost=cost):
             got += 1
             row["code"] = code
             row["name"] = names.get(code, "")  # 코드만 보면 어느 회사인지 알 수 없다

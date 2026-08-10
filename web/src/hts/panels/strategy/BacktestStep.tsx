@@ -307,7 +307,6 @@ export function BacktestStep(props: {
         sell_tick_offset: Number.isInteger(sellOff) ? sellOff : 0,
         buy_min_gap_pct: Number.isFinite(minGap) && minGap >= 0 ? minGap : 0,
         stop: stopPayload(draft),
-        reenter_same_wave: draft.reenterSameWave,
         i_know_test_is_once: btSplit === 'test' ? btConfirmTest : undefined,
         screen_name: draft.screenName,
         label: btLabel.trim() || name,

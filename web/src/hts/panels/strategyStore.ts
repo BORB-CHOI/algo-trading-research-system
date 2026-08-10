@@ -85,8 +85,8 @@ export type Strategy = {
   }
   /** 손절. 없으면(옛 저장본) 손절 미사용으로 연다. */
   stop?: StopRule
-  /** 다 팔고 나서 같은 자리에 또 오면 다시 살지. 없으면 안 산다(옛 저장본 = 그때 동작).
-   *  전 기간 백테스트에서만 뜻이 있다 — ③ 시뮬레이션은 라운드 하나만 그린다. */
+  /** (2026-08-10 폐기) 옛 저장본 호환용 — 전 기간 검사가 걸린 날마다 라운드를 열게 되어
+   *  켜고 끌 것이 없다. 읽지도 쓰지도 않는다. */
   reenterSameWave?: boolean
   /** 주문조건 — 주문조건 카드 삭제(2026-08-05)로 새 저장본에는 없다. 옛 저장본 호환용. */
   order?: {
@@ -152,7 +152,6 @@ export type StrategyDraft = {
   stopCustom: string
   stopTicks: string // ±N호가 (음수 = 아래)
   stopFibRatio: string // mode=fib: 되돌림 비율 ('0.786' = 5번째 선)
-  reenterSameWave: boolean // 다 팔고 같은 자리에 또 오면 다시 살지 (전 기간 백테스트)
   priceType: PriceType
   qtyType: QtyType
   qty: string
@@ -195,7 +194,6 @@ export function emptyDraft(): StrategyDraft {
     stopCustom: '',
     stopTicks: '0',
     stopFibRatio: String(DEFAULT_FIB_STOP_RATIO),
-    reenterSameWave: false,
     priceType: 'limit',
     qtyType: 'shares',
     qty: '',
@@ -228,7 +226,6 @@ export function toDraft(s: Strategy): StrategyDraft {
     stopCustom: s.stop?.customPrice == null ? '' : String(s.stop.customPrice),
     stopTicks: String(s.stop?.tickOffset ?? 0),
     stopFibRatio: String(s.stop?.fibRatio ?? DEFAULT_FIB_STOP_RATIO),
-    reenterSameWave: s.reenterSameWave ?? false,
     priceType: s.order?.priceType ?? 'limit',
     qtyType: s.order?.qtyType ?? 'shares',
     qty: s.order?.qty == null ? '' : String(s.order.qty),
@@ -386,7 +383,6 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
       },
       ...(entry ? { entry } : {}),
       ...(stop ? { stop } : {}),
-      reenterSameWave: d.reenterSameWave,
       split: {
         buy: d.buy.map((b) => ({ ...b })),
         sell: d.sell.map((s) => ({ ...s })),

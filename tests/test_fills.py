@@ -8,12 +8,10 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.layer3_strategy.support_resistance import SRLevel
 from src.layer4_execution.fills import walk
 
-# 매도 목표가는 기준가 위 가장 가까운 지지/저항선으로 스냅된다(`sell_targets_sr`).
-# 촘촘한 선을 깔아 두면 "기준가 × (1+반등%)" 바로 위 선이 잡혀 손계산이 쉽다.
-LEVELS = [SRLevel(price=float(p), touches=3) for p in range(10_000, 30_001, 500)]
+# 매도 목표가 = 기준가 × (1+반등%) 를 호가에 맞춘 값(올림) — 지지/저항선에 붙이지 않는다
+# (오너 2026-08-10: "평단은 평단 기준인 거지 왜 지지저항선에 매도를 거냐").
 
 
 def bars(rows: list[tuple[str, float, float]]) -> pd.DataFrame:
@@ -42,7 +40,6 @@ def test_1차만_걸려도_매도가_나간다() -> None:
         sell_rebounds=[10],
         sell_basis="avg_entry",
         anchor_high=30_000,
-        levels=LEVELS,
     )
     assert [f.tranche for f in r.buys] == [1]
     assert [(f.tranche, f.price) for f in r.sells] == [(1, 22_000)]
@@ -51,7 +48,7 @@ def test_1차만_걸려도_매도가_나간다() -> None:
 def test_평단이_내려가면_매도_주문도_내려간다() -> None:
     """물타기의 뜻이 그거다 — "평단가 기준"이면 목표가가 평단을 따라 움직인다.
 
-    1차 20,000(비중 50) → 2차 16,000(비중 50) → 평단 18,000 → +10% = 19,800 위 선 20,000.
+    1차 20,000(비중 50) → 2차 16,000(비중 50) → 평단 18,000 → +10% = 19,800.
     1차만 걸린 상태의 목표가는 22,000 이었으니, 정정이 없으면 19,000~20,500 구간에서
     안 팔렸을 것이다.
     """
@@ -59,7 +56,7 @@ def test_평단이_내려가면_매도_주문도_내려간다() -> None:
         [
             ("2026-01-05", 21_000, 20_000),  # 1차 체결
             ("2026-01-06", 19_000, 16_000),  # 2차 체결 (고가 19,000 < 22,000 이라 매도 안 됨)
-            ("2026-01-07", 20_500, 19_000),  # 정정된 목표가 20,000 체결
+            ("2026-01-07", 20_500, 19_000),  # 정정된 목표가 19,800 체결
         ]
     )
     r = walk(
@@ -69,10 +66,9 @@ def test_평단이_내려가면_매도_주문도_내려간다() -> None:
         sell_rebounds=[10],
         sell_basis="avg_entry",
         anchor_high=30_000,
-        levels=LEVELS,
     )
     assert [f.tranche for f in r.buys] == [1, 2]
-    assert [(f.tranche, f.price) for f in r.sells] == [(1, 20_000)]
+    assert [(f.tranche, f.price) for f in r.sells] == [(1, 19_800)]
     assert r.basis == 18_000.0
 
 
@@ -81,12 +77,12 @@ def test_같은_봉의_매수는_그날_매도에_반영하지_않는다() -> No
 
     1차 20,000 체결일의 목표가는 22,000. 그날 2차 16,000 도 같이 걸리지만, 그 봉의
     매도 판정은 평단 20,000 기준(22,000)으로 한다 — 고가 21,000 이라 안 팔린다.
-    다음 봉부터 평단 18,000 기준(20,000)이 적용된다.
+    다음 봉부터 평단 18,000 기준(19,800)이 적용된다.
     """
     b = bars(
         [
             ("2026-01-05", 21_000, 16_000),  # 1차·2차 같은 봉에서 체결
-            ("2026-01-06", 20_100, 19_000),  # 정정된 목표가 20,000 체결
+            ("2026-01-06", 20_100, 19_000),  # 정정된 목표가 19,800 체결
         ]
     )
     r = walk(
@@ -96,10 +92,9 @@ def test_같은_봉의_매수는_그날_매도에_반영하지_않는다() -> No
         sell_rebounds=[10],
         sell_basis="avg_entry",
         anchor_high=30_000,
-        levels=LEVELS,
     )
     assert [f.tranche for f in r.buys] == [1, 2]
-    assert [(f.date.strftime("%Y-%m-%d"), f.price) for f in r.sells] == [("2026-01-06", 20_000)]
+    assert [(f.date.strftime("%Y-%m-%d"), f.price) for f in r.sells] == [("2026-01-06", 19_800)]
 
 
 def test_보유가_없으면_매도_체결이_없다() -> None:
@@ -112,7 +107,6 @@ def test_보유가_없으면_매도_체결이_없다() -> None:
         sell_rebounds=[10],
         sell_basis="avg_entry",
         anchor_high=30_000,
-        levels=LEVELS,
     )
     assert r.buys == [] and r.sells == []
     assert r.sell_prices == [None]  # 평단이 없으니 걸 가격도 없다
@@ -123,9 +117,9 @@ def test_파동_꼭대기_기준은_평단과_무관하다() -> None:
     """다만 보유가 생긴 뒤부터만 체결된다 — 안 산 걸 팔 수는 없다."""
     b = bars(
         [
-            ("2026-01-05", 29_000, 25_000),  # 아직 매수 없음. 27,500 을 넘었지만 체결 없음
+            ("2026-01-05", 29_000, 25_000),  # 아직 매수 없음. 27,500(25,000+10%) 넘었지만 체결 없음
             ("2026-01-06", 21_000, 20_000),  # 1차 체결
-            ("2026-01-07", 28_000, 21_000),  # 25,000×1.1=27,500 위 선 28,000... 아래 참조
+            ("2026-01-07", 28_000, 21_000),  # 25,000×1.1=27,500 체결
         ]
     )
     r = walk(
@@ -134,7 +128,6 @@ def test_파동_꼭대기_기준은_평단과_무관하다() -> None:
         [100],
         sell_rebounds=[10],
         sell_basis="anchor_high",
-        levels=[SRLevel(price=27_500.0, touches=3)],
         anchor_high=25_000,
     )
     assert [f.tranche for f in r.buys] == [1]
@@ -150,7 +143,7 @@ def test_최저_체결가_기준() -> None:
                 "2026-01-06",
                 17_000,
                 16_000,
-            ),  # 2차 → 최저 16,000 → +10% = 17,600 에 가장 가까운 선 17,500
+            ),  # 2차 → 최저 16,000 → +10% = 17,600
             ("2026-01-07", 18_000, 17_000),
         ]
     )
@@ -161,10 +154,9 @@ def test_최저_체결가_기준() -> None:
         sell_rebounds=[10],
         sell_basis="lowest_fill",
         anchor_high=30_000,
-        levels=LEVELS,
     )
     assert r.basis == 16_000
-    assert [(f.date.strftime("%Y-%m-%d"), f.price) for f in r.sells] == [("2026-01-07", 17_500)]
+    assert [(f.date.strftime("%Y-%m-%d"), f.price) for f in r.sells] == [("2026-01-07", 17_600)]
 
 
 def test_매도_차수는_한_번씩만_체결된다() -> None:
@@ -182,7 +174,6 @@ def test_매도_차수는_한_번씩만_체결된다() -> None:
         sell_rebounds=[10, 20],
         sell_basis="avg_entry",
         anchor_high=30_000,
-        levels=LEVELS,
     )
     assert [(f.tranche, f.price) for f in r.sells] == [(1, 22_000), (2, 24_000)]
 
@@ -196,7 +187,6 @@ def test_모르는_매도_기준은_거부한다() -> None:
             sell_rebounds=[10],
             sell_basis="평단",
             anchor_high=2,
-            levels=LEVELS,
         )
 
 
@@ -208,6 +198,5 @@ def test_봉이_없으면_빈_결과() -> None:
         sell_rebounds=[10],
         sell_basis="avg_entry",
         anchor_high=30_000,
-        levels=LEVELS,
     )
     assert r.buys == [] and r.sells == [] and r.sell_prices == [None]

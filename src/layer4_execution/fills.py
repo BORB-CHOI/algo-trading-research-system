@@ -43,9 +43,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from src.layer3_strategy.entry_levels import sell_targets_sr
-from src.layer3_strategy.support_resistance import SRLevel
-from src.layer3_strategy.tick_size import InstrumentKind
+from src.layer3_strategy.tick_size import InstrumentKind, round_to_tick, shift_ticks
 
 # 매도 기준점 — 화면 드롭다운 값 그대로.
 SELL_BASES: tuple[str, ...] = ("avg_entry", "lowest_fill", "anchor_high")
@@ -87,27 +85,31 @@ def _basis_of(kind_: str, filled: list[tuple[float, float]], anchor_high: float)
 def _sell_prices(
     basis: float | None,
     rebounds: Sequence[float],
-    levels: Sequence[SRLevel],
     tick_offset: int,
     kind: InstrumentKind,
     overrides: Sequence[float | None],
 ) -> list[float | None]:
-    """기준가 하나 → 매도 차수별 지정가. 걸 선이 없으면 전부 None (조용히 실패하지 않게
-    호출부가 `sell_prices` 로 확인할 수 있다).
+    """기준가 하나 → 매도 차수별 지정가 = **기준가 × (1 + 반등%)** 를 호가에 맞춘 값.
+
+    화면(② 매도 탭)이 약속한 그대로다 — 기준(평단·최저 체결가·파동 꼭대기)에서 반등률만큼
+    위. 지지/저항선에 붙이지 않는다(오너 2026-08-10: "평단은 평단 기준인 거지 왜
+    지지저항선에 매도를 거냐"). 호가 반올림은 올림 — 체결이 덜 되는 보수 방향.
 
     오너가 값을 직접 적은 차수(`overrides`)는 평단이 바뀌어도 그 값을 그대로 쓴다.
+    걸 수 없는 차수(기준가 없음·가격이 0 이하로 밀림)는 None — 조용히 실패하지 않게
+    호출부가 `sell_prices` 로 확인할 수 있다.
     """
     if not rebounds:
         return []
     if basis is None:
         return [o for o in overrides] if overrides else [None] * len(rebounds)
-    try:
-        t = sell_targets_sr(
-            basis, rebound_pcts=list(rebounds), levels=levels, tick_offset=tick_offset, kind=kind
-        )
-        auto: list[float | None] = [float(x.price) for x in t]
-    except ValueError:
-        auto = [None] * len(rebounds)
+    auto: list[float | None] = []
+    for pct in rebounds:
+        try:
+            px = shift_ticks(round_to_tick(basis * (1.0 + pct / 100.0), "up", kind), tick_offset, kind)
+            auto.append(float(px) if px > 0 else None)
+        except ValueError:
+            auto.append(None)  # 오프셋이 가격을 0 이하로 밀어낸 극단 — 그 차수만 못 건다
     if not overrides:
         return auto
     return [o if o is not None else a for o, a in zip(overrides, auto, strict=True)]
@@ -121,7 +123,6 @@ def walk(
     sell_rebounds: Sequence[float],
     sell_basis: str,
     anchor_high: float,
-    levels: Sequence[SRLevel],
     sell_tick_offset: int = 0,
     sell_overrides: Sequence[float | None] = (),
     kind: InstrumentKind = "stock",
@@ -149,7 +150,7 @@ def walk(
     buy_done = [False] * len(buy_prices)
     sell_done = [False] * len(sell_rebounds)
     basis = _basis_of(sell_basis, filled, anchor_high)
-    prices = _sell_prices(basis, sell_rebounds, levels, sell_tick_offset, kind, sell_overrides)
+    prices = _sell_prices(basis, sell_rebounds, sell_tick_offset, kind, sell_overrides)
 
     for row in bars.itertuples():
         low, high, day = float(row.Low), float(row.High), row.Date
@@ -176,9 +177,7 @@ def walk(
 
         if hit:  # 평단이 바뀌었으니 매도 주문을 정정한다
             basis = _basis_of(sell_basis, filled, anchor_high)
-            prices = _sell_prices(
-                basis, sell_rebounds, levels, sell_tick_offset, kind, sell_overrides
-            )
+            prices = _sell_prices(basis, sell_rebounds, sell_tick_offset, kind, sell_overrides)
 
     out.sell_prices = prices
     out.basis = basis

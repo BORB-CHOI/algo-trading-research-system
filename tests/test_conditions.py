@@ -50,6 +50,10 @@ def make_hist(
                 "Date": dates[n - len(cs) + i],
                 "Code": code,
                 "Open": os_[i],
+                # 신고가 조건이 고가 기준(오너 2026-08-10)이라 High/Low 도 채운다.
+                # 시가·종가로 만든 봉이라 High=Close 로 두면 신고가 기대값이 그대로다.
+                "High": max(os_[i], c),
+                "Low": min(os_[i], c),
                 "Close": c,
                 "Volume": vs[i],
             }
@@ -234,6 +238,17 @@ def test_new_high_and_new_low() -> None:
     assert run([{"key": "new_high", "params": {"days": 3, "within": 1}}], closes) == {"A"}
     lows = {"A": [5.0, 4.0, 3.0, 6.0, 2.0], "B": [5.0, 4.0, 3.0, 6.0, 4.0]}
     assert run([{"key": "new_low", "params": {"days": 3, "within": 1}}], lows) == {"A"}
+
+
+def test_new_high_uses_intraday_high() -> None:
+    """신고가는 **고가 기준** (오너 2026-08-10: "종가가 아니라 고가로 바꿔").
+
+    장중에 9.5 를 찍고 8 로 밀린 날(위꼬리) — 종가 기준이면 직전 최고 종가 9 를 못 넘어
+    안 걸렸다. 실측: 레인보우로보틱스 2023-08-07 고가 153,400 · 종가 141,000.
+    """
+    closes = {"A": [5.0, 9.0, 7.0, 8.0]}
+    opens = {"A": [5.0, 9.0, 7.0, 9.5]}  # 기준일 고가 9.5 > 직전 최고 고가 9
+    assert run([{"key": "new_high", "params": {"days": 3, "within": 1}}], closes, opens) == {"A"}
 
 
 def test_new_high_within() -> None:

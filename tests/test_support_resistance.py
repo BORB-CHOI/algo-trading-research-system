@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from src.layer3_strategy import sr_overlay
-from src.layer3_strategy.entry_levels import buy_targets_sr, sell_targets_sr
+from src.layer3_strategy.entry_levels import buy_targets_sr
 from src.layer3_strategy.support_resistance import (
     SRChannel,
     SRLevel,
@@ -252,26 +252,6 @@ class TestBuyTargetsSr:
         levels = [SRLevel(price=22_000.0, touches=5), SRLevel(price=15_000.0, touches=1)]
         out = buy_targets_sr(9_000, 21_000, ratios=[0.236], levels=levels)
         assert out[0].price == 15_000  # 22,000 은 추격 매수라 제외
-
-
-class TestSellTargetsSr:
-    def test_기준가_위에서_가장_가까운_선(self) -> None:
-        # basis 14,000, 반등 10%→15,400 / 20%→16,800
-        out = sell_targets_sr(14_000, rebound_pcts=[10, 20], levels=LEVELS)
-        assert [(t.tranche, t.price) for t in out] == [(1, 15_000), (2, 16_500)]
-
-    def test_기준가_이하_선은_제외(self) -> None:
-        out = sell_targets_sr(14_000, rebound_pcts=[5], levels=LEVELS)
-        assert out[0].price == 15_000  # 13,500 은 기준가 아래라 후보 아님
-
-    def test_같은_거리면_높은_선(self) -> None:
-        levels = [SRLevel(price=15_000.0, touches=1), SRLevel(price=15_800.0, touches=1)]
-        out = sell_targets_sr(14_000, rebound_pcts=[10], levels=levels)  # 목표 15,400
-        assert out[0].price == 15_800  # 체결이 덜 되는 보수 방향
-
-    def test_위쪽_선이_부족하면_거부(self) -> None:
-        with pytest.raises(ValueError, match="위 선이 부족"):
-            sell_targets_sr(14_000, rebound_pcts=[10, 20], levels=[SRLevel(15_000.0, 1)])
 
 
 class TestSrOverlayRoundLabel:

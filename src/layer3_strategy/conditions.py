@@ -10,7 +10,8 @@
 - **look-ahead 금지**: HistPanel 이 생성 시점에 기준일 이후 행을 잘라낸다.
 - **임계값 서버 기본값 금지**: 모든 값(임계값·지표 기간)은 항상 요청에서 받는다.
   UI 의 5/20 같은 숫자는 placeholder 일 뿐 서버에 박지 않는다.
-- 이동평균·신고가·등락률 등 모든 계산은 **종가(Close) 기준**이다.
+- 이동평균·등락률 등은 **종가(Close) 기준**. 신고가/신고가+거래대금만 **고가(High) 기준**
+  (오너 2026-08-10 — 장중만 신고가 찍고 밀린 날을 놓치지 않게. 파동 꼭대기와 같은 기준).
 - **수정주가 보정(ADR-0006) 적용**: 패널에 Stocks(상장주식수)가 있으면 액면분할/병합을
   기준일 기준 back-adjust 한다 — 룩백에 분할이 껴도 이평·신고가·등락률이 왜곡되지 않는다.
   판정 임계값은 layer1 `adjust.py` 와 동일 상수를 쓴다(정본 하나).
@@ -335,22 +336,27 @@ def cond_cum_change(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
 
 
 def cond_new_high(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
-    """N일신고가돌파: 종가 > 직전 N거래일(당일 제외) 최고 종가 — 최근 within일 이내 발생.
+    """N일신고가돌파: **고가** > 직전 N거래일(당일 제외) 최고 고가 — 최근 within일 이내 발생.
+
+    고가(장중) 기준이다(오너 2026-08-10: "종가가 아니라 고가로 바꿔") — 종가 기준이면
+    위꼬리 달고 밀린 날(장중만 신고가)을 놓친다. 실측: 레인보우로보틱스 2023-08-07
+    고가 153,400(장중 신고가)이 종가 141,000 으로 밀려 안 걸렸다. 파동 꼭대기도 고가
+    기준이라 이제 검색식과 파동이 같은 날 움직인다.
 
     rolling(min_periods=days) 라 직전 N일 이력이 다 있어야 인정한다 —
     신규상장 직후 반쪽 이력으로 신고가 처리하지 않는다(NaN 비교 → False).
     """
     d = p["days"]
-    c = hist.close
-    if len(c.index) < d + 1:
+    h = hist.high
+    if len(h.index) < d + 1:
         return _none(base)
-    prev_max = c.rolling(d, min_periods=d).max().shift(1)
-    return (c > prev_max).iloc[-p["within"] :].any()
+    prev_max = h.rolling(d, min_periods=d).max().shift(1)
+    return (h > prev_max).iloc[-p["within"] :].any()
 
 
 def cond_new_high_burst(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
-    """신고가+거래대금: 종가가 직전 N일 최고 종가를 돌파했고 **그 돌파일** 거래대금이
-    X억 원 이상 — 최근 within일 이내 발생.
+    """신고가+거래대금: **고가**가 직전 N일 최고 고가를 돌파했고 **그 돌파일** 거래대금이
+    X억 원 이상 — 최근 within일 이내 발생. 고가 기준인 이유는 `cond_new_high` 와 같다.
 
     돌파와 대금 터짐이 **같은 봉**이어야 한다(오너 정의 2026-08-06: "신고가의 기준봉을
     거래대금 터졌을 때로 찾아야"). 따로 평가하면 "어제 조용히 돌파 + 오늘 대금만 폭발"이
@@ -359,11 +365,11 @@ def cond_new_high_burst(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Seri
     if not hist.has("Amount"):
         return _none(base)
     d = p["days"]
-    c = hist.close
-    if len(c.index) < d + 1:
+    h = hist.high
+    if len(h.index) < d + 1:
         return _none(base)
-    prev_max = c.rolling(d, min_periods=d).max().shift(1)
-    hit = (c > prev_max) & (hist.amount >= p["amount"] * 1e8)
+    prev_max = h.rolling(d, min_periods=d).max().shift(1)
+    hit = (h > prev_max) & (hist.amount >= p["amount"] * 1e8)
     return hit.iloc[-p["within"] :].any()
 
 
@@ -634,7 +640,7 @@ _ALL = [
     Condition(
         "new_high",
         "N일신고가돌파",
-        "종가가 직전 N거래일 최고 종가를 돌파 — 최근 X일 이내 발생 (종가 기준)",
+        "고가가 직전 N거래일 최고 고가를 돌파 — 최근 X일 이내 발생 (장중 고가 기준)",
         (_int("days", "기간"), _int("within", "이내")),
         cond_new_high,
         lookback=lambda p: p["days"] + p["within"],
@@ -642,7 +648,7 @@ _ALL = [
     Condition(
         "new_high_burst",
         "신고가+거래대금",
-        "종가가 직전 N거래일 최고 종가를 돌파했고 그 돌파일 거래대금이 X억 원 이상 — 최근 X일 이내 발생 (돌파와 터짐이 같은 봉)",
+        "고가가 직전 N거래일 최고 고가를 돌파했고 그 돌파일 거래대금이 X억 원 이상 — 최근 X일 이내 발생 (돌파와 터짐이 같은 봉)",
         (
             _int("days", "기간"),
             _num("amount", "돌파일 거래대금", "억", required=True),

@@ -470,8 +470,6 @@ export type BacktestRequest = StartParams & {
   screen_name?: string // 어떤 검색식으로 돌렸나
   stop?: SimulateRequest['stop']
   i_know_test_is_once?: boolean // §4.1 — Test 는 단 1회, UI 명시 체크 필수
-  /** 다 팔고 같은 자리에 또 오면 다시 살지. 전 기간 검사에서만 뜻이 있다. */
-  reenter_same_wave?: boolean
 }
 
 export type BacktestFill = {

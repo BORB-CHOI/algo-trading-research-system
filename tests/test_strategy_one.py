@@ -122,21 +122,18 @@ RIGHT_ROUND = [
 
 
 def test_round_trip_buy_at_support_sell_at_resistance() -> None:
-    """매수 = 50% 선이 들어간 자리의 라운드 가격, 매도 = 평단+10%(16,500) 위 첫 자리.
+    """매수 = 50% 선이 들어간 자리의 라운드 가격, 매도 = **평단+10% 그대로**(16,500).
 
-    ADR-0014 7차 개정 — 자리를 먼저 만들고 되돌림 선을 배정한다. 꺾임점이 15,000·17,000
-    둘뿐이라 자리도 둘(폭 3%면 13% 떨어진 둘은 안 묶인다).
+    매수(ADR-0014 7차 개정) — 자리를 먼저 만들고 되돌림 선을 배정한다. 꺾임점이
+    15,000·17,000 둘뿐이라 자리도 둘(폭 3%면 13% 떨어진 둘은 안 묶인다).
       50%   15,000 → 자리 15,000 **안** → 15,000
-      38.2% 16,416 → 두 자리 사이 빈틈 → **아래 자리** 15,000
-      23.6% 18,168 → 빈틈 → 아래 자리 17,000
-    매도 후보는 15,000·17,000 이고 16,500 위 첫 자리가 17,000 이다.
-    (6차까지는 38.2% 가 16,000 을 만들어 매도가 16,000 이었다 — 그건 밴드 안 봉들의
-    아래끝~위끝을 자리라고 부르던 때의 값이다.)"""
+    매도는 지지/저항에 안 붙인다(오너 2026-08-10: "평단은 평단 기준") —
+    평단 15,000 × 1.1 = 16,500."""
     out = run(RIGHT_ROUND)
     assert out["universe"] == 1 and out["no_fill"] == 0 and not out["skipped"]
     r = out["results"][0]
-    assert (r["n_buys"], r["avg_entry"], r["exit_value"]) == (1, 15_000.0, 17_000.0)
-    assert r["net_return"] == pytest.approx(17_000 / 15_000 - 1)
+    assert (r["n_buys"], r["avg_entry"], r["exit_value"]) == (1, 15_000.0, 16_500.0)
+    assert r["net_return"] == pytest.approx(16_500 / 15_000 - 1)
     assert not r["stopped"]
     m = out["metrics"]
     assert (m["n_trades"], m["win_rate"], m["reliable"]) == (1, 1.0, False)  # N<30 신뢰 불가
@@ -144,7 +141,7 @@ def test_round_trip_buy_at_support_sell_at_resistance() -> None:
 
 def test_cost_is_subtracted() -> None:
     out = run(RIGHT_ROUND, cost=CostModel(round_trip_rate=0.005))
-    assert out["results"][0]["net_return"] == pytest.approx(17_000 / 15_000 - 1 - 0.005)
+    assert out["results"][0]["net_return"] == pytest.approx(16_500 / 15_000 - 1 - 0.005)
 
 
 def test_stop_cancels_later_sells() -> None:
