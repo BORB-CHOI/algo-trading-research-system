@@ -38,6 +38,11 @@ opendart = [
 kis = [
     "requests>=2.31",
 ]
+# 나무증권(NH투자증권) PLUG 오픈API — 공식 SDK (feature/namuh-plug, 주문 창구 전환 검토).
+# 주문 검증은 반드시 모의(moapi)부터. 실계좌 주문은 오너 직접 실행만.
+namuh = [
+    "nhplug",
+]
 # 케이스 검사기 웹 도구 백엔드 (ADR-0005). 데이터를 프런트로 내주기만 한다 — 매매 판단 ❌.
 webapp = [
     "fastapi>=0.115",
