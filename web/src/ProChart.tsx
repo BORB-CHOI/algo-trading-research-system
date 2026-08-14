@@ -484,6 +484,12 @@ export type BarPeriod = 'day' | 'week' | 'month'
 
 export const PERIOD_LABEL: Record<BarPeriod, string> = { day: '일', week: '주', month: '월' }
 
+/** 시장 — 2025-03 넥스트레이드(NXT) 개장 후 체결이 두 거래소에 나뉜다. 통합 = KRX+NXT 전체.
+ *  통합이 정본(오너 2026-08-15). NXT 미상장 종목이나 수집 전이면 서버가 KRX 값으로 대신 준다. */
+export type BarMarket = 'unt' | 'krx' | 'nxt'
+
+export const MARKET_LABEL: Record<BarMarket, string> = { unt: '통합', krx: 'KRX', nxt: 'NXT' }
+
 /** 하루 안쪽 주기(분봉·틱). 지금은 없다 — 데이터가 생기면 여기 등록만 하면
  *  `baseStampOf` 가 시각까지 붙인다. */
 const INTRADAY_PERIODS = new Set<BarPeriod>()
@@ -539,11 +545,12 @@ async function fetchCandles(
   period: BarPeriod,
   bars: BarCount,
   minStart?: string,
+  market: BarMarket = 'unt',
 ): Promise<KLineData[]> {
   const auto = startFor(period, bars)
   // 전체(bars===0)면 이미 다 받으므로 minStart 는 볼 필요 없다.
   const start = auto == null ? '1990-01-01' : minStart && minStart < auto ? minStart : auto
-  const q = `code=${encodeURIComponent(code)}&period=${period}&start=${start}`
+  const q = `code=${encodeURIComponent(code)}&period=${period}&start=${start}&market=${market}`
   const res = await fetch(`/api/candles?${q}`)
   if (!res.ok) return [] // 404(데이터 없음) 등은 빈 배열 — 화면은 "데이터 없음"으로 남는다
   const { candles } = (await res.json()) as {
@@ -703,6 +710,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   const first = props.initialSymbol ?? { code: '005930', name: '삼성전자', market: 'KOSPI' }
   const symbolRef = useRef({ ...first })
   const periodRef = useRef<BarPeriod>('day')
+  const marketRef = useRef<BarMarket>('unt')
   const barsRef = useRef<BarCount>(props.initialBars ?? 500)
   // 늦게 온 이전 종목 응답이 새 종목을 덮지 않게 하는 순번 (Pro 데이터피드가 하던 일).
   const loadSeq = useRef(0)
@@ -724,6 +732,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
 
   const [sym, setSym] = useState({ ...first })
   const [period, setPeriodState] = useState<BarPeriod>('day')
+  const [market, setMarketState] = useState<BarMarket>('unt')
   const [bars, setBarsState] = useState<BarCount>(props.initialBars ?? 500)
   const [subs, setSubs] = useState<string[]>(['VOL'])
   // 지지저항·오더블록·가격 빈틈은 **차트 기능**이다 (오너 2026-08-09: "애초에 지지저항을
@@ -760,6 +769,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
         periodRef.current,
         want,
         minStartRef.current,
+        marketRef.current,
       )
       if (seq !== loadSeq.current) return // 그 사이 종목·주기가 또 바뀌었다 — 이 응답은 버린다
       loadedForRef.current = want
@@ -991,6 +1001,14 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  function pickMarket(m: BarMarket): void {
+    marketRef.current = m
+    setMarketState(m)
+    // 시장이 바뀌면 봉 값이 통째로 바뀐다(통합 거래량 ≠ KRX 거래량) — 주기 전환과 같은 절차.
+    lastToolKey.current = ''
+    void reload().then(refreshTools)
+  }
+
   function pickPeriod(p: BarPeriod): void {
     periodRef.current = p
     setPeriodState(p)
@@ -1087,6 +1105,18 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
                 onClick={() => pickPeriod(p)}
               >
                 {PERIOD_LABEL[p]}
+              </button>
+            ))}
+          </span>
+          <span className="grp" title="어느 거래소 체결 기준으로 볼지 — 통합 = KRX+넥스트레이드 전체">
+            {(Object.keys(MARKET_LABEL) as BarMarket[]).map((m) => (
+              <button
+                key={m}
+                type="button"
+                className={market === m ? 'on' : ''}
+                onClick={() => pickMarket(m)}
+              >
+                {MARKET_LABEL[m]}
               </button>
             ))}
           </span>

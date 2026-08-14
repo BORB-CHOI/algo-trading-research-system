@@ -9,15 +9,19 @@
 - 중단·재시작 안전: data/derived/supply/_state.json 에 종목 단위 완료 기록.
 - 조회만 한다. 주문 없음. KIS 실전(real) 키 필요 — 이 TR 은 모의투자에 없다.
 - 스로틀·재시도(EGW00201)·토큰 캐시는 기존 KIS 클라이언트가 맡는다.
+- 병렬 3줄기 — 줄기마다 클라이언트를 따로 두고(스레드 안전 아님) 각자 간격을 지킨다.
+  합산 초당 약 4~6건. KIS 문서 한도(초당 20건)의 3할 이하.
 
-소요 추정: 약 45~50만 호출, 초당 2건 기준 연속 2~3일. 끊겨도 이어서 돌리면 된다.
+소요 추정: 약 45~50만 호출 — 병렬 기준 하루 안팎. 끊겨도 이어서 돌리면 된다.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -143,6 +147,57 @@ def make_client() -> tuple[KisClient, object]:
     return KisClient(creds, token, policy=POLICY), token
 
 
+WORKERS = 3
+STATE_LOCK = threading.Lock()
+_LOCAL = threading.local()
+
+
+def _thread_client() -> KisClient:
+    """줄기(스레드)마다 클라이언트를 하나씩 — KisClient 는 스레드 안전이 아니다."""
+    now = datetime.now(UTC)
+    if getattr(_LOCAL, "client", None) is None or _LOCAL.token.is_expired(now):
+        _LOCAL.client, _LOCAL.token = make_client()
+    return _LOCAL.client
+
+
+def backfill_one(code: str, row: pd.Series, state: dict) -> None:
+    """한 종목 백필 (병렬 작업 단위). 네트워크 순단은 쉬었다 같은 종목부터 다시."""
+    first = row["first"].strftime("%Y%m%d")
+    last = row["last"].strftime("%Y%m%d")
+    df = None
+    for net_retry in range(1, 11):
+        try:
+            df = collect_code(_thread_client(), code, first, last)
+            break
+        except KisApiError as e:
+            with STATE_LOCK:
+                state[code] = {"done": False, "error": str(e)}
+                save_state(state)
+            print(f"  ✗ {code} {row['name']}: {e}", flush=True)
+            return
+        except OSError as e:  # requests 의 ConnectionError 포함
+            wait = min(60 * net_retry, 600)
+            print(f"  ~ 네트워크 오류({net_retry}/10), {wait}초 후 재시도: {e}", flush=True)
+            time.sleep(wait)
+            _LOCAL.client = None  # 다음 호출에서 새로 만든다
+    if df is None:
+        return
+
+    if not df.empty:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(OUT_DIR / f"{code}.parquet", index=False)
+    entry = {
+        "done": True,
+        "rows": int(len(df)),
+        "oldest": str(df["stck_bsop_date"].min()) if not df.empty else "",
+        "newest": str(df["stck_bsop_date"].max()) if not df.empty else "",
+        "collected_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with STATE_LOCK:
+        state[code] = entry
+        save_state(state)
+
+
 def main() -> int:
     only = sys.argv[1] if len(sys.argv) > 1 else None
 
@@ -153,60 +208,30 @@ def main() -> int:
         if universe.empty:
             print(f"marcap 에 {only} 가 없다")
             return 1
-    print(f"대상 {len(universe)}종목 (상폐 포함), 저장 {OUT_DIR}", flush=True)
+    print(f"대상 {len(universe)}종목 (상폐 포함), 병렬 {WORKERS}줄기, 저장 {OUT_DIR}", flush=True)
 
     state = load_state()
-    client, token = make_client()
+    todo = [(str(c), r) for c, r in universe.iterrows() if not state.get(str(c), {}).get("done")]
+    print(f"이번에 받을 것 {len(todo)}종목 (이미 완료 {len(universe) - len(todo)})", flush=True)
     start_at = datetime.now()
+    done_count = 0
+    count_lock = threading.Lock()
 
-    for idx, (code, row) in enumerate(universe.iterrows(), 1):
-        if state.get(code, {}).get("done"):
-            continue
-        # 24시간 토큰 — 만료가 가까우면 갱신해서 클라이언트를 새로 만든다
-        if token.is_expired(datetime.now(UTC)):
-            client, token = make_client()
-
-        first = row["first"].strftime("%Y%m%d")
-        last = row["last"].strftime("%Y%m%d")
-        df = None
-        for net_retry in range(1, 11):
-            try:
-                df = collect_code(client, str(code), first, last)
-                break
-            except KisApiError as e:
-                state[code] = {"done": False, "error": str(e)}
-                save_state(state)
-                print(f"  ✗ {code} {row['name']}: {e}", flush=True)
-                break
-            except OSError as e:  # requests 의 ConnectionError 포함 — 네트워크 순단
-                # 며칠 도는 작업이라 죽지 않고 쉬었다 같은 종목부터 다시.
-                wait = min(60 * net_retry, 600)
-                print(f"  ~ 네트워크 오류({net_retry}/10), {wait}초 후 재시도: {e}", flush=True)
-                time.sleep(wait)
-                client, token = make_client()
-        if df is None:
-            continue
-
-        if not df.empty:
-            OUT_DIR.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(OUT_DIR / f"{code}.parquet", index=False)
-        state[code] = {
-            "done": True,
-            "rows": int(len(df)),
-            "oldest": str(df["stck_bsop_date"].min()) if not df.empty else "",
-            "newest": str(df["stck_bsop_date"].max()) if not df.empty else "",
-            "collected_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        save_state(state)
-
-        if idx % 10 == 0 or idx == len(universe):
-            done_n = sum(1 for v in state.values() if v.get("done"))
+    def run(job: tuple[str, pd.Series]) -> None:
+        nonlocal done_count
+        backfill_one(job[0], job[1], state)
+        with count_lock:
+            done_count += 1
+            n = done_count
+        if n % 25 == 0 or n == len(todo):
             elapsed = (datetime.now() - start_at).total_seconds() / 3600
             print(
-                f"[{datetime.now():%m-%d %H:%M}] 완료 {done_n}/{len(universe)}종목 "
-                f"({elapsed:.1f}시간 경과, 마지막: {code} {row['name']})",
+                f"[{datetime.now():%m-%d %H:%M}] {n}/{len(todo)}종목 ({elapsed:.1f}시간 경과)",
                 flush=True,
             )
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        list(pool.map(run, todo))
 
     print("백필 끝.")
     return 0

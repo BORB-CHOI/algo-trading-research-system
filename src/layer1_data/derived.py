@@ -66,9 +66,12 @@ _NAMUH_RENAME = {
 
 
 def load_namuh_bars(
-    code: str, timespan: str, bars_dir: Path = NAMUH_BARS_DIR
+    code: str, timespan: str, market: str = "krx", bars_dir: Path = NAMUH_BARS_DIR
 ) -> pd.DataFrame | None:
     """나무증권에서 수집한 원본 봉(주봉·월봉 등)을 차트 표준 컬럼으로 읽는다.
+
+    `market` 는 krx / unt(통합) / nxt. 2025-03 NXT 개장 후 체결이 두 거래소에 나뉘어
+    통합이 실제 전체 거래량이다(ADR-0018). 통합·NXT 는 NXT 상장 종목만 수집돼 있다.
 
     파일이 없으면 None — 상장폐지 종목이나 아직 수집 안 된 종목이다. 호출자는
     일봉 합성으로 대체한다(2026-08-15 오너 결정: 나무 원본 + 상폐만 합성).
@@ -79,7 +82,7 @@ def load_namuh_bars(
 
     주의: 나무 봉은 **수정주가**다. 원주가(adjust=False) 요청에는 쓰면 안 된다.
     """
-    path = bars_dir / timespan / f"{str(code).strip().zfill(6)}.parquet"
+    path = bars_dir / market / timespan / f"{str(code).strip().zfill(6)}.parquet"
     if not path.exists():
         return None
     raw = pd.read_parquet(path)

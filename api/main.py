@@ -193,7 +193,28 @@ def get_candles(code: str, start: str | None, end: str | None, adjust: bool = Tr
     return drop_halted(df)
 
 
-def period_candles(daily: pd.DataFrame, timespan: str, adjust: bool = True) -> pd.DataFrame:
+def market_daily(daily: pd.DataFrame, market: str, adjust: bool) -> pd.DataFrame:
+    """일봉을 요청한 시장 기준으로 바꾼다. 통합(unt)·NXT 는 나무 수집본으로 교체.
+
+    marcap 일봉은 KRX 체결만 담는다 — 2025-03 NXT 개장 후 통합 거래량이 실제 전체다
+    (ADR-0018). 수집본이 없으면(상폐·미수집·원주가 요청) KRX 그대로 둔다.
+    """
+    if market == "krx" or not adjust or daily.empty:
+        return daily
+    raw = load_namuh_bars(str(daily["Code"].iloc[0]), "day", market)
+    if raw is None or raw.empty:
+        return daily
+    lo, hi = daily["Date"].min(), daily["Date"].max()
+    raw = raw[(raw["Date"] >= lo) & (raw["Date"] <= hi)]
+    if raw.empty:
+        return daily
+    raw = raw.assign(Code=daily["Code"].iloc[0], Name=daily["Name"].iloc[-1])
+    return drop_halted(raw).reset_index(drop=True)
+
+
+def period_candles(
+    daily: pd.DataFrame, timespan: str, adjust: bool = True, market: str = "krx"
+) -> pd.DataFrame:
     """주봉·월봉 — 나무증권 원본 봉이 있으면 그걸 쓰고, 없는 부분만 일봉으로 합성한다.
 
     - 원본이 없는 종목(상장폐지·미수집)과 원주가(adjust=False) 요청은 전부 합성
@@ -206,7 +227,7 @@ def period_candles(daily: pd.DataFrame, timespan: str, adjust: bool = True) -> p
     synth = resample_candles(daily, timespan)
     if not adjust:
         return synth
-    raw = load_namuh_bars(str(daily["Code"].iloc[0]), timespan)
+    raw = load_namuh_bars(str(daily["Code"].iloc[0]), timespan, market)
     if raw is None or len(raw) < 2:
         return synth
     raw = raw.iloc[:-1]  # 마지막 봉은 미완성일 수 있다
@@ -422,8 +443,10 @@ def api_candles(
     end: str | None = Query(None, description="종료일 YYYY-MM-DD"),
     adjust: bool = Query(True, description="액면분할/병합 수정주가 보정 (ADR-0006)"),
     period: str = Query("day", pattern="^(day|week|month)$", description="봉 주기 (일/주/월)"),
+    market: str = Query("krx", pattern="^(krx|unt|nxt)$", description="시장 (KRX/통합/NXT)"),
 ) -> dict:
-    df = period_candles(get_candles(code, start, end, adjust), period, adjust)
+    daily = market_daily(get_candles(code, start, end, adjust), market, adjust)
+    df = period_candles(daily, period, adjust, market)
     if df.empty:
         raise HTTPException(
             status_code=404,

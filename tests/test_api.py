@@ -504,7 +504,7 @@ def test_주봉은_나무_원본을_먼저_쓴다(monkeypatch: pytest.MonkeyPatc
             "Amount": [1.0, 2.0],
         }
     )
-    monkeypatch.setattr(m, "load_namuh_bars", lambda code, span: raw)
+    monkeypatch.setattr(m, "load_namuh_bars", lambda code, span, market="krx": raw)
     out = m.period_candles(_fake_daily(), "week")
     # 원본 두 봉 중 마지막은 미완성 취급으로 버려져 첫 봉만 남고, 뒤는 합성이다.
     assert float(out.iloc[0]["Close"]) == 60.0  # 나무 원본 값
@@ -517,7 +517,7 @@ def test_나무_원본이_없으면_합성으로_대체(monkeypatch: pytest.Monk
     import api.main as m
 
     daily = _fake_daily()
-    monkeypatch.setattr(m, "load_namuh_bars", lambda code, span: None)
+    monkeypatch.setattr(m, "load_namuh_bars", lambda code, span, market="krx": None)
     out = m.period_candles(daily, "week")
     expected = m.resample_candles(daily, "week")
     assert out.reset_index(drop=True).equals(expected.reset_index(drop=True))
