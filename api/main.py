@@ -38,7 +38,7 @@ from src.layer1_data.adjust import (
     apply_split_adjustment,
 )
 from src.layer1_data.dart import load_financials
-from src.layer1_data.derived import drop_halted, load_adjusted
+from src.layer1_data.derived import drop_halted, load_adjusted, load_namuh_bars
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
 from src.layer1_data.marcap_loader import available_years, load_years
@@ -94,7 +94,9 @@ app.add_middleware(
 )
 
 
-# 주봉/월봉은 일봉을 pandas resample 로 합성한다(분봉 데이터 없음). 주봉 라벨은 금요일 기준.
+# 주봉/월봉 정본은 나무증권에서 수집한 원본 봉(data/derived/namuh_bars, 2026-08-15 오너 결정).
+# 합성(resample)은 원본이 없는 경우의 대체다: 상장폐지 종목 · 미수집 종목 · 원주가(adjust=False) 요청,
+# 그리고 수집 시점 이후에 생긴 최신 봉 꼬리. 주봉 라벨은 금요일 기준.
 _RESAMPLE_RULES = {"week": "W-FRI", "month": "ME"}
 
 
@@ -191,8 +193,35 @@ def get_candles(code: str, start: str | None, end: str | None, adjust: bool = Tr
     return drop_halted(df)
 
 
+def period_candles(daily: pd.DataFrame, timespan: str, adjust: bool = True) -> pd.DataFrame:
+    """주봉·월봉 — 나무증권 원본 봉이 있으면 그걸 쓰고, 없는 부분만 일봉으로 합성한다.
+
+    - 원본이 없는 종목(상장폐지·미수집)과 원주가(adjust=False) 요청은 전부 합성
+      (나무 봉은 수정주가라 원주가와 섞으면 안 된다).
+    - 원본의 마지막 봉은 수집 당시 진행 중이던 미완성 봉일 수 있어 버리고,
+      그 뒤부터는 일봉 합성으로 이어붙인다 — 수집이 며칠 묵어도 차트는 최신이다.
+    """
+    if timespan == "day" or daily.empty:
+        return daily
+    synth = resample_candles(daily, timespan)
+    if not adjust:
+        return synth
+    raw = load_namuh_bars(str(daily["Code"].iloc[0]), timespan)
+    if raw is None or len(raw) < 2:
+        return synth
+    raw = raw.iloc[:-1]  # 마지막 봉은 미완성일 수 있다
+    lo, hi = daily["Date"].min(), daily["Date"].max()
+    raw = raw[(raw["Date"] >= lo) & (raw["Date"] <= hi)]
+    if raw.empty:
+        return synth
+    raw = raw.assign(Code=daily["Code"].iloc[0], Name=daily["Name"].iloc[-1])
+    tail = synth[synth["Date"] > raw["Date"].max()]
+    cols = ["Date", "Code", "Name", "Open", "High", "Low", "Close", "Volume", "Amount"]
+    return pd.concat([raw[cols], tail[cols]], ignore_index=True)
+
+
 def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
-    """일봉 → 주봉/월봉. 봉 날짜는 그 기간의 마지막 실제 거래일."""
+    """일봉 → 주봉/월봉 합성. 봉 날짜는 그 기간의 마지막 실제 거래일."""
     if timespan == "day" or df.empty:
         return df
     d = df.assign(TradeDate=df["Date"]).set_index("Date")
@@ -394,7 +423,7 @@ def api_candles(
     adjust: bool = Query(True, description="액면분할/병합 수정주가 보정 (ADR-0006)"),
     period: str = Query("day", pattern="^(day|week|month)$", description="봉 주기 (일/주/월)"),
 ) -> dict:
-    df = resample_candles(get_candles(code, start, end, adjust), period)
+    df = period_candles(get_candles(code, start, end, adjust), period, adjust)
     if df.empty:
         raise HTTPException(
             status_code=404,
