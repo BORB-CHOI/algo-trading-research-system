@@ -378,6 +378,8 @@ def _run_symbol(
                 "price": f["price"],
                 "w": f["w"],
                 "stage": f.get("stage"),
+                # 매수만 있다 — 0 이면 목표가에 딱 닿기만 한 체결(실전에선 못 샀을 수 있다)
+                **({"slack_ticks": f["slack_ticks"]} if "slack_ticks" in f else {}),
                 **({"eval": True} if f.get("eval") else {}),
             }
             for side, group in (("buy", fills), ("sell", exits))

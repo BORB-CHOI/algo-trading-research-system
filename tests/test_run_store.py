@@ -183,3 +183,66 @@ def test_불러온_결과가_화면_계약과_같다(tmp_path) -> None:
 
     # 지표는 방금 돌린 것과 같은 정의로 다시 센다
     assert aggregate_returns([0.1])["win_rate"] == 1.0
+
+
+# ─────────────────────────────────────────────────────────────
+# 체결 내역 — 실험 산출물 (미션 문서 §19-3, ADR-0019 후속)
+#
+# 지금까지 runs·picks·notes 만 남아 두 실험을 **줄 단위로** 견줄 수 없었다.
+# 체결 한 줄씩 남겨 "이 자리에서 실제로 샀나, 얼마나 아슬아슬했나"를 나중에 본다.
+# ─────────────────────────────────────────────────────────────
+
+FILLS = [
+    {
+        "code": "005930",
+        "date": "2026-01-05",
+        "side": "buy",
+        "price": 70000.0,
+        "weight": 0.3,
+        "stage": 1,
+        "slack_ticks": 0,  # 딱 닿기만 함 — 실제로는 못 샀을 수 있다
+    },
+    {
+        "code": "005930",
+        "date": "2026-02-10",
+        "side": "sell",
+        "price": 77000.0,
+        "weight": 1.0,
+        "stage": 1,
+        "slack_ticks": 2,
+    },
+]
+
+
+def test_검사를_담으면_체결도_같이_담긴다(db: Path) -> None:
+    """`save_run` 이 결과 행의 fills 를 표로 옮긴다 — 따로 부르지 않아도 된다."""
+    rid = run_store.save_run(RESULT, ran_at=NOW, params=PARAMS, db=db)
+    got = run_store.load_fills(rid, db=db)
+    assert got, "결과에 체결이 있으면 표에도 있어야 한다"
+    assert all(set(f) == set(run_store._FILL_COLS) for f in got)
+
+
+def test_체결을_더_담고_꺼낸다(db: Path) -> None:
+    rid = run_store.save_run(RESULT, ran_at=NOW, params=PARAMS, db=db)
+    before = len(run_store.load_fills(rid, db=db))
+    run_store.save_fills(rid, FILLS, db=db)
+    got = run_store.load_fills(rid, db=db)
+    assert len(got) == before + 2
+    mine = [f for f in got if f["code"] == "005930"]
+    assert len(mine) == 2
+    assert {f["side"] for f in mine} == {"buy", "sell"}
+    assert [f["slack_ticks"] for f in sorted(mine, key=lambda f: f["date"])] == [0, 2]
+
+
+def test_빈_체결을_담아도_안_터진다(db: Path) -> None:
+    rid = run_store.save_run(RESULT, ran_at=NOW, params=PARAMS, db=db)
+    before = run_store.load_fills(rid, db=db)
+    run_store.save_fills(rid, [], db=db)
+    assert run_store.load_fills(rid, db=db) == before
+
+
+def test_검사를_지우면_체결도_같이_지워진다(db: Path) -> None:
+    rid = run_store.save_run(RESULT, ran_at=NOW, params=PARAMS, db=db)
+    run_store.save_fills(rid, FILLS, db=db)
+    run_store.delete_run(rid, db=db)
+    assert run_store.load_fills(rid, db=db) == []
