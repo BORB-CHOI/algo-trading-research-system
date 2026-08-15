@@ -52,6 +52,85 @@ def derived_last_date(adjusted_dir: Path = ADJUSTED_DIR) -> pd.Timestamp | None:
     return pd.Timestamp(last) if last else None
 
 
+NAMUH_BARS_DIR = DERIVED_DIR / "namuh_bars"
+
+# 나무증권 원본 필드 → 차트 표준 컬럼 (scripts/collect_namuh_bars.py 가 만든 파일)
+_NAMUH_RENAME = {
+    "stck_oprc": "Open",
+    "stck_hgpr": "High",
+    "stck_lwpr": "Low",
+    "stck_prpr": "Close",
+    "vol": "Volume",
+    "tr_pbmn": "Amount",
+}
+
+
+def load_namuh_bars(
+    code: str, timespan: str, market: str = "krx", bars_dir: Path = NAMUH_BARS_DIR
+) -> pd.DataFrame | None:
+    """나무증권에서 수집한 원본 봉(주봉·월봉 등)을 차트 표준 컬럼으로 읽는다.
+
+    `market` 는 krx / unt(통합) / nxt. 2025-03 NXT 개장 후 체결이 두 거래소에 나뉘어
+    통합이 실제 전체 거래량이다(ADR-0018). 통합·NXT 는 NXT 상장 종목만 수집돼 있다.
+
+    파일이 없으면 None — 상장폐지 종목이나 아직 수집 안 된 종목이다. 호출자는
+    일봉 합성으로 대체한다(2026-08-15 오너 결정: 나무 원본 + 상폐만 합성).
+
+    날짜 규칙: 주봉의 `bsop_date` 는 그 주 마지막 거래일(8자리)이라 그대로 쓴다.
+    월봉은 `YYYYMM`(6자리)으로 와서 그 달 말일로 바꾼다 — 실제 마지막 거래일과
+    며칠 다를 수 있지만 축 라벨 용도로는 충분하다.
+
+    주의: 나무 봉은 **수정주가**다. 원주가(adjust=False) 요청에는 쓰면 안 된다.
+    """
+    path = bars_dir / market / timespan / f"{str(code).strip().zfill(6)}.parquet"
+    if not path.exists():
+        return None
+    raw = pd.read_parquet(path)
+    if raw.empty or not set(_NAMUH_RENAME) <= set(raw.columns):
+        return None
+
+    dates = raw["bsop_date"].astype(str)
+    is_month = dates.str.len() == 6
+    day_dates = pd.to_datetime(dates.where(~is_month), format="%Y%m%d", errors="coerce")
+    month_ends = pd.to_datetime(
+        dates.where(is_month), format="%Y%m", errors="coerce"
+    ) + pd.offsets.MonthEnd(0)
+    df = raw[list(_NAMUH_RENAME)].apply(pd.to_numeric, errors="coerce")
+    df = df.rename(columns=_NAMUH_RENAME).assign(Date=day_dates.fillna(month_ends))
+    df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
+    return df.sort_values("Date").reset_index(drop=True)
+
+
+MINUTE_SPANS = ("min1", "min3", "min5", "min10", "min15", "min30", "min60", "min120", "min240")
+
+
+def load_namuh_minutes(
+    code: str, timespan: str, market: str = "krx", bars_dir: Path = NAMUH_BARS_DIR
+) -> pd.DataFrame | None:
+    """나무증권 분봉(min1~min240)을 차트 표준 컬럼으로 읽는다. 파일 없으면 None.
+
+    Date 는 봉의 **끝 시각**(나무 `bsop_time` 이 그렇게 온다 — 09:10 봉 = 09:00~09:10).
+    날짜별 마지막에 붙는 `999900` 집계봉(하루 총합·자투리)은 봉이 아니라 버린다.
+    분봉은 수정주가라 원주가 요청에는 쓰지 않는다 — 호출자가 adjust=False 면 부르지 말 것.
+    """
+    if timespan not in MINUTE_SPANS:
+        return None
+    path = bars_dir / market / timespan / f"{str(code).strip().zfill(6)}.parquet"
+    if not path.exists():
+        return None
+    raw = pd.read_parquet(path)
+    if raw.empty or not {"bsop_date", "bsop_time", *_NAMUH_RENAME} <= set(raw.columns):
+        return None
+    raw = raw[raw["bsop_time"].astype(str) != "999900"]
+    stamp = raw["bsop_date"].astype(str) + raw["bsop_time"].astype(str).str.zfill(6)
+    df = raw[list(_NAMUH_RENAME)].apply(pd.to_numeric, errors="coerce")
+    df = df.rename(columns=_NAMUH_RENAME).assign(
+        Date=pd.to_datetime(stamp, format="%Y%m%d%H%M%S", errors="coerce")
+    )
+    df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
+    return df.sort_values("Date").reset_index(drop=True)
+
+
 def drop_halted(df: pd.DataFrame) -> pd.DataFrame:
     """거래정지일 제거 — 체결이 없던 날은 봉이 아니다 (BORB-32).
 

@@ -33,6 +33,9 @@ from src.layer1_data.kv_store import DEFAULT_DB
 
 _lock = threading.Lock()
 
+# 체결 표 컬럼 (run_id 제외) — save_run / save_fills / load_fills 가 같이 쓴다.
+_FILL_COLS = ("code", "date", "side", "price", "weight", "stage", "slack_ticks")
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,6 +79,18 @@ CREATE TABLE IF NOT EXISTS notes (
     added_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS notes_scope_key ON notes(scope, key);
+CREATE TABLE IF NOT EXISTS fills (
+    run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    code        TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    side        TEXT NOT NULL,              -- buy | sell | stop
+    price       REAL NOT NULL,
+    weight      REAL NOT NULL,
+    stage       INTEGER NOT NULL DEFAULT 0, -- 몇 차인지
+    slack_ticks INTEGER NOT NULL DEFAULT 0  -- 목표가 대비 여유 호가 (0 = 딱 닿기만)
+);
+CREATE INDEX IF NOT EXISTS fills_run ON fills(run_id);
+CREATE INDEX IF NOT EXISTS fills_code ON fills(code);
 """
 
 
@@ -178,6 +193,29 @@ def save_run(
                 for r in rows
             ],
         )
+        # 체결 한 줄씩 — 두 실험을 줄 단위로 견주기 위한 것 (미션 문서 §19-3).
+        # picks.detail 에도 JSON 으로 들어가지만, 표로 있어야 "여유 0호가인 체결이
+        # 몇 건이나 되나" 같은 걸 셀 수 있다.
+        fill_rows = [
+            {
+                "code": r.get("code", ""),
+                "date": f.get("time", ""),
+                "side": f.get("side", ""),
+                "price": f.get("price"),
+                "weight": f.get("w"),
+                "stage": f.get("stage") or 0,
+                "slack_ticks": f.get("slack_ticks") or 0,
+            }
+            for r in rows
+            for f in (r.get("fills") or [])
+        ]
+        if fill_rows:
+            cols = ", ".join(_FILL_COLS)
+            marks = ", ".join("?" * len(_FILL_COLS))
+            conn.executemany(
+                f"INSERT INTO fills (run_id, {cols}) VALUES (?, {marks})",
+                [(run_id, *(r[c] for c in _FILL_COLS)) for r in fill_rows],
+            )
     return run_id
 
 
@@ -204,9 +242,38 @@ def load_run(run_id: int, *, db: Path | None = None) -> dict | None:
     return out
 
 
+def save_fills(run_id: int, rows: list[dict], *, db: Path | None = None) -> None:
+    """체결 한 줄씩 남긴다 — 두 실험을 **줄 단위로** 견주기 위한 것 (미션 문서 §19-3).
+
+    `runs`(설정+성적)·`picks`(종목별)만으로는 "이 자리에서 실제로 샀나, 얼마나
+    아슬아슬했나"를 나중에 볼 수 없다. `slack_ticks` 가 0 이면 목표가에 딱 닿기만 한
+    체결이라 실전에서는 못 샀을 수 있다 → 호가 오프셋을 조절하며 확인할 재료.
+    """
+    if not rows:
+        return
+    cols = ", ".join(_FILL_COLS)
+    marks = ", ".join("?" * len(_FILL_COLS))
+    with _db(db) as conn:
+        conn.executemany(
+            f"INSERT INTO fills (run_id, {cols}) VALUES (?, {marks})",
+            [(run_id, *(r.get(c) for c in _FILL_COLS)) for r in rows],
+        )
+
+
+def load_fills(run_id: int, *, db: Path | None = None) -> list[dict]:
+    """한 검사의 체결 전부 — 날짜·종목 순."""
+    cols = ", ".join(_FILL_COLS)
+    with _db(db) as conn:
+        cur = conn.execute(
+            f"SELECT {cols} FROM fills WHERE run_id = ? ORDER BY date, code", (run_id,)
+        )
+        return [dict(zip(_FILL_COLS, row, strict=True)) for row in cur.fetchall()]
+
+
 def delete_run(run_id: int, *, db: Path | None = None) -> bool:
     with _db(db) as conn:
         conn.execute("DELETE FROM picks WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM fills WHERE run_id = ?", (run_id,))
         cur = conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
         return cur.rowcount > 0
 

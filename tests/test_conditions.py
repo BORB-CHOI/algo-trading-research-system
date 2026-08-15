@@ -118,7 +118,7 @@ def test_categories_payload_matches_contract() -> None:
                     )
                     assert p["unit"] == "", f"{c['key']}.{p['key']}: 드롭다운에 단위는 붙지 않는다"
                 else:
-                    assert p["unit"] in {"원", "억", "%", "일", "배", "주"}
+                    assert p["unit"] in {"원", "억", "%", "일", "배", "주", "위"}
             seen.append(c["key"])
     # 레지스트리의 모든 조건이 정확히 한 카테고리에 속한다.
     assert sorted(seen) == sorted(CONDITIONS)
@@ -529,3 +529,55 @@ def test_api_run_errors_are_korean_400() -> None:
     r = client.post("/api/screen/run", json={"conditions": [{"key": "price_range", "params": {}}]})
     assert r.status_code == 400
     assert "최소 1개" in r.json()["detail"]
+
+
+# ─────────────────────────────────────────────────────────────
+# 순위 기준 조건 (ADR-0019 후속)
+#
+# 금액으로 걸면 시대마다 뜻이 달라진다 — 실측 2026-08-16:
+# 시총 5,000억이 2007년엔 상위 10.7%, 2025년엔 상위 18.0%(전체 시총 1,052조→3,987조).
+# 2007년부터 통으로 돌릴 때 조건 세기가 시대별로 달라지지 않게 순위 선택지를 둔다.
+# **금액으로 걸지 순위로 걸지는 오너가 화면에서 고른다.**
+# ─────────────────────────────────────────────────────────────
+
+
+def _rank_panel() -> pd.DataFrame:
+    """시총 100·80·60·40·20억 / 거래대금 500·400·300·200·100억."""
+    return pd.DataFrame(
+        {
+            "Code": ["A", "B", "C", "D", "E"],
+            "Marcap": [100e8, 80e8, 60e8, 40e8, 20e8],
+            "Amount": [500e8, 400e8, 300e8, 200e8, 100e8],
+        }
+    ).set_index("Code")
+
+
+class Test순위_기준:
+    def test_시총_상위_40퍼센트면_둘만_걸린다(self) -> None:
+        base = _rank_panel()
+        got = CONDITIONS["marcap_rank_pct"].fn(None, base, {"top_pct": 40.0})
+        assert list(base.index[got]) == ["A", "B"]
+
+    def test_거래대금_상위_3위면_셋이_걸린다(self) -> None:
+        base = _rank_panel()
+        got = CONDITIONS["amount_rank"].fn(None, base, {"top_n": 3})
+        assert list(base.index[got]) == ["A", "B", "C"]
+
+    def test_값이_없는_종목은_안_걸린다(self) -> None:
+        base = _rank_panel()
+        base.loc["A", "Marcap"] = float("nan")
+        got = CONDITIONS["marcap_rank_pct"].fn(None, base, {"top_pct": 40.0})
+        assert "A" not in list(base.index[got])
+
+    def test_비율을_안_주면_아무도_안_걸린다(self) -> None:
+        base = _rank_panel()
+        got = CONDITIONS["marcap_rank_pct"].fn(None, base, {"top_pct": 0})
+        assert not got.any()
+
+    def test_화면_목록에_뜬다(self) -> None:
+        """오너가 화면에서 고를 수 있어야 의미가 있다."""
+        assert "marcap_rank_pct" in CONDITIONS
+        assert "amount_rank" in CONDITIONS
+        payload = categories_payload()
+        keys = {c["key"] for cat in payload["categories"] for c in cat["conditions"]}
+        assert {"marcap_rank_pct", "amount_rank"} <= keys

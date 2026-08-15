@@ -392,17 +392,25 @@ _BT_BODY = {
 }
 
 
-def test_전_구간_검사는_기간을_받아야_한다() -> None:
-    r = client.post("/api/backtest/all", json=_BT_BODY)
+def test_전_구간_검사는_기간을_안_줘도_된다() -> None:
+    """ADR-0019: 날짜를 안 주면 기본값(2007-01-01 ~ 최신 거래일)을 쓴다.
+
+    옛 동작은 400 이었다. 지금은 날짜 검사를 통과하고 **그다음** 검색식 검사에서 걸린다 —
+    검색식을 비워서 그 사실을 확인한다(진짜 검사를 돌리면 몇 분 걸린다).
+    """
+    body = {**_BT_BODY, "conditions": []}
+    body.pop("start", None)
+    body.pop("end", None)
+    r = client.post("/api/backtest/all", json=body)
     assert r.status_code == 400
-    assert "종료일" in r.json()["detail"]
+    assert "검색식" in r.json()["detail"]  # 날짜가 아니라 검색식에서 걸렸다
 
 
 def test_전_구간_검사는_거꾸로_된_기간을_거부한다() -> None:
     body = {**_BT_BODY, "start": "2024-01-01", "end": "2023-01-01"}
     r = client.post("/api/backtest/all", json=body)
     assert r.status_code == 400
-    assert "앞서야" in r.json()["detail"]
+    assert "끝나는 날" in r.json()["detail"]
 
 
 def test_전_구간_검사도_검색식이_비면_거부한다() -> None:
@@ -464,3 +472,60 @@ def test_모르는_되돌림_비율은_거부한다() -> None:
     r = client.post("/api/simulate", json=body)
     assert r.status_code == 400
     assert "되돌림 비율" in r.json()["detail"]
+
+
+# ── 주봉·월봉 = 나무증권 원본 + 상폐만 합성 (2026-08-15 오너 결정) ────────────
+
+
+def _fake_daily() -> "pd.DataFrame":
+    import pandas as pd
+
+    dates = pd.bdate_range("2026-07-06", "2026-07-17")  # 2주(평일 10일)
+    return pd.DataFrame(
+        {
+            "Date": dates,
+            "Code": "000001",
+            "Name": "가짜종목",
+            "Open": 100.0,
+            "High": 110.0,
+            "Low": 90.0,
+            "Close": 105.0,
+            "Volume": 1000.0,
+            "Amount": 105000.0,
+        }
+    )
+
+
+def test_주봉은_나무_원본을_먼저_쓴다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """원본이 있으면 그 값이 그대로 나오고, 원본 마지막(미완성 가능) 봉 뒤는 합성으로 잇는다."""
+    import api.main as m
+    import pandas as pd
+
+    raw = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-07-10"), pd.Timestamp("2026-07-17")],
+            "Open": [55.0, 56.0],
+            "High": [66.0, 67.0],
+            "Low": [44.0, 45.0],
+            "Close": [60.0, 61.0],
+            "Volume": [5000.0, 5100.0],
+            "Amount": [1.0, 2.0],
+        }
+    )
+    monkeypatch.setattr(m, "load_namuh_bars", lambda code, span, market="krx": raw)
+    out = m.period_candles(_fake_daily(), "week")
+    # 원본 두 봉 중 마지막은 미완성 취급으로 버려져 첫 봉만 남고, 뒤는 합성이다.
+    assert float(out.iloc[0]["Close"]) == 60.0  # 나무 원본 값
+    assert float(out.iloc[-1]["Close"]) == 105.0  # 합성 꼬리(일봉 값)
+    assert out["Date"].is_monotonic_increasing
+
+
+def test_나무_원본이_없으면_합성으로_대체(monkeypatch: pytest.MonkeyPatch) -> None:
+    """상장폐지·미수집 종목: 원본 파일이 없으면(None) 기존 합성 결과와 같아야 한다."""
+    import api.main as m
+
+    daily = _fake_daily()
+    monkeypatch.setattr(m, "load_namuh_bars", lambda code, span, market="krx": None)
+    out = m.period_candles(daily, "week")
+    expected = m.resample_candles(daily, "week")
+    assert out.reset_index(drop=True).equals(expected.reset_index(drop=True))

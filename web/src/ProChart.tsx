@@ -479,14 +479,59 @@ function createOverlayIndicator(): OverlayStore {
 // 앞의 둘은 여기서, 셋째는 위쪽 도구 막대에서 한다. 지표·그리기 도구는 **엔진에 이미 있다**.
 // ─────────────────────────────────────────────────────────────
 
-/** 봉 주기 — 서버 `/api/candles?period=` 가 받는 값 그대로. 분봉·틱은 데이터가 아직 없다. */
-export type BarPeriod = 'day' | 'week' | 'month'
+/** 봉 주기 — 서버 `/api/candles?period=` 가 받는 값 그대로.
+ *  분봉은 나무증권 수집본(2026-08-15~). 1~15분은 서버 보관이 약 6주라 그만큼만 보인다. */
+export type BarPeriod =
+  | 'day'
+  | 'week'
+  | 'month'
+  | 'min1'
+  | 'min3'
+  | 'min5'
+  | 'min10'
+  | 'min15'
+  | 'min30'
+  | 'min60'
+  | 'min120'
+  | 'min240'
 
-export const PERIOD_LABEL: Record<BarPeriod, string> = { day: '일', week: '주', month: '월' }
+export const PERIOD_LABEL: Record<BarPeriod, string> = {
+  min1: '1분',
+  min3: '3분',
+  min5: '5분',
+  min10: '10분',
+  min15: '15분',
+  min30: '30분',
+  min60: '60분',
+  min120: '120분',
+  min240: '240분',
+  day: '일',
+  week: '주',
+  month: '월',
+}
 
-/** 하루 안쪽 주기(분봉·틱). 지금은 없다 — 데이터가 생기면 여기 등록만 하면
- *  `baseStampOf` 가 시각까지 붙인다. */
-const INTRADAY_PERIODS = new Set<BarPeriod>()
+/** 툴바에 늘어놓을 순서·묶음. 분봉은 드롭다운 하나로 접는다 — 버튼 12개는 너무 길다. */
+const MINUTE_PERIODS: BarPeriod[] = [
+  'min1',
+  'min3',
+  'min5',
+  'min10',
+  'min15',
+  'min30',
+  'min60',
+  'min120',
+  'min240',
+]
+const CALENDAR_PERIODS: BarPeriod[] = ['day', 'week', 'month']
+
+/** 시장 — 2025-03 넥스트레이드(NXT) 개장 후 체결이 두 거래소에 나뉜다. 통합 = KRX+NXT 전체.
+ *  통합이 정본(오너 2026-08-15). NXT 미상장 종목이나 수집 전이면 서버가 KRX 값으로 대신 준다. */
+export type BarMarket = 'unt' | 'krx' | 'nxt'
+
+export const MARKET_LABEL: Record<BarMarket, string> = { unt: '통합', krx: 'KRX', nxt: 'NXT' }
+
+/** 하루 안쪽 주기(분봉). 등록돼 있으면 `baseStampOf` 가 시각까지 붙인다. */
+const INTRADAY_PERIODS = new Set<BarPeriod>(MINUTE_PERIODS)
 
 const p2 = (n: number) => String(n).padStart(2, '0')
 
@@ -512,8 +557,22 @@ export type BaseBar = {
   period: BarPeriod
 }
 
-/** 봉 하나가 걸치는 달력 날짜 수(대략). 거래일은 1년에 250일쯤이라 일봉 1개 ≈ 1.5일. */
-const DAYS_PER_BAR: Record<BarPeriod, number> = { day: 1.5, week: 8, month: 33 }
+/** 봉 하나가 걸치는 달력 날짜 수(대략). 거래일은 1년에 250일쯤이라 일봉 1개 ≈ 1.5일.
+ *  분봉은 하루 약 400분(NXT 08:00~20:00 포함)을 주 5일 → 달력 하루 ≈ 285분. */
+const DAYS_PER_BAR: Record<BarPeriod, number> = {
+  min1: 1 / 285,
+  min3: 3 / 285,
+  min5: 5 / 285,
+  min10: 10 / 285,
+  min15: 15 / 285,
+  min30: 30 / 285,
+  min60: 60 / 285,
+  min120: 120 / 285,
+  min240: 240 / 285,
+  day: 1.5,
+  week: 8,
+  month: 33,
+}
 
 /** 지표 계산에 필요한 여유 봉. MA60·MA20 등이 화면 첫 봉부터 그려지려면 앞이 더 있어야 한다. */
 const WARMUP_BARS = 250
@@ -539,11 +598,12 @@ async function fetchCandles(
   period: BarPeriod,
   bars: BarCount,
   minStart?: string,
+  market: BarMarket = 'unt',
 ): Promise<KLineData[]> {
   const auto = startFor(period, bars)
   // 전체(bars===0)면 이미 다 받으므로 minStart 는 볼 필요 없다.
   const start = auto == null ? '1990-01-01' : minStart && minStart < auto ? minStart : auto
-  const q = `code=${encodeURIComponent(code)}&period=${period}&start=${start}`
+  const q = `code=${encodeURIComponent(code)}&period=${period}&start=${start}&market=${market}`
   const res = await fetch(`/api/candles?${q}`)
   if (!res.ok) return [] // 404(데이터 없음) 등은 빈 배열 — 화면은 "데이터 없음"으로 남는다
   const { candles } = (await res.json()) as {
@@ -558,7 +618,8 @@ async function fetchCandles(
     }[]
   }
   return candles.map((c) => ({
-    timestamp: new Date(`${c.time}T00:00:00`).getTime(),
+    // 분봉은 서버가 'YYYY-MM-DDTHH:MM' 으로 준다 — 'T' 가 있으면 시각까지 그대로.
+    timestamp: new Date(c.time.includes('T') ? c.time : `${c.time}T00:00:00`).getTime(),
     open: c.open,
     high: c.high,
     low: c.low,
@@ -703,6 +764,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   const first = props.initialSymbol ?? { code: '005930', name: '삼성전자', market: 'KOSPI' }
   const symbolRef = useRef({ ...first })
   const periodRef = useRef<BarPeriod>('day')
+  const marketRef = useRef<BarMarket>('unt')
   const barsRef = useRef<BarCount>(props.initialBars ?? 500)
   // 늦게 온 이전 종목 응답이 새 종목을 덮지 않게 하는 순번 (Pro 데이터피드가 하던 일).
   const loadSeq = useRef(0)
@@ -724,6 +786,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
 
   const [sym, setSym] = useState({ ...first })
   const [period, setPeriodState] = useState<BarPeriod>('day')
+  const [market, setMarketState] = useState<BarMarket>('unt')
   const [bars, setBarsState] = useState<BarCount>(props.initialBars ?? 500)
   const [subs, setSubs] = useState<string[]>(['VOL'])
   // 지지저항·오더블록·가격 빈틈은 **차트 기능**이다 (오너 2026-08-09: "애초에 지지저항을
@@ -760,6 +823,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
         periodRef.current,
         want,
         minStartRef.current,
+        marketRef.current,
       )
       if (seq !== loadSeq.current) return // 그 사이 종목·주기가 또 바뀌었다 — 이 응답은 버린다
       loadedForRef.current = want
@@ -991,6 +1055,14 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  function pickMarket(m: BarMarket): void {
+    marketRef.current = m
+    setMarketState(m)
+    // 시장이 바뀌면 봉 값이 통째로 바뀐다(통합 거래량 ≠ KRX 거래량) — 주기 전환과 같은 절차.
+    lastToolKey.current = ''
+    void reload().then(refreshTools)
+  }
+
   function pickPeriod(p: BarPeriod): void {
     periodRef.current = p
     setPeriodState(p)
@@ -1079,7 +1151,20 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
             {sym.name} <span className="code">{sym.code}</span>
           </b>
           <span className="grp">
-            {(Object.keys(PERIOD_LABEL) as BarPeriod[]).map((p) => (
+            <select
+              className={MINUTE_PERIODS.includes(period) ? 'on' : ''}
+              value={MINUTE_PERIODS.includes(period) ? period : ''}
+              onChange={(e) => e.target.value && pickPeriod(e.target.value as BarPeriod)}
+              title="분봉 — 나무증권 수집본. 1~15분은 최근 6주, 60분 이상은 몇 년치"
+            >
+              <option value="">분</option>
+              {MINUTE_PERIODS.map((p) => (
+                <option key={p} value={p}>
+                  {PERIOD_LABEL[p]}
+                </option>
+              ))}
+            </select>
+            {CALENDAR_PERIODS.map((p) => (
               <button
                 key={p}
                 type="button"
@@ -1087,6 +1172,18 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
                 onClick={() => pickPeriod(p)}
               >
                 {PERIOD_LABEL[p]}
+              </button>
+            ))}
+          </span>
+          <span className="grp" title="어느 거래소 체결 기준으로 볼지 — 통합 = KRX+넥스트레이드 전체">
+            {(Object.keys(MARKET_LABEL) as BarMarket[]).map((m) => (
+              <button
+                key={m}
+                type="button"
+                className={market === m ? 'on' : ''}
+                onClick={() => pickMarket(m)}
+              >
+                {MARKET_LABEL[m]}
               </button>
             ))}
           </span>

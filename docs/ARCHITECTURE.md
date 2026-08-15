@@ -2,7 +2,24 @@
 
 방법론·전략의 "무엇을/왜"는 `PROJECT_GUIDELINES.md`에 있다. 이 문서는 **코드가 어떻게 배치되는가**를 다룬다.
 
-## 레이어 구조 (§3.1)
+## 전략 9단 계층과 코드의 대응 (ADR-0019)
+
+```
+종목 선정   → layer3 conditions.py · screening.py · exclusions.py(layer1)
+시장 상황   → (미구현)
+전략군      → 상승 사이클 눌림매매
+모양        → layer3 market_structure.py · zigzag.py · surge.py
+진입        → layer3 fibonacci.py · entry_levels.py · fib_zone.py · tick_size.py
+비중        → (백테스트는 "돈 무한" 전제 — 자본 배분 미구현)
+청산        → layer3 support_resistance.py · layer4 fills.py · stops.py
+위험 관리   → layer4 stops.py (하루·누적 한도는 미구현)
+실행        → layer4 strategy_one.py · walk_forward.py · brokers/
+```
+
+"전략 1호 = 피보나치"가 아니다 — **상승 사이클 눌림매매의 진입 방법 하나가 피보나치**다.
+같은 전략군에 형제 진입 방법(전고점 지지 / 이동평균 / 거래대금 기반)을 끼워 넣을 수 있다.
+
+## 레이어 구조 (§3.3)
 
 ```
 src/
@@ -49,13 +66,16 @@ WRL / IC / Expectancy / Skewness / 분위수익률 (§6.1)
 체결 시점은 ADR-0007 골격의 잠정값이다. ADR-0001(종가 진입 고정 전제)은 **폐기** — 진입 방식은
 전략이 확정된 뒤 새 ADR 로 정한다.
 
+**검사 구간은 코드가 강제하지 않는다** — 화면에서 고른 날짜가 그대로 쓰인다(ADR-0019).
+기본값만 2007-01-01 ~ 최신 거래일.
+
 ## 설계 원칙 (코드 레벨)
 
 - **자체 엔진은 얇게.** 범용 백테스트 프레임워크를 만들지 않는다. 매일 필터→랭킹→포트폴리오
   실행 하네스만. 저수준 P&L 회계는 pandas/numpy. (CLAUDE.md)
 - **oracle 대조.** backtesting.py로 단순 전략 하나를 같은 데이터에 돌려 P&L을 대조 →
   자체 엔진의 회계 버그를 값싸게 잡는다. oracle은 메인 엔진이 아니다.
-- **look-ahead 불변식.** 모든 피처는 "as-of 시점" 이후 데이터를 보지 않는다.
+- **미래 데이터 훔쳐보기 방지.** 모든 값은 기준 시점 이후 데이터를 보지 않는다.
   이걸 코드 계약으로 만들고 테스트로 강제한다 (ADR-0007). 재무(OpenDART)는 대상 기간이 아니라
   **접수일(rcept_dt) 이후**에만 쓸 수 있다 (DATA_SCHEMA §4).
 - **전략은 데이터, 코드는 계산 방법.** 전략·조건검색식은 UI 에서 보이고 수정 가능한 파라미터로만

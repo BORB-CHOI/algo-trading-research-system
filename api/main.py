@@ -38,15 +38,23 @@ from src.layer1_data.adjust import (
     apply_split_adjustment,
 )
 from src.layer1_data.dart import load_financials
-from src.layer1_data.derived import drop_halted, load_adjusted
+from src.layer1_data.derived import (
+    MINUTE_SPANS,
+    drop_halted,
+    load_adjusted,
+    load_namuh_bars,
+    load_namuh_minutes,
+)
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer1_data.market import index_boards, market_snapshot
+from src.layer1_data.provider import DataProvider
 from src.layer1_data.news import market_news, stock_news
 from src.layer1_data.quotes_rt import realtime_quotes
 from src.layer1_data.recent import merge_with_marcap, recent_meta
 from src.layer1_data.themes import theme_map
+from src.layer4_execution.backtest import resolve_period
 from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy import fibonacci, price_zones, sr_overlay, support_resistance
 from src.layer3_strategy.case_overlay import (
@@ -94,7 +102,9 @@ app.add_middleware(
 )
 
 
-# 주봉/월봉은 일봉을 pandas resample 로 합성한다(분봉 데이터 없음). 주봉 라벨은 금요일 기준.
+# 주봉/월봉 정본은 나무증권에서 수집한 원본 봉(data/derived/namuh_bars, 2026-08-15 오너 결정).
+# 합성(resample)은 원본이 없는 경우의 대체다: 상장폐지 종목 · 미수집 종목 · 원주가(adjust=False) 요청,
+# 그리고 수집 시점 이후에 생긴 최신 봉 꼬리. 주봉 라벨은 금요일 기준.
 _RESAMPLE_RULES = {"week": "W-FRI", "month": "ME"}
 
 
@@ -191,8 +201,89 @@ def get_candles(code: str, start: str | None, end: str | None, adjust: bool = Tr
     return drop_halted(df)
 
 
+def market_daily(daily: pd.DataFrame, market: str, adjust: bool) -> pd.DataFrame:
+    """일봉을 요청한 시장 기준으로 바꾼다. 통합(unt)·NXT 는 나무 수집본으로 교체.
+
+    marcap 일봉은 KRX 체결만 담는다 — 2025-03 NXT 개장 후 통합 거래량이 실제 전체다
+    (ADR-0018). 수집본이 없으면(상폐·미수집·원주가 요청) KRX 그대로 둔다.
+    """
+    if market == "krx" or not adjust or daily.empty:
+        return daily
+    raw = load_namuh_bars(str(daily["Code"].iloc[0]), "day", market)
+    if raw is None or raw.empty:
+        return daily
+    lo, hi = daily["Date"].min(), daily["Date"].max()
+    raw = raw[(raw["Date"] >= lo) & (raw["Date"] <= hi)]
+    if raw.empty:
+        return daily
+    raw = raw.assign(Code=daily["Code"].iloc[0], Name=daily["Name"].iloc[-1])
+    return drop_halted(raw).reset_index(drop=True)
+
+
+def minute_candles(
+    code: str, start: str | None, end: str | None, market: str, timespan: str = "min10"
+) -> pd.DataFrame:
+    """분봉 — 나무 수집본 그대로 (합성 없음, 수정주가). 없으면 빈 프레임.
+
+    통합·NXT 파일이 없는 종목(NXT 미상장)은 KRX 로 대신 준다 — 일봉과 같은 규칙.
+    구간(start/end)은 날짜 단위로 자른다. end 는 그날 끝까지 포함.
+    """
+    code = code.strip().zfill(6)
+    df = load_namuh_minutes(code, timespan, market)
+    if df is None and market != "krx":
+        df = load_namuh_minutes(code, timespan, "krx")
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if start:
+        df = df[df["Date"] >= pd.Timestamp(start)]
+    if end:
+        df = df[df["Date"] < pd.Timestamp(end) + pd.Timedelta(days=1)]
+    if df.empty:
+        return df
+    return df.assign(Code=code, Name=_name_of(code)).reset_index(drop=True)
+
+
+def _name_of(code: str) -> str:
+    """종목명 — 최신 marcap 에서. 없으면(신규상장 등) 코드 그대로."""
+    years = available_years()
+    if not years:
+        return code
+    df = _load_year_slim(years[-1])
+    hit = df.loc[df["Code"] == code, "Name"]
+    return str(hit.iloc[-1]) if not hit.empty else code
+
+
+def period_candles(
+    daily: pd.DataFrame, timespan: str, adjust: bool = True, market: str = "krx"
+) -> pd.DataFrame:
+    """주봉·월봉 — 나무증권 원본 봉이 있으면 그걸 쓰고, 없는 부분만 일봉으로 합성한다.
+
+    - 원본이 없는 종목(상장폐지·미수집)과 원주가(adjust=False) 요청은 전부 합성
+      (나무 봉은 수정주가라 원주가와 섞으면 안 된다).
+    - 원본의 마지막 봉은 수집 당시 진행 중이던 미완성 봉일 수 있어 버리고,
+      그 뒤부터는 일봉 합성으로 이어붙인다 — 수집이 며칠 묵어도 차트는 최신이다.
+    """
+    if timespan == "day" or daily.empty:
+        return daily
+    synth = resample_candles(daily, timespan)
+    if not adjust:
+        return synth
+    raw = load_namuh_bars(str(daily["Code"].iloc[0]), timespan, market)
+    if raw is None or len(raw) < 2:
+        return synth
+    raw = raw.iloc[:-1]  # 마지막 봉은 미완성일 수 있다
+    lo, hi = daily["Date"].min(), daily["Date"].max()
+    raw = raw[(raw["Date"] >= lo) & (raw["Date"] <= hi)]
+    if raw.empty:
+        return synth
+    raw = raw.assign(Code=daily["Code"].iloc[0], Name=daily["Name"].iloc[-1])
+    tail = synth[synth["Date"] > raw["Date"].max()]
+    cols = ["Date", "Code", "Name", "Open", "High", "Low", "Close", "Volume", "Amount"]
+    return pd.concat([raw[cols], tail[cols]], ignore_index=True)
+
+
 def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
-    """일봉 → 주봉/월봉. 봉 날짜는 그 기간의 마지막 실제 거래일."""
+    """일봉 → 주봉/월봉 합성. 봉 날짜는 그 기간의 마지막 실제 거래일."""
     if timespan == "day" or df.empty:
         return df
     d = df.assign(TradeDate=df["Date"]).set_index("Date")
@@ -392,15 +483,26 @@ def api_candles(
     start: str | None = Query(None, description="시작일 YYYY-MM-DD"),
     end: str | None = Query(None, description="종료일 YYYY-MM-DD"),
     adjust: bool = Query(True, description="액면분할/병합 수정주가 보정 (ADR-0006)"),
-    period: str = Query("day", pattern="^(day|week|month)$", description="봉 주기 (일/주/월)"),
+    period: str = Query(
+        "day",
+        pattern="^(day|week|month|min1|min3|min5|min10|min15|min30|min60|min120|min240)$",
+        description="봉 주기 (일/주/월 또는 분봉 min1~min240)",
+    ),
+    market: str = Query("krx", pattern="^(krx|unt|nxt)$", description="시장 (KRX/통합/NXT)"),
 ) -> dict:
-    df = resample_candles(get_candles(code, start, end, adjust), period)
+    if period in MINUTE_SPANS:
+        df = minute_candles(code, start, end, market, period)
+    else:
+        daily = market_daily(get_candles(code, start, end, adjust), market, adjust)
+        df = period_candles(daily, period, adjust, market)
     if df.empty:
         raise HTTPException(
             status_code=404,
             detail=f"'{code.strip().zfill(6)}' 종목의 {start or '전체'}~{end or '전체'} 구간 데이터가 없습니다.",
         )
-    times = df["Date"].dt.strftime("%Y-%m-%d")
+    # 분봉은 시각까지 — 프런트가 'T' 유무로 일중 봉인지 안다.
+    fmt = "%Y-%m-%dT%H:%M" if period in MINUTE_SPANS else "%Y-%m-%d"
+    times = df["Date"].dt.strftime(fmt)
     candles = [
         {
             "time": t,
@@ -535,8 +637,38 @@ class ScreenRunRequest(BaseModel):
 
 @app.get("/api/conditions")
 def api_conditions() -> dict:
-    """조건검색 조건 목록 — 프런트가 이 메타로 조건식 UI 를 그린다(계약 고정)."""
-    return cond_registry.categories_payload()
+    """조건검색 조건 목록 — 프런트가 이 메타로 조건식 UI 를 그린다(계약 고정).
+
+    `data_notes` 는 조건을 고르기 전에 알아야 할 데이터 사실이다 — 고치지 않고 알린다
+    (지침서 §5.3). 지금은 수급 결손 하나뿐이다.
+    """
+    payload = cond_registry.categories_payload()
+    payload["data_notes"] = _data_notes()
+    return payload
+
+
+def _data_notes() -> list[dict]:
+    """조건을 고르기 전에 알아야 할 데이터 사실. 화면이 그대로 띄운다."""
+    notes: list[dict] = []
+    try:
+        cov = DataProvider().supply_coverage()
+    except OSError:
+        return notes
+    missing = cov.get("수급_없는_종목", 0)
+    if missing > 0:
+        notes.append(
+            {
+                "key": "supply_delisted",
+                "level": "warn",
+                "title": "수급 조건을 쓰면 상장폐지된 종목이 빠집니다",
+                "body": (
+                    f"일봉은 {cov['일봉']:,}종목 있는데 수급은 {cov['수급']:,}종목뿐입니다"
+                    f"({missing:,}종목 없음). 망한 회사는 수급 자료를 받을 수 없어서, "
+                    "과거 구간 성적이 실제보다 좋게 나올 수 있습니다."
+                ),
+            }
+        )
+    return notes
 
 
 def _load_history_panel(
@@ -1842,6 +1974,17 @@ _WF_LOCK = threading.Lock()
 _WF_KEEP = 5  # 최근 몇 개의 결과를 메모리에 들고 있을지
 
 
+def _latest_trading_day() -> pd.Timestamp | None:
+    """마지막 연도 패널의 마지막 날짜. 못 구하면 None(그러면 오늘을 쓴다)."""
+    try:
+        years = available_years()
+        if not years:
+            return None
+        return pd.Timestamp(load_years(years[-1], years[-1])["Date"].max())
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def _wf_worker(job_id: str, req: BacktestRequest, start: str, end: str) -> None:
     """작업 스레드 — 진행률을 job 에 적고, 끝나면 결과(또는 오류)를 담는다."""
 
@@ -1881,10 +2024,13 @@ def api_backtest_all(req: BacktestRequest) -> dict:
     2019-12-30 하루에 걸린 종목만 보던 문제를 없앤 검사다. 돈 무한 전제라 동시 보유
     한도가 없다. 이 숫자는 계좌 수익률이 아니라 "한 종목에 들어갔을 때 평균 어땠나"다.
     """
-    if not req.start or not req.end:
-        raise HTTPException(status_code=400, detail="검사 시작일과 종료일을 주세요.")
-    if req.start >= req.end:
-        raise HTTPException(status_code=400, detail="시작일이 종료일보다 앞서야 합니다.")
+    # 날짜를 안 주면 기본값(2007-01-01 ~ 최신 거래일)을 쓴다 — ADR-0019.
+    # **구간을 막지 않는다.** 오너가 고른 구간은 그대로 돈다(§4.3).
+    try:
+        start_ts, end_ts = resolve_period(req.start, req.end, latest=_latest_trading_day())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    start, end = start_ts.strftime("%Y-%m-%d"), end_ts.strftime("%Y-%m-%d")
     _strategy_kwargs(req)  # 검색식·전략 값 검증을 스레드 밖에서 먼저 — 400 을 바로 준다
 
     job_id = uuid.uuid4().hex[:12]
@@ -1901,12 +2047,10 @@ def api_backtest_all(req: BacktestRequest) -> dict:
             "phase": "시작하는 중",
             "done": 0,
             "total": 0,
-            "start": req.start,
-            "end": req.end,
+            "start": start,
+            "end": end,
         }
-    threading.Thread(
-        target=_wf_worker, args=(job_id, req, req.start, req.end), daemon=True
-    ).start()
+    threading.Thread(target=_wf_worker, args=(job_id, req, start, end), daemon=True).start()
     return {"job_id": job_id, "status": "running"}
 
 

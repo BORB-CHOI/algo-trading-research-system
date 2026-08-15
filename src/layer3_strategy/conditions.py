@@ -298,6 +298,35 @@ def cond_marcap_range(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series
     return _bounds(base["Marcap"], p, scale=_EOK)
 
 
+def cond_marcap_rank_pct(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
+    """시가총액 **그날 상위 N%**.
+
+    금액(5,000억 등)으로 걸면 시대마다 뜻이 달라진다 — 실측 2026-08-16:
+    시총 5,000억이 **2007년엔 상위 10.7%, 2025년엔 상위 18.0%** 였다
+    (전체 시총 1,052조 → 3,987조). 2007년부터 통으로 돌리면 같은 조건이 시대별로
+    다르게 걸린다. 순위로 걸면 그날 기준으로 자동으로 맞춰진다.
+
+    **금액으로 걸지 순위로 걸지는 화면에서 오너가 고른다** — 둘 다 남겨 둔다.
+    등수는 `base`(그날 거래되던 종목) 안에서만 매긴다 — 상장 전·상폐 후가 섞이면 안 된다.
+    """
+    top = float(p.get("top_pct") or 0)
+    s = pd.to_numeric(base["Marcap"], errors="coerce")
+    if top <= 0 or s.notna().sum() == 0:
+        return _none(base)
+    cut = s.quantile(1.0 - min(top, 100.0) / 100.0)
+    return s.notna() & (s >= cut)
+
+
+def cond_amount_rank(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
+    """거래대금 **그날 상위 N위**. 등수는 그날 거래되던 종목 안에서 매긴다."""
+    n = int(p.get("top_n") or 0)
+    s = pd.to_numeric(base["Amount"], errors="coerce")
+    if n <= 0 or s.notna().sum() == 0:
+        return _none(base)
+    keep = s.dropna().nlargest(n).index
+    return pd.Series(base.index.isin(keep), index=base.index) & s.notna()
+
+
 def cond_amount_range(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     """거래대금: 입력은 억 단위."""
     return _bounds(base["Amount"], p, scale=_EOK)
@@ -614,6 +643,22 @@ _ALL = [
         cond_amount_range,
     ),
     Condition(
+        "marcap_rank_pct",
+        "시가총액 상위 몇 %",
+        "그날 거래되던 종목 중 시가총액이 큰 쪽부터 X% 까지. "
+        "금액으로 거는 것과 달리 시대가 달라도 같은 뜻이 됩니다 "
+        "(시총 5,000억 = 2007년 상위 10.7%, 2025년 상위 18.0%)",
+        (_num("top_pct", "상위", "%", required=True),),
+        cond_marcap_rank_pct,
+    ),
+    Condition(
+        "amount_rank",
+        "거래대금 상위 몇 위",
+        "그날 거래대금이 많은 쪽부터 X 등까지",
+        (_int("top_n", "상위", "위"),),
+        cond_amount_rank,
+    ),
+    Condition(
         "volume_range",
         "거래량",
         "거래량이 X주 이상 Y주 이하",
@@ -789,7 +834,20 @@ CONDITIONS: dict[str, Condition] = {c.key: c for c in _ALL + _FINANCE}
 
 # 카테고리 메타 — (key, name, 조건 key 목록). /api/conditions 응답 순서 그대로.
 CATEGORIES: list[tuple[str, str, list[str]]] = [
-    ("range", "범위지정", ["price_range", "marcap_range", "amount_range", "volume_range"]),
+    (
+        "range",
+        "범위지정",
+        [
+            "price_range",
+            "marcap_range",
+            "amount_range",
+            "volume_range",
+            # 순위 기준 — 금액은 시대마다 뜻이 달라진다(ADR-0019 후속).
+            # 금액으로 걸지 순위로 걸지는 화면에서 오너가 고른다.
+            "marcap_rank_pct",
+            "amount_rank",
+        ],
+    ),
     (
         "price",
         "시세분석",
