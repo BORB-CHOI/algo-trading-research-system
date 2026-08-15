@@ -17,6 +17,71 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "algo-trading-research-system"
+version = "0.0.1"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "python-dotenv" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+kis = [
+    { name = "requests" },
+]
+namuh = [
+    { name = "nhplug" },
+]
+opendart = [
+    { name = "opendartreader", version = "0.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "opendartreader", version = "0.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+]
+oracle = [
+    { name = "backtesting" },
+]
+webapp = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "requests" },
+    { name = "ta-lib" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "yfinance" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "backtesting", marker = "extra == 'oracle'", specifier = ">=0.3" },
+    { name = "fastapi", marker = "extra == 'webapp'", specifier = ">=0.115" },
+    { name = "httpx", marker = "extra == 'webapp'", specifier = ">=0.27" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "nhplug", marker = "extra == 'namuh'" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "opendartreader", marker = "extra == 'opendart'" },
+    { name = "pandas", specifier = ">=2.2" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.8" },
+    { name = "pyarrow", specifier = ">=15.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "requests", marker = "extra == 'kis'", specifier = ">=2.31" },
+    { name = "requests", marker = "extra == 'webapp'", specifier = ">=2.31" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "ta-lib", marker = "extra == 'webapp'", specifier = ">=0.6" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'webapp'", specifier = ">=0.30" },
+    { name = "yfinance", marker = "extra == 'webapp'", specifier = ">=0.2" },
+]
+provides-extras = ["dev", "oracle", "opendart", "kis", "namuh", "webapp"]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -87,71 +152,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/47/ae/6710c14ecb276031cf10249f6adf5a59e2d3fdb3b5183bd59f70524067ee/ast_serialize-0.6.0-cp39-abi3-win_amd64.whl", hash = "sha256:113b58346f9ceb664352032770caca817d4a3c86f611c6088e6ef65ddaa70f0e", size = 1101444, upload-time = "2026-06-30T20:02:52.554Z" },
     { url = "https://files.pythonhosted.org/packages/66/40/c53deb2cd0c9b0fb636d24d9f40924cf2e65028e6b20b10cd5c1eeb2c730/ast_serialize-0.6.0-cp39-abi3-win_arm64.whl", hash = "sha256:ccd132fe8db56f61fe743b1f644d01b8d65b83248a8da506f3132bda86d6ed5e", size = 1072965, upload-time = "2026-06-30T20:02:54.097Z" },
 ]
-
-[[package]]
-name = "auto-trading-system"
-version = "0.0.1"
-source = { editable = "." }
-dependencies = [
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-    { name = "python-dotenv" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-kis = [
-    { name = "requests" },
-]
-namuh = [
-    { name = "nhplug" },
-]
-opendart = [
-    { name = "opendartreader", version = "0.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
-    { name = "opendartreader", version = "0.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-]
-oracle = [
-    { name = "backtesting" },
-]
-webapp = [
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "requests" },
-    { name = "ta-lib" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "yfinance" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "backtesting", marker = "extra == 'oracle'", specifier = ">=0.3" },
-    { name = "fastapi", marker = "extra == 'webapp'", specifier = ">=0.115" },
-    { name = "httpx", marker = "extra == 'webapp'", specifier = ">=0.27" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
-    { name = "nhplug", marker = "extra == 'namuh'" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "opendartreader", marker = "extra == 'opendart'" },
-    { name = "pandas", specifier = ">=2.2" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.8" },
-    { name = "pyarrow", specifier = ">=15.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "requests", marker = "extra == 'kis'", specifier = ">=2.31" },
-    { name = "requests", marker = "extra == 'webapp'", specifier = ">=2.31" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "ta-lib", marker = "extra == 'webapp'", specifier = ">=0.6" },
-    { name = "uvicorn", extras = ["standard"], marker = "extra == 'webapp'", specifier = ">=0.30" },
-    { name = "yfinance", marker = "extra == 'webapp'", specifier = ">=0.2" },
-]
-provides-extras = ["dev", "oracle", "opendart", "kis", "namuh", "webapp"]
 
 [[package]]
 name = "backtesting"
