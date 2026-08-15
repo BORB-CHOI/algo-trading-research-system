@@ -1275,6 +1275,22 @@ html ::-webkit-scrollbar-thumb:hover,
   font-variant-numeric: tabular-nums;
 }
 .hts .pro-bar button:hover { color: var(--hts-text-1); border-color: var(--hts-line); }
+/* 분봉 드롭다운 — 버튼과 같은 키에 맞춘다. 선택돼 있으면 버튼 .on 과 같은 강조. */
+.hts .pro-bar select {
+  height: 22px;
+  padding: 0 4px;
+  background: var(--hts-elev);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--hts-text-2);
+  font-size: 11.5px;
+}
+.hts .pro-bar select.on {
+  background: var(--hts-accent-soft, rgba(47, 111, 237, 0.12));
+  border-color: var(--hts-accent, #2f6fed);
+  color: var(--hts-accent, #2f6fed);
+  font-weight: 600;
+}
 .hts .pro-bar button.on {
   background: var(--hts-accent-soft, rgba(47, 111, 237, 0.12));
   border-color: var(--hts-accent, #2f6fed);

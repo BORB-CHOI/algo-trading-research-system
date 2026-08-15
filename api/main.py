@@ -38,7 +38,13 @@ from src.layer1_data.adjust import (
     apply_split_adjustment,
 )
 from src.layer1_data.dart import load_financials
-from src.layer1_data.derived import drop_halted, load_adjusted, load_namuh_bars
+from src.layer1_data.derived import (
+    MINUTE_SPANS,
+    drop_halted,
+    load_adjusted,
+    load_namuh_bars,
+    load_namuh_minutes,
+)
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
 from src.layer1_data.marcap_loader import available_years, load_years
@@ -210,6 +216,39 @@ def market_daily(daily: pd.DataFrame, market: str, adjust: bool) -> pd.DataFrame
         return daily
     raw = raw.assign(Code=daily["Code"].iloc[0], Name=daily["Name"].iloc[-1])
     return drop_halted(raw).reset_index(drop=True)
+
+
+def minute_candles(
+    code: str, start: str | None, end: str | None, market: str, timespan: str = "min10"
+) -> pd.DataFrame:
+    """분봉 — 나무 수집본 그대로 (합성 없음, 수정주가). 없으면 빈 프레임.
+
+    통합·NXT 파일이 없는 종목(NXT 미상장)은 KRX 로 대신 준다 — 일봉과 같은 규칙.
+    구간(start/end)은 날짜 단위로 자른다. end 는 그날 끝까지 포함.
+    """
+    code = code.strip().zfill(6)
+    df = load_namuh_minutes(code, timespan, market)
+    if df is None and market != "krx":
+        df = load_namuh_minutes(code, timespan, "krx")
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if start:
+        df = df[df["Date"] >= pd.Timestamp(start)]
+    if end:
+        df = df[df["Date"] < pd.Timestamp(end) + pd.Timedelta(days=1)]
+    if df.empty:
+        return df
+    return df.assign(Code=code, Name=_name_of(code)).reset_index(drop=True)
+
+
+def _name_of(code: str) -> str:
+    """종목명 — 최신 marcap 에서. 없으면(신규상장 등) 코드 그대로."""
+    years = available_years()
+    if not years:
+        return code
+    df = _load_year_slim(years[-1])
+    hit = df.loc[df["Code"] == code, "Name"]
+    return str(hit.iloc[-1]) if not hit.empty else code
 
 
 def period_candles(
@@ -442,17 +481,26 @@ def api_candles(
     start: str | None = Query(None, description="시작일 YYYY-MM-DD"),
     end: str | None = Query(None, description="종료일 YYYY-MM-DD"),
     adjust: bool = Query(True, description="액면분할/병합 수정주가 보정 (ADR-0006)"),
-    period: str = Query("day", pattern="^(day|week|month)$", description="봉 주기 (일/주/월)"),
+    period: str = Query(
+        "day",
+        pattern="^(day|week|month|min1|min3|min5|min10|min15|min30|min60|min120|min240)$",
+        description="봉 주기 (일/주/월 또는 분봉 min1~min240)",
+    ),
     market: str = Query("krx", pattern="^(krx|unt|nxt)$", description="시장 (KRX/통합/NXT)"),
 ) -> dict:
-    daily = market_daily(get_candles(code, start, end, adjust), market, adjust)
-    df = period_candles(daily, period, adjust, market)
+    if period in MINUTE_SPANS:
+        df = minute_candles(code, start, end, market, period)
+    else:
+        daily = market_daily(get_candles(code, start, end, adjust), market, adjust)
+        df = period_candles(daily, period, adjust, market)
     if df.empty:
         raise HTTPException(
             status_code=404,
             detail=f"'{code.strip().zfill(6)}' 종목의 {start or '전체'}~{end or '전체'} 구간 데이터가 없습니다.",
         )
-    times = df["Date"].dt.strftime("%Y-%m-%d")
+    # 분봉은 시각까지 — 프런트가 'T' 유무로 일중 봉인지 안다.
+    fmt = "%Y-%m-%dT%H:%M" if period in MINUTE_SPANS else "%Y-%m-%d"
+    times = df["Date"].dt.strftime(fmt)
     candles = [
         {
             "time": t,
