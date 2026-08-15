@@ -49,6 +49,7 @@ from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer1_data.market import index_boards, market_snapshot
+from src.layer1_data.provider import DataProvider
 from src.layer1_data.news import market_news, stock_news
 from src.layer1_data.quotes_rt import realtime_quotes
 from src.layer1_data.recent import merge_with_marcap, recent_meta
@@ -636,8 +637,38 @@ class ScreenRunRequest(BaseModel):
 
 @app.get("/api/conditions")
 def api_conditions() -> dict:
-    """조건검색 조건 목록 — 프런트가 이 메타로 조건식 UI 를 그린다(계약 고정)."""
-    return cond_registry.categories_payload()
+    """조건검색 조건 목록 — 프런트가 이 메타로 조건식 UI 를 그린다(계약 고정).
+
+    `data_notes` 는 조건을 고르기 전에 알아야 할 데이터 사실이다 — 고치지 않고 알린다
+    (지침서 §5.3). 지금은 수급 결손 하나뿐이다.
+    """
+    payload = cond_registry.categories_payload()
+    payload["data_notes"] = _data_notes()
+    return payload
+
+
+def _data_notes() -> list[dict]:
+    """조건을 고르기 전에 알아야 할 데이터 사실. 화면이 그대로 띄운다."""
+    notes: list[dict] = []
+    try:
+        cov = DataProvider().supply_coverage()
+    except OSError:
+        return notes
+    missing = cov.get("수급_없는_종목", 0)
+    if missing > 0:
+        notes.append(
+            {
+                "key": "supply_delisted",
+                "level": "warn",
+                "title": "수급 조건을 쓰면 상장폐지된 종목이 빠집니다",
+                "body": (
+                    f"일봉은 {cov['일봉']:,}종목 있는데 수급은 {cov['수급']:,}종목뿐입니다"
+                    f"({missing:,}종목 없음). 망한 회사는 수급 자료를 받을 수 없어서, "
+                    "과거 구간 성적이 실제보다 좋게 나올 수 있습니다."
+                ),
+            }
+        )
+    return notes
 
 
 def _load_history_panel(
