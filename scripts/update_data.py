@@ -4,7 +4,7 @@
       .venv/Scripts/python scripts/update_data.py --minutes  # 분봉·신용잔고까지 강제
 
 무엇을 갱신하나 (요일별):
-  평일  : 나무 일·주·월봉(전 종목, NXT 상장은 통합·NXT까지) + KIS 수급(상장 종목)
+  평일  : 나무 일·주·월봉(전 종목, NXT 상장은 통합·NXT까지) + KIS 수급(상장 종목) + DART 공시(이번 달)
   토요일: 위 + 분봉 9종 + KIS 신용잔고  (1분봉 보관이 약 6주라 주 1회면 안 잃는다)
   일요일: 아무것도 안 함 (장이 없던 날)
 
@@ -20,9 +20,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import backfill_dart_disclosures as disclosures  # noqa: E402
 import backfill_kis_credit as credit  # noqa: E402
 import backfill_kis_supply as supply  # noqa: E402
 import collect_namuh_bars as bars  # noqa: E402
@@ -140,6 +142,45 @@ def update_kis(module, out_dir: Path, date_col: str, label: str) -> dict:
     return {"label": label, "added_rows": added, "errors": errors}
 
 
+def update_disclosures() -> dict:
+    """DART 공시 증분 — 이번 달 파일만 다시 받아 덮는다(월 파일이라 그게 곧 증분).
+
+    달이 바뀐 직후엔 지난달도 한 번 더 받는다 — 말일 늦게 접수된 건이 빠질 수 있어서다.
+    KIS 를 쓰지 않아 수급 백필과 한도가 겹치지 않는다.
+    """
+    key = os.environ.get("DART_API_KEY", "").strip()
+    if not key:
+        return {"skipped": "DART_API_KEY 없음"}
+    today = date.today()
+    targets = [date(today.year, today.month, 1)]
+    if today.day <= 3:  # 달 바뀐 직후 — 지난달 마무리분까지
+        prev_end = date(today.year, today.month, 1) - timedelta(days=1)
+        targets.append(date(prev_end.year, prev_end.month, 1))
+
+    added = 0
+    errors = 0
+    for start in targets:
+        ym = start.strftime("%Y-%m")
+        path = disclosures.OUT_DIR / f"{ym}.parquet"
+        old = pd.read_parquet(path) if path.exists() else None
+        frames = []
+        for cls in disclosures.CORP_CLASSES:
+            try:
+                frames.append(pd.DataFrame(disclosures.collect_month(key, start, cls)))
+            except RuntimeError:
+                errors += 1
+        new = (
+            pd.concat([f for f in frames if not f.empty], ignore_index=True)
+            if frames
+            else pd.DataFrame()
+        )
+        if new.empty:
+            continue
+        new["_collected_at"] = datetime.now().isoformat(timespec="seconds")
+        added += merge_save(path, old, new, ["rcept_no"])
+    return {"added_rows": added, "errors": errors}
+
+
 def main() -> int:
     force_minutes = "--minutes" in sys.argv
     weekday = datetime.now().weekday()  # 월=0 … 일=6
@@ -166,6 +207,8 @@ def main() -> int:
             summary["bars_minutes"] = update_bars(MINUTE_INTERVALS)
         print("③ KIS 수급 증분...", flush=True)
         summary["supply"] = update_kis(supply, supply.OUT_DIR, "stck_bsop_date", "수급")
+        print("③-2 DART 공시 증분...", flush=True)
+        summary["disclosures"] = update_disclosures()
         if do_minutes:
             print("④ KIS 신용잔고 증분...", flush=True)
             summary["credit"] = update_kis(credit, credit.OUT_DIR, "deal_date", "신용잔고")
