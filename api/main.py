@@ -53,6 +53,7 @@ from src.layer1_data.news import market_news, stock_news
 from src.layer1_data.quotes_rt import realtime_quotes
 from src.layer1_data.recent import merge_with_marcap, recent_meta
 from src.layer1_data.themes import theme_map
+from src.layer4_execution.backtest import resolve_period
 from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy import fibonacci, price_zones, sr_overlay, support_resistance
 from src.layer3_strategy.case_overlay import (
@@ -1942,6 +1943,17 @@ _WF_LOCK = threading.Lock()
 _WF_KEEP = 5  # 최근 몇 개의 결과를 메모리에 들고 있을지
 
 
+def _latest_trading_day() -> pd.Timestamp | None:
+    """마지막 연도 패널의 마지막 날짜. 못 구하면 None(그러면 오늘을 쓴다)."""
+    try:
+        years = available_years()
+        if not years:
+            return None
+        return pd.Timestamp(load_years(years[-1], years[-1])["Date"].max())
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def _wf_worker(job_id: str, req: BacktestRequest, start: str, end: str) -> None:
     """작업 스레드 — 진행률을 job 에 적고, 끝나면 결과(또는 오류)를 담는다."""
 
@@ -1981,10 +1993,13 @@ def api_backtest_all(req: BacktestRequest) -> dict:
     2019-12-30 하루에 걸린 종목만 보던 문제를 없앤 검사다. 돈 무한 전제라 동시 보유
     한도가 없다. 이 숫자는 계좌 수익률이 아니라 "한 종목에 들어갔을 때 평균 어땠나"다.
     """
-    if not req.start or not req.end:
-        raise HTTPException(status_code=400, detail="검사 시작일과 종료일을 주세요.")
-    if req.start >= req.end:
-        raise HTTPException(status_code=400, detail="시작일이 종료일보다 앞서야 합니다.")
+    # 날짜를 안 주면 기본값(2007-01-01 ~ 최신 거래일)을 쓴다 — ADR-0019.
+    # **구간을 막지 않는다.** 오너가 고른 구간은 그대로 돈다(§4.3).
+    try:
+        start_ts, end_ts = resolve_period(req.start, req.end, latest=_latest_trading_day())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    start, end = start_ts.strftime("%Y-%m-%d"), end_ts.strftime("%Y-%m-%d")
     _strategy_kwargs(req)  # 검색식·전략 값 검증을 스레드 밖에서 먼저 — 400 을 바로 준다
 
     job_id = uuid.uuid4().hex[:12]
@@ -2001,12 +2016,10 @@ def api_backtest_all(req: BacktestRequest) -> dict:
             "phase": "시작하는 중",
             "done": 0,
             "total": 0,
-            "start": req.start,
-            "end": req.end,
+            "start": start,
+            "end": end,
         }
-    threading.Thread(
-        target=_wf_worker, args=(job_id, req, req.start, req.end), daemon=True
-    ).start()
+    threading.Thread(target=_wf_worker, args=(job_id, req, start, end), daemon=True).start()
     return {"job_id": job_id, "status": "running"}
 
 

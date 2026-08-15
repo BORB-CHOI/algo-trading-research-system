@@ -27,11 +27,43 @@ import pandas as pd
 from src.layer4_execution.costs import DEFAULT_COST, CostModel
 from src.layer4_execution.slippage import SqrtImpactSlippage
 
-# ── §4.1 데이터 3분할 (절대 원칙) ──────────────────────────────
+# ── 검사 구간 (§4.3, ADR-0019) ────────────────────────────────
+#
+# **코드가 구간을 정하지 않는다.** 화면에서 고른 날짜가 그대로 검사 구간이다.
+# 오너 결정 2026-08-16: "2007~ 나누지 않고 전체." 연습/검증/시험 3분할은 쓰지 않는다.
+#
+# 데이터는 1995년부터 있다(marcap 32개 연도, 빠진 해 0 — 실측 2026-08-16).
+# 기본값을 2007로 두는 것은 리먼 사태(2008-09-15) 전부터 보겠다는 오너 지시 때문이지,
+# 그 전이 없어서가 아니다.
+DEFAULT_START = "2007-01-01"
+
+
+def resolve_period(
+    start: str | None, end: str | None, *, latest: pd.Timestamp | None = None
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """화면이 준 날짜를 그대로 쓴다. 안 주면 2007-01-01 ~ 최신 거래일.
+
+    **막지 않는다.** 오너가 고른 구간은 무조건 그대로 돈다 — 코드가 방법론을 강제하지 않는다.
+    거꾸로 준 경우만 이유를 말하고 멈춘다(그건 실수이지 선택이 아니다).
+    """
+    s = pd.Timestamp(start) if start else pd.Timestamp(DEFAULT_START)
+    if end:
+        e = pd.Timestamp(end)
+    elif latest is not None:
+        e = pd.Timestamp(latest)
+    else:
+        e = pd.Timestamp.today().normalize()
+    if s > e:
+        raise ValueError(f"시작하는 날({s.date()})이 끝나는 날({e.date()})보다 뒤입니다.")
+    return s, e
+
+
+# (2026-08-16 이후 안 쓴다) 옛 3분할. 오너가 "나누지 않고 전체"로 정해 호출부가 없어졌다.
+# 지우지 않는 것은 옛 보관함 기록(run_store.runs.split)이 이 이름을 가리키기 때문이다.
 SPLITS: dict[str, tuple[str, str]] = {
-    "train": ("2020-01-01", "2023-12-31"),  # 마음껏 실험
-    "validate": ("2024-01-01", "2024-12-31"),  # 골라낸 전략 검증
-    "test": ("2025-01-01", "2025-12-31"),  # 단 1회만
+    "train": ("2020-01-01", "2023-12-31"),
+    "validate": ("2024-01-01", "2024-12-31"),
+    "test": ("2025-01-01", "2025-12-31"),
 }
 
 # CLAUDE.md: N<30 이면 통계를 신뢰하지 않는다.

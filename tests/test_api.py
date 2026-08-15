@@ -392,17 +392,25 @@ _BT_BODY = {
 }
 
 
-def test_전_구간_검사는_기간을_받아야_한다() -> None:
-    r = client.post("/api/backtest/all", json=_BT_BODY)
+def test_전_구간_검사는_기간을_안_줘도_된다() -> None:
+    """ADR-0019: 날짜를 안 주면 기본값(2007-01-01 ~ 최신 거래일)을 쓴다.
+
+    옛 동작은 400 이었다. 지금은 날짜 검사를 통과하고 **그다음** 검색식 검사에서 걸린다 —
+    검색식을 비워서 그 사실을 확인한다(진짜 검사를 돌리면 몇 분 걸린다).
+    """
+    body = {**_BT_BODY, "conditions": []}
+    body.pop("start", None)
+    body.pop("end", None)
+    r = client.post("/api/backtest/all", json=body)
     assert r.status_code == 400
-    assert "종료일" in r.json()["detail"]
+    assert "검색식" in r.json()["detail"]  # 날짜가 아니라 검색식에서 걸렸다
 
 
 def test_전_구간_검사는_거꾸로_된_기간을_거부한다() -> None:
     body = {**_BT_BODY, "start": "2024-01-01", "end": "2023-01-01"}
     r = client.post("/api/backtest/all", json=body)
     assert r.status_code == 400
-    assert "앞서야" in r.json()["detail"]
+    assert "끝나는 날" in r.json()["detail"]
 
 
 def test_전_구간_검사도_검색식이_비면_거부한다() -> None:
