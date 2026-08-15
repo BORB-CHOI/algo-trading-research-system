@@ -147,7 +147,7 @@ def make_client() -> tuple[KisClient, object]:
     return KisClient(creds, token, policy=POLICY), token
 
 
-WORKERS = 5  # 실측: 3줄기로 초당 약 2.6건뿐(지연이 커서) — 5줄기도 문서 한도(20건/초)의 절반 이하
+WORKERS = 3  # 5줄기는 EGW00201·타임아웃만 늘고 속도 이득 없었음(2026-08-15 실측). 차단 위험 피해 3줄기
 STATE_LOCK = threading.Lock()
 _LOCAL = threading.local()
 
