@@ -51,7 +51,13 @@ from src.layer3_strategy.support_resistance import SRLevel
 from src.layer3_strategy.zigzag import WaveLow, zigzag_params_from
 from src.layer4_execution.backtest import SPLITS, Trade, slice_split
 from src.layer4_execution.costs import DEFAULT_COST, CostModel
-from src.layer4_execution.fills import SELL_BASES, _basis_of, _sell_prices
+from src.layer3_strategy.tick_size import tick_size
+from src.layer4_execution.fills import (
+    SELL_BASES,
+    _basis_of,
+    _sell_prices,
+    near_miss_ticks,
+)
 from src.layer4_execution.runner import _aggregate, _select_universe
 from src.layer4_execution.stops import stop_price
 
@@ -236,7 +242,15 @@ def _run_symbol(
             buy_done[k] = True
             hit = True
             filled.append((float(px), weights[k]))
-            fills.append({"date": day, "price": float(px), "w": weights[k], "stage": k + 1})
+            fills.append({
+                "date": day,
+                "price": float(px),
+                "w": weights[k],
+                "stage": k + 1,
+                # 얼마나 아슬아슬했나 — 0 이면 딱 닿기만 한 것(실제로는 못 살 수 있다).
+                # 체결 판정은 안 바꾼다. 호가 오프셋을 조절하며 볼 재료다.
+                "slack_ticks": near_miss_ticks(low, float(px), float(tick_size(float(px)))),
+            })
             bought += weights[k]
             held += weights[k]
         if hit:  # 평단이 바뀌었다 — 매도·손절 주문을 정정한다(다음 봉부터 적용)

@@ -192,3 +192,18 @@ def average_of(fills: Sequence[Fill], weights: Sequence[float]) -> float | None:
     if wsum <= 0:
         return None
     return sum(f.price * weights[f.index] for f in fills) / wsum
+
+
+def near_miss_ticks(low: float, target: float, tick: float) -> int:
+    """저가가 목표가보다 **몇 호가 더** 내려갔는지.
+
+    - `0` = 딱 닿기만 했다 → 실제로는 내 주문 앞 물량이 안 빠져 **못 살 수 있다**
+    - 음수 = 아예 안 닿았다
+
+    체결 판정을 바꾸지는 않는다. "이 체결이 얼마나 아슬아슬했나"를 남겨,
+    호가를 몇 개 더 줘야 하는지 값을 바꿔 가며 확인하기 위한 것이다
+    (오너 2026-08-16 — `buy_tick_offset`/`sell_tick_offset` 은 이미 요청에 있다).
+    """
+    if tick <= 0:
+        return 0
+    return int((target - low) / tick)
