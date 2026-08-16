@@ -170,6 +170,13 @@ SOURCES: list[dict[str, Any]] = [
         "date_col": "deal_date",
     },
     {
+        "key": "members_daily",
+        "label": "거래원(증권사별 매매)",
+        "why": "어느 증권사 창구로 사고팔았나. KIS 가 260거래일치만 줘서 안 모으면 사라집니다.",
+        "dir": "members/daily",
+        "date_col": "date",
+    },
+    {
         "key": "disclosures",
         "label": "공시(DART)",
         "why": "종목 화면에 뜨는 공시 목록입니다.",
