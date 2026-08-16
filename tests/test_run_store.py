@@ -158,8 +158,13 @@ def test_불러온_결과가_화면_계약과_같다(tmp_path) -> None:
             }
         ],
         "no_fill_rows": [
-            {"code": "000660", "name": "SK하이닉스", "n_buys": 0, "stopped": False,
-             "buy_orders": [{"tranche": 1, "price": 50_000.0, "ratio": 0.5}]}
+            {
+                "code": "000660",
+                "name": "SK하이닉스",
+                "n_buys": 0,
+                "stopped": False,
+                "buy_orders": [{"tranche": 1, "price": 50_000.0, "ratio": 0.5}],
+            }
         ],
     }
     run_id = run_store.save_run(result, ran_at="2026-08-10T01:00:00", params={}, db=db)

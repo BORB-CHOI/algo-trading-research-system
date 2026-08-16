@@ -106,7 +106,9 @@ def _sell_prices(
     auto: list[float | None] = []
     for pct in rebounds:
         try:
-            px = shift_ticks(round_to_tick(basis * (1.0 + pct / 100.0), "up", kind), tick_offset, kind)
+            px = shift_ticks(
+                round_to_tick(basis * (1.0 + pct / 100.0), "up", kind), tick_offset, kind
+            )
             auto.append(float(px) if px > 0 else None)
         except ValueError:
             auto.append(None)  # 오프셋이 가격을 0 이하로 밀어낸 극단 — 그 차수만 못 건다

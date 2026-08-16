@@ -106,7 +106,8 @@ def test_select_signal_fill_aggregate(catalog: None) -> None:
         PRICE_COND,
         "and",
         STRAT,
-        "train",
+        start="2020-01-01",
+        end="2023-12-31",
         cost=NO_COST,
         exclusions=None,
         hist=hist,
@@ -138,7 +139,8 @@ def test_universe_uses_day_before_split_only(catalog: None) -> None:
         PRICE_COND,
         "and",
         STRAT,
-        "train",
+        start="2020-01-01",
+        end="2023-12-31",
         cost=NO_COST,
         exclusions=None,
         hist=hist,
@@ -155,7 +157,8 @@ def test_missing_symbol_data_skipped(catalog: None) -> None:
         PRICE_COND,
         "and",
         STRAT,
-        "train",
+        start="2020-01-01",
+        end="2023-12-31",
         cost=NO_COST,
         exclusions=None,
         hist=hist,
@@ -166,44 +169,43 @@ def test_missing_symbol_data_skipped(catalog: None) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# Test split 가드 (§4.1: 단 1회)
+# 검사 구간 — 화면이 준 날짜 그대로 (ADR-0019: 3분할 폐기)
 # ─────────────────────────────────────────────────────────────
 
 
-def test_test_split_requires_explicit_consent(catalog: None) -> None:
-    """test split 은 i_know_test_is_once=True 없이는 데이터 로드 전에 막힌다."""
-    with pytest.raises(ValueError, match="i_know_test_is_once"):
-        runner.run_universe(
-            PRICE_COND,
-            "and",
-            STRAT,
-            "test",
-            cost=NO_COST,
-            exclusions=None,
-            hist=selection_hist({"000001": [100]}, ["2024-12-30"]),
-            loader={}.get,
-        )
-
-
-def test_test_split_runs_with_consent(catalog: None) -> None:
-    """명시 동의 시 test split(2025~)이 정상 실행된다."""
+def test_화면이_준_날짜가_그대로_검사_구간이_된다(catalog: None) -> None:
+    """어떤 날짜를 줘도 막지 않는다 — 코드가 방법론을 강제하지 않는다."""
     strat = {"key": "테스트전략", "params": {"buy": "2025-01-03", "sell": "2025-01-07"}}
     res = runner.run_universe(
         PRICE_COND,
         "and",
         strat,
-        "test",
+        start="2025-01-01",
+        end="2025-12-31",
         cost=NO_COST,
         exclusions=None,
-        i_know_test_is_once=True,
         hist=selection_hist({"000001": [100]}, ["2024-12-30"]),
         # 영업일: 01-02, 01-03, 01-06, 01-07, 01-08, 01-09
         loader={"000001": make_daily("000001", "2025-01-02", [100, 100, 110, 120, 130, 140])}.get,
     )
-    assert res["split"] == "test"
-    assert res["base_date"] == "2024-12-30"
+    assert (res["split_start"], res["split_end"]) == ("2025-01-01", "2025-12-31")
+    assert res["base_date"] == "2024-12-30"  # 선별은 구간 시작 직전 거래일
     assert res["metrics"]["n_trades"] == 1
     assert res["metrics"]["expectancy"] == pytest.approx(130 / 110 - 1)
+
+
+def test_날짜를_안_주면_기본_구간을_쓴다(catalog: None) -> None:
+    """2007-01-01 ~ 오늘. 오너가 안 골랐다고 멈추지 않는다."""
+    res = runner.run_universe(
+        PRICE_COND,
+        "and",
+        STRAT,
+        cost=NO_COST,
+        exclusions=None,
+        hist=selection_hist({"000001": [100]}, ["2006-12-28"]),
+        loader={}.get,
+    )
+    assert res["split_start"] == "2007-01-01"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -218,14 +220,21 @@ def test_slippage_combines_with_cost(catalog: None) -> None:
     common = dict(exclusions=None, hist=hist, loader=loader)
 
     base = runner.run_universe(
-        PRICE_COND, "and", STRAT, "train", cost=CostModel(round_trip_rate=0.005), **common
+        PRICE_COND,
+        "and",
+        STRAT,
+        start="2020-01-01",
+        end="2023-12-31",
+        cost=CostModel(round_trip_rate=0.005),
+        **common,
     )
     k, order_notional, adv = 0.1, 1e7, 1e9  # ADV 는 합성 Amount(1e9) 그대로
     with_slip = runner.run_universe(
         PRICE_COND,
         "and",
         STRAT,
-        "train",
+        start="2020-01-01",
+        end="2023-12-31",
         cost=CostModel(round_trip_rate=0.005),
         slippage=SqrtImpactSlippage(k=k),
         order_notional=order_notional,
@@ -255,7 +264,8 @@ def test_empty_conditions_rejected(catalog: None) -> None:
             [],
             "and",
             STRAT,
-            "train",
+            start="2020-01-01",
+            end="2023-12-31",
             cost=NO_COST,
             exclusions=None,
             hist=selection_hist({"000001": [100, 100]}, BASE_DATES),

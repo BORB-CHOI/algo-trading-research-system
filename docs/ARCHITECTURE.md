@@ -23,9 +23,9 @@
 
 ```
 src/
-├── layer1_data/        데이터 수집·정제·point-in-time 저장
+├── layer1_data/        데이터 수집·정제·당시 기준 저장 (+ freshness/refresh — 어디까지 받았나)
 │                        (marcap 로더, 종목 마스터, 향후 수급/뉴스)
-├── layer2_signals/     신호 생성 — LLM이 들어가는 유일한 자리 (Phase 2~)
+├── layer2_llm_reading/ 글 해석 — LLM이 들어가는 유일한 자리 (2단계~, 지금 비어 있음)
 │                        (지금은 비어 있음. Phase 1은 정량 신호만)
 ├── layer3_strategy/    포트폴리오/매매 전략 — 결정론적 룰
 │                        (universe filter, 랭킹, conviction, 청산, 회피 패턴)
@@ -58,7 +58,7 @@ marcap (parquet)
   │          멀티종목 집계는 runner.run_universe
   ▼
 거래 원장 (trades)
-  │  layer4: 3분할(§4.1) 위에서 지표 산출
+  │  layer4: 화면에서 고른 구간 위에서 지표 산출 (ADR-0019 — 3분할 안 쓴다)
   ▼
 WRL / IC / Expectancy / Skewness / 분위수익률 (§6.1)
 ```

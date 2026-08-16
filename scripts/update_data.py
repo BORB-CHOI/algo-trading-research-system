@@ -27,6 +27,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -36,6 +37,8 @@ import backfill_dart_disclosures as disclosures  # noqa: E402
 import backfill_kis_credit as credit  # noqa: E402
 import backfill_kis_supply as supply  # noqa: E402
 import collect_namuh_bars as bars  # noqa: E402
+
+from src.layer1_data import freshness  # noqa: E402
 
 LOCK_PATH = ROOT / "data" / "derived" / "_update.lock"
 LOG_PATH = ROOT / "data" / "derived" / "_update_log.jsonl"
@@ -49,6 +52,22 @@ def log_line(**fields) -> None:
     fields["at"] = datetime.now().isoformat(timespec="seconds")
     with LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(fields, ensure_ascii=False) + "\n")
+
+
+def last_date_of(path: Path, date_col: str) -> str:
+    """저장된 마지막 날짜만 읽는다 — **파일을 통째로 열지 않는다.**
+
+    실측 2026-08-16: 파일 통째로 15.3ms vs 날짜 열만 1.6ms. 일·주·월봉 증분이 만지는
+    파일이 16,530개라, 통째로 열면 **받을 게 하나도 없어도 4.2분**이 그냥 날아간다.
+    날짜 열만 읽으면 0.5분이다. 실제로 이어붙일 때만 파일 전체를 연다.
+    """
+    if not path.exists():
+        return ""
+    try:
+        col = pq.read_table(path, columns=[date_col])[date_col]
+    except (OSError, ValueError, KeyError):
+        return ""
+    return "" if len(col) == 0 else str(max(col.to_pylist()))
 
 
 def merge_save(path: Path, old: pd.DataFrame | None, new: pd.DataFrame, keys: list[str]) -> int:
@@ -80,10 +99,11 @@ def update_bars(intervals: list[tuple[str, str, str | None]]) -> dict:
         for market in markets:
             for folder, gubun, xtick in intervals:
                 path = bars.OUT_DIR / market.lower() / folder / f"{code}.parquet"
-                old = pd.read_parquet(path) if path.exists() else None
-                since = str(old["bsop_date"].max()) if old is not None and not old.empty else ""
+                # 먼저 날짜만 본다. 받을 게 없으면 파일을 열지도, 호출하지도 않는다.
+                since = last_date_of(path, "bsop_date")
                 if since >= datetime.now().strftime("%Y%m%d"):
                     continue  # 오늘 봉까지 이미 있다 — 호출 낭비 안 한다
+                old = pd.read_parquet(path) if path.exists() else None
                 try:
                     if not since:
                         new = bars.collect_one(market, code, gubun, xtick)  # 처음 = 전체
@@ -125,12 +145,12 @@ def update_kis(module, out_dir: Path, date_col: str, label: str) -> dict:
     errors = 0
     for code in sorted(listed):
         path = out_dir / f"{code}.parquet"
-        old = pd.read_parquet(path) if path.exists() else None
-        if old is None or old.empty:
+        since = last_date_of(path, date_col)
+        if not since:
             continue  # 백필이 아직 안 만든 종목 — 백필 몫이다
-        since = str(old[date_col].max())
         if since >= (datetime.now() - timedelta(days=1)).strftime("%Y%m%d"):
-            continue  # 이미 최신
+            continue  # 이미 최신 — 파일을 열지 않는다
+        old = pd.read_parquet(path)
         try:
             new = module.collect_code(supply._thread_client(), code, since, today)
         except (module.KisApiError, OSError):
@@ -212,6 +232,8 @@ def main() -> int:
         if do_minutes:
             print("④ KIS 신용잔고 증분...", flush=True)
             summary["credit"] = update_kis(credit, credit.OUT_DIR, "deal_date", "신용잔고")
+        print("⑤ 워터마크 갱신...", flush=True)
+        summary["freshness"] = freshness.refresh_marks()
         summary["ok"] = True
     except Exception as e:  # 요약 로그에 실패도 남긴다 — 조용히 죽으면 공백을 모른다
         summary["ok"] = False

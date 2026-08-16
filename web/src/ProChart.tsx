@@ -599,14 +599,15 @@ async function fetchCandles(
   bars: BarCount,
   minStart?: string,
   market: BarMarket = 'unt',
-): Promise<KLineData[]> {
+): Promise<{ bars: KLineData[]; source: string }> {
   const auto = startFor(period, bars)
   // 전체(bars===0)면 이미 다 받으므로 minStart 는 볼 필요 없다.
   const start = auto == null ? '1990-01-01' : minStart && minStart < auto ? minStart : auto
   const q = `code=${encodeURIComponent(code)}&period=${period}&start=${start}&market=${market}`
   const res = await fetch(`/api/candles?${q}`)
-  if (!res.ok) return [] // 404(데이터 없음) 등은 빈 배열 — 화면은 "데이터 없음"으로 남는다
-  const { candles } = (await res.json()) as {
+  if (!res.ok) return { bars: [], source: 'none' } // 404 등 — 화면은 "데이터 없음"으로 남는다
+  const { candles, source } = (await res.json()) as {
+    source: string
     candles: {
       time: string
       open: number
@@ -617,7 +618,7 @@ async function fetchCandles(
       amount: number
     }[]
   }
-  return candles.map((c) => ({
+  const rows = candles.map((c) => ({
     // 분봉은 서버가 'YYYY-MM-DDTHH:MM' 으로 준다 — 'T' 가 있으면 시각까지 그대로.
     timestamp: new Date(c.time.includes('T') ? c.time : `${c.time}T00:00:00`).getTime(),
     open: c.open,
@@ -627,6 +628,7 @@ async function fetchCandles(
     volume: c.volume,
     turnover: c.amount,
   }))
+  return { bars: rows, source: source ?? 'none' }
 }
 
 const KOREAN_STYLES = {
@@ -785,6 +787,9 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   const lastSentRef = useRef<number | null>(null)
 
   const [sym, setSym] = useState({ ...first })
+  // 이 봉이 어디서 왔나 — 상장 종목은 나무 수집본, 상장폐지·미수집은 marcap 보정본.
+  // 두 소스를 같이 쓰므로 화면이 그걸 말해 줘야 한다 (오너 2026-08-16).
+  const [source, setSource] = useState('none')
   const [period, setPeriodState] = useState<BarPeriod>('day')
   const [market, setMarketState] = useState<BarMarket>('unt')
   const [bars, setBarsState] = useState<BarCount>(props.initialBars ?? 500)
@@ -818,7 +823,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     setBusy(true)
     try {
       const want = barsRef.current
-      const data = await fetchCandles(
+      const { bars: data, source } = await fetchCandles(
         symbolRef.current.code,
         periodRef.current,
         want,
@@ -826,6 +831,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
         marketRef.current,
       )
       if (seq !== loadSeq.current) return // 그 사이 종목·주기가 또 바뀌었다 — 이 응답은 버린다
+      setSource(source)
       loadedForRef.current = want
       lastBaseRef.current = null // 데이터가 통째로 바뀌었다 — 오른쪽 끝을 다시 알린다
       lastSentRef.current = null
@@ -1149,6 +1155,18 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
         <div className="pro-bar">
           <b className="sym">
             {sym.name} <span className="code">{sym.code}</span>
+            {source !== 'none' && (
+              <span
+                className={`src ${source}`}
+                title={
+                  source === 'namuh'
+                    ? '나무증권 수집본 — 증권사가 보정한 수정주가입니다. 액면분할·병합이 이미 반영돼 있습니다.'
+                    : 'marcap + 자체 보정 — 상장폐지되었거나 아직 수집되지 않은 종목입니다. 액면병합이 안 잡힐 수 있습니다.'
+                }
+              >
+                {source === 'namuh' ? '나무' : 'marcap'}
+              </span>
+            )}
           </b>
           <span className="grp">
             <select

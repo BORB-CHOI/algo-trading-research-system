@@ -5,7 +5,6 @@ import {
   fetchBacktestAll,
   fetchRunResult,
   fetchRuns,
-  postBacktest,
   postBacktestAll,
   postSimulate,
   type BacktestRequest,
@@ -27,20 +26,16 @@ import { BacktestTable } from './BacktestTable'
 // ④ 백테스팅 — 전수 검사 (layer4 strategy_one). 전략 값은 ②의 현재 값(draft)을 쓴다.
 // StrategyPanel.tsx 분할(구조 리팩토링 2026-08-06)로 옮겨온 스텝.
 
-// ④ 구간 표시용 — 정본은 layer4 backtest.SPLITS (§4.1 3분할). 여기는 라벨만.
-// 'all' 만 성격이 다르다: 구간을 자르는 게 아니라 **거래일마다 종목을 다시 고르는** 검사다
-// (layer4 walk_forward, 오너 2026-08-10: "그때부터 하루씩 지금까지 매매 가능해야지").
-const SPLIT_LABEL = {
-  all: '전 기간 — 날마다 종목을 다시 고른다 (몇 분)',
-  train: '값 맞추기용 2020-01-01 ~ 2023-12-31',
-  validate: '맞춘 값 확인용 2024-01-01 ~ 2024-12-31',
-  test: '마지막 채점용 2025-01-01 ~ 2025-12-31 (딱 한 번)',
-} as const
-type SplitKey = keyof typeof SPLIT_LABEL
+// ④ 검사 구간 — **오너가 날짜로 정한다.** 코드가 기간을 갈라 놓지 않는다(ADR-0019).
+//
+// 2026-08-16 이전에는 여기 '값 맞추기용 / 확인용 / 채점용' 3분할 라디오가 있었다.
+// 오너 결정으로 없앴다: "2007~ 나누지 않고 전체". 최종 확인은 나무 모의투자(단계 5)가 한다.
+// 검사는 늘 **거래일마다 종목을 다시 고르는** 방식이다(layer4 walk_forward,
+// 오너 2026-08-10: "그때부터 하루씩 지금까지 매매 가능해야지").
 
-// 전 기간 검사의 기본 시작일. 오너 2026-08-10: "2019년부터 26년 8월 10일까지라니까".
-// 끝은 오늘(todayStr) — 데이터가 있는 마지막 거래일까지 서버가 알아서 자른다.
-const ALL_START_DEFAULT = '2019-01-01'
+// 기본 시작일 — 리먼 사태(2008-09-15) 전부터 보겠다는 오너 지시.
+// 서버 정본은 layer4 backtest.DEFAULT_START. 끝은 오늘(todayStr).
+const ALL_START_DEFAULT = '2007-01-01'
 
 /** 행에서 바로 여는 차트 — **④ 화면을 떠나지 않는다.**
  *
@@ -253,15 +248,11 @@ export function BacktestStep(props: {
     }
   }
 
-  // 기본은 전 기간이다 — 하루만 고르는 검사를 기본으로 두니 "2019~2026 검사"인 줄 알고
-  // 24종목짜리 결과를 보게 됐다(오너 지적 2026-08-09·10).
-  const [btSplit, setBtSplit] = useState<SplitKey>('all')
-  const [btConfirmTest, setBtConfirmTest] = useState(false)
   const [btRunning, setBtRunning] = useState(false)
   const [btMsg, setBtMsg] = useState('')
   const [btResult, setBtResult] = useState<BacktestResponse | null>(null)
   const [btLabel, setBtLabel] = useState('')
-  // 전 구간 검사 — 언제부터 언제까지, 그리고 지금 어디까지 왔나
+  // 검사 구간 — 언제부터 언제까지, 그리고 지금 어디까지 왔나
   const [allStart, setAllStart] = useState(ALL_START_DEFAULT)
   const [allEnd, setAllEnd] = useState(todayStr)
   const [jobId, setJobId] = useState<string | null>(null)
@@ -290,8 +281,6 @@ export function BacktestStep(props: {
     return {
       filled,
       req: {
-        // 전 구간은 split 을 안 쓰지만 요청 형식은 하나로 유지한다(서버가 무시).
-        split: btSplit === 'all' ? 'train' : btSplit,
         conditions: draft.conditions,
         logic: draft.logic,
         ...START_PAYLOAD,
@@ -307,7 +296,6 @@ export function BacktestStep(props: {
         sell_tick_offset: Number.isInteger(sellOff) ? sellOff : 0,
         buy_min_gap_pct: Number.isFinite(minGap) && minGap >= 0 ? minGap : 0,
         stop: stopPayload(draft),
-        i_know_test_is_once: btSplit === 'test' ? btConfirmTest : undefined,
         screen_name: draft.screenName,
         label: btLabel.trim() || name,
       },
@@ -315,46 +303,27 @@ export function BacktestStep(props: {
   }
 
   async function runBacktest() {
-    if (btSplit === 'test' && !btConfirmTest) {
-      setBtMsg('Test 구간은 단 1회만 씁니다(§4.1) — 최종 평가가 맞다면 체크 후 실행하세요.')
-      return
-    }
     const built = buildRequest()
     if (!built) return
-
-    // 전 구간은 몇 분 걸린다 — 시작만 하고 진행은 따로 확인한다(아래 폴링 효과).
-    if (btSplit === 'all') {
-      if (allStart >= allEnd) {
-        setBtMsg('시작일이 종료일보다 앞서야 합니다.')
-        return
-      }
-      setBtRunning(true)
-      setBtResult(null)
-      setProgress(null)
-      setBtMsg('검사를 시작했습니다 — 몇 분 걸립니다. 이 탭을 떠나도 계속 돕니다.')
-      try {
-        const { job_id } = await postBacktestAll({ ...built.req, start: allStart, end: allEnd })
-        setJobId(job_id)
-      } catch (e) {
-        setBtRunning(false)
-        setBtMsg(e instanceof Error ? e.message : '전 구간 검사 시작 실패')
-      }
+    if (allStart >= allEnd) {
+      setBtMsg('시작하는 날이 끝나는 날보다 앞서야 합니다.')
       return
     }
-
+    // 몇 분 걸린다 — 시작만 하고 진행은 따로 확인한다(아래 폴링 효과).
     setBtRunning(true)
-    setBtMsg('검사 중… (종목 수에 따라 수십 초)')
+    setBtResult(null)
+    setProgress(null)
+    setBtMsg(
+      built.filled.length
+        ? `예시값 사용: ${built.filled.join(' · ')} — 검사를 시작했습니다.`
+        : '검사를 시작했습니다 — 몇 분 걸립니다. 이 탭을 떠나도 계속 돕니다.',
+    )
     try {
-      const res = await postBacktest(built.req)
-      setBtResult(res)
-      setLoadedFrom(null)
-      void refreshRuns() // 방금 돌린 게 보관함 목록에 바로 보이게
-      setBtMsg(built.filled.length ? `예시값 사용: ${built.filled.join(' · ')}` : '')
+      const { job_id } = await postBacktestAll({ ...built.req, start: allStart, end: allEnd })
+      setJobId(job_id)
     } catch (e) {
-      setBtResult(null)
-      setBtMsg(e instanceof Error ? e.message : '백테스트 실패')
-    } finally {
       setBtRunning(false)
+      setBtMsg(e instanceof Error ? e.message : '검사 시작 실패')
     }
   }
 
@@ -444,49 +413,19 @@ export function BacktestStep(props: {
             <button type="button" onClick={onGoStrategy}>②에서 붙이기</button>
           </p>
         )}
-        <KV label="구간">
-          <span className="radios" style={{ marginLeft: 'auto' }}>
-            {(Object.keys(SPLIT_LABEL) as SplitKey[]).map((k) => (
-              <label key={k}>
-                <input type="radio" checked={btSplit === k} onChange={() => { setBtSplit(k); setBtConfirmTest(false) }} />
-                {SPLIT_LABEL[k]}
-              </label>
-            ))}
-          </span>
+        {/* 구간은 **오너가 날짜로 정한다.** 예전엔 여기 '값 맞추기용/확인용/채점용' 라디오가
+            있었으나 없앴다 — 오너 결정 2026-08-16 "2007~ 나누지 않고 전체". */}
+        <KV label="검사 기간">
+          <input type="date" value={allStart} onChange={(e) => setAllStart(e.target.value)} />
+          <span className="unit">~</span>
+          <input type="date" value={allEnd} onChange={(e) => setAllEnd(e.target.value)} />
         </KV>
-        {/* 아래 세 개가 무슨 소린지 화면에 없어서 오너가 "이거 뭔 소리야"라고 물었다
-            (2026-08-10). 왜 기간을 갈라 놨는지를 한 문단으로 적는다. */}
-        {btSplit === 'all' ? (
-          <>
-            <KV label="검사 기간">
-              <input type="date" value={allStart} onChange={(e) => setAllStart(e.target.value)} />
-              <span className="unit">~</span>
-              <input type="date" value={allEnd} onChange={(e) => setAllEnd(e.target.value)} />
-            </KV>
-            <p className="hint">
-              거래일마다 검색식을 다시 돌려, 그날 걸린 종목을 그날 기준으로 사고팝니다.
-              <b> 아래 세 기간과는 아무 상관이 없습니다</b> — 여기 적은 날짜만 씁니다.
-              같은 종목이라도 파동이 바뀌면 다시 걸고, 매매 중이면 새로 시작하지 않습니다.
-              돈은 무한이라 동시 보유 제한이 없습니다 — 이 숫자는 계좌 수익률이 아니라
-              "한 종목에 들어갔을 때 평균 어땠나"입니다. 몇 분 걸립니다.
-            </p>
-          </>
-        ) : (
-          <p className="hint">
-            기간을 셋으로 갈라 둔 이유: 값을 이리저리 바꿔가며 제일 좋은 숫자가 나올 때까지
-            맞추면 <b>그 기간에만 맞는 답</b>이 됩니다. 그래서 값 맞추는 건 첫 기간에서만 하고,
-            둘째 기간에서 그 값이 딴 데서도 되는지 봅니다. 셋째 기간은 다 정한 뒤{' '}
-            <b>딱 한 번</b> 채점하는 자리입니다 — 보고 고치면 채점이 아니게 됩니다.
-          </p>
-        )}
-        {btSplit === 'test' && (
-          <p className="hint warn">
-            <label>
-              <input type="checkbox" checked={btConfirmTest} onChange={(e) => setBtConfirmTest(e.target.checked)} />{' '}
-              Test 구간은 <b>단 1회</b>만 씁니다(§4.1). 보고 고치면 Train이 됩니다 — 최종 평가가 맞습니다.
-            </label>
-          </p>
-        )}
+        <p className="hint">
+          거래일마다 검색식을 다시 돌려, 그날 걸린 종목을 그날 기준으로 사고팝니다.
+          같은 종목이라도 파동이 바뀌면 다시 걸고, 매매 중이면 새로 시작하지 않습니다.
+          돈은 무한이라 동시 보유 제한이 없습니다 — 이 숫자는 계좌 수익률이 아니라
+          "한 종목에 들어갔을 때 평균 어땠나"입니다. 몇 분 걸립니다.
+        </p>
         <KV label="이 검사에 붙일 이름">
           <input
             style={{ flex: 1 }}
@@ -511,7 +450,7 @@ export function BacktestStep(props: {
         </div>
         {/* 몇 분짜리라 "돌고는 있나"가 보여야 한다 — 게이지 + 갯수 (오너 2026-08-10).
             단계가 둘(종목 고르기 → 매매 검사)이라 단계마다 0부터 다시 찬다. */}
-        {btRunning && btSplit === 'all' && (
+        {btRunning && (
           <div className="bt-gauge">
             <div className="bt-gauge-head">
               <span>{progress?.phase ?? '시작하는 중'}</span>
@@ -546,7 +485,7 @@ export function BacktestStep(props: {
             {runs.map((r) => (
               <option key={r.id} value={String(r.id)}>
                 {r.label || `${r.id}번`} · {r.ran_at.slice(0, 16).replace('T', ' ')} ·{' '}
-                {r.split === 'all' ? '전 기간' : r.split} {r.split_start}~{r.split_end} · 사고판{' '}
+                {r.split_start}~{r.split_end} · 사고판{' '}
                 {r.n_trades}건
                 {r.win_rate != null ? ` · 이긴 비율 ${(r.win_rate * 100).toFixed(0)}%` : ''}
               </option>

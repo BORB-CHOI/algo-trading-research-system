@@ -26,16 +26,16 @@ from collections.abc import Callable
 
 import pandas as pd
 
-from src.layer1_data.derived import load_adjusted
+from src.layer1_data.daily import daily_bars
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer3_strategy import conditions as cond_registry
 from src.layer4_execution.backtest import (
     MIN_RELIABLE_TRADES,
-    SPLITS,
     Trade,
+    resolve_period,
     run_symbol,
-    slice_split,
+    slice_period,
 )
 from src.layer4_execution.costs import DEFAULT_COST, CostModel
 from src.layer4_execution.slippage import SqrtImpactSlippage
@@ -43,9 +43,6 @@ from src.layer4_execution.slippage import SqrtImpactSlippage
 # 전략 신호 함수 시그니처(카탈로그 인터페이스): (일봉 df, **params) → 신호 행 DataFrame.
 # 신호 행: Date + side('buy'|'sell'). df 의 실제 거래일에만 신호를 낸다.
 StrategyFn = Callable[..., pd.DataFrame]
-
-# §4.1 Test 가드를 데이터 로드 전에 발동시키기 위한 빈 일봉 (가드 정본은 slice_split).
-_EMPTY_DAILY = pd.DataFrame({"Date": pd.Series(dtype="datetime64[ns]")})
 
 
 def _resolve_strategy(key: str) -> StrategyFn:
@@ -204,15 +201,15 @@ def run_universe(
     conditions: list[dict],
     logic: str,
     strategy: dict,
-    split: str,
     *,
+    start: str | None = None,
+    end: str | None = None,
     cost: CostModel = DEFAULT_COST,
     slippage: SqrtImpactSlippage | None = None,
     order_notional: float | None = None,
-    i_know_test_is_once: bool = False,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
     hist: pd.DataFrame | None = None,
-    loader: Callable[[str], pd.DataFrame | None] = load_adjusted,
+    loader: Callable[[str], pd.DataFrame | None] = daily_bars,
 ) -> dict:
     """조건검색식으로 유니버스를 뽑아 종목별 백테스트를 돌리고 집계한다.
 
@@ -222,27 +219,23 @@ def run_universe(
       빈 목록은 오류(조건검색과 같은 계약) — 전 종목이 필요하면 느슨한 조건을 명시한다.
     - strategy: {"key": 카탈로그 key, "params": {...}} — 신호 함수는 카탈로그에서 찾고
       params 를 키워드 인자로 넘긴다(_resolve_strategy 한 곳에서만 임포트).
-    - split: "train" | "validate" | "test" (§4.1). test 는 i_know_test_is_once=True 필수.
+    - start/end: 검사 구간. 화면에서 고른 날짜가 그대로 온다(ADR-0019).
+      안 주면 2007-01-01 ~ 오늘. 코드가 구간을 나누거나 막지 않는다.
     - cost: ADR-0004 왕복 정액률. slippage + order_notional: 제곱근 충격 슬리피지(옵션).
     - exclusions: ADR-0003 유니버스 제외. Name/Market 컬럼이 없는 합성 데이터는 None.
     - hist/loader: 데이터 주입점(테스트용). 기본은 marcap(선별)과
-      derived.load_adjusted(종목별 수정주가 — build_adjusted.py 산출물).
+      layer1.daily.daily_bars(상장 종목=나무 수집본 · 상폐=marcap 보정본).
 
     반환:
-    {split, base_date, universe, skipped: {code: 사유},
+    {split, split_start, split_end, base_date, universe, skipped: {code: 사유},
      per_symbol: {code: run_symbol summary},
      metrics: {n_trades, win_rate, avg_win, avg_loss, expectancy, cum_net_return, reliable}}
 
-    v1 한계(모듈 docstring 상세): 선별은 split 시작 직전 거래일 1회 — point-in-time
+    v1 한계(모듈 docstring 상세): 선별은 구간 시작 직전 거래일 1회 — 당시 기준 종목 목록으로
     재선별은 후속. cum_net_return 은 자본 배분 없는 순차 복리.
     """
-    if split not in SPLITS:
-        raise ValueError(f"알 수 없는 split: {split!r} — 사용 가능: {list(SPLITS)}")
     if logic not in ("and", "or"):
         raise ValueError(f"logic 은 'and' 또는 'or' 여야 합니다: {logic!r}")
-    # §4.1 Test 가드 — 데이터 로드 전에 먼저 발동시킨다 (가드 정본은 slice_split).
-    slice_split(_EMPTY_DAILY, split, i_know_test_is_once=i_know_test_is_once)
-
     if not isinstance(strategy, dict) or "key" not in strategy:
         raise ValueError('strategy 는 {"key": ..., "params": {...}} 형식이어야 합니다.')
     strategy_fn = _resolve_strategy(str(strategy["key"]))
@@ -250,7 +243,7 @@ def run_universe(
     if not isinstance(params, dict):
         raise ValueError("strategy.params 는 dict 여야 합니다.")
 
-    split_start, split_end = (pd.Timestamp(d) for d in SPLITS[split])
+    split_start, split_end = resolve_period(start, end)
     universe, base_date, _ = _select_universe(conditions, logic, split_start, hist, exclusions)
 
     per_symbol: dict[str, dict] = {}
@@ -267,7 +260,7 @@ def run_universe(
         # 전략에는 split 종료일까지만 준다 — split 이후 미래는 구조적으로 차단.
         # 시작 전 이력은 워밍업(이평 등)에 쓰라고 남긴다(과거 데이터 — look-ahead 아님).
         df = df[df["Date"] <= split_end]
-        sliced = slice_split(df, split, i_know_test_is_once=i_know_test_is_once)
+        sliced = slice_period(df, split_start, split_end)
         if len(sliced) < 2:  # 체결은 신호 다음 날 — 최소 2 거래일 필요
             skipped[code] = "구간 내 거래일 부족"
             continue
@@ -280,7 +273,11 @@ def run_universe(
         all_trades.extend(result.trades)
 
     return {
-        "split": split,
+        # 검사 구간 — 화면에서 고른 날짜 그대로 (ADR-0019). 'split' 이라는 이름은
+        # 옛 보관함 기록(run_store)이 그 열을 갖고 있어 유지한다. 값은 늘 '전 기간'이다.
+        "split": "all",
+        "split_start": split_start.strftime("%Y-%m-%d"),
+        "split_end": split_end.strftime("%Y-%m-%d"),
         "base_date": base_date.strftime("%Y-%m-%d"),
         "universe": universe,
         "skipped": skipped,

@@ -322,7 +322,9 @@ def test_라운드_중_신고가가_나면_주문을_새_선으로_옮긴다() -
         panel,
         start="2026-01-07",
         end="2026-01-14",
-        conditions=[{"key": "price_range", "params": {"min": 19_600, "max": 20_500}}],  # 종가 20,000 = 1/7 하루만
+        conditions=[
+            {"key": "price_range", "params": {"min": 19_600, "max": 20_500}}
+        ],  # 종가 20,000 = 1/7 하루만
     )
     rounds = out["results"] + out["no_fill_rows"]
     [r] = rounds  # 라운드 하나짜리로 좁혔다 — 정정 동작만 본다

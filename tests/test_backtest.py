@@ -11,7 +11,7 @@ import pytest
 from src.layer4_execution.backtest import (
     MIN_RELIABLE_TRADES,
     run_symbol,
-    slice_split,
+    slice_period,
 )
 from src.layer4_execution.costs import CostModel
 
@@ -83,12 +83,13 @@ def test_summary_reliability_flag() -> None:
     assert MIN_RELIABLE_TRADES == 30
 
 
-def test_test_split_requires_explicit_consent() -> None:
-    """§4.1: Test 구간은 명시 플래그 없이 못 자른다."""
+def test_구간은_화면이_준_날짜대로_자른다() -> None:
+    """구간은 화면에서 고른 날짜 그대로 자른다 — 코드가 막지 않는다 (ADR-0019)."""
     df = make_df([100] * 5)
-    with pytest.raises(ValueError):
-        slice_split(df, "test")
-    assert slice_split(df, "train").equals(df)  # 2020 은 train 구간
+    all_of_it = slice_period(df, pd.Timestamp("2000-01-01"), pd.Timestamp("2030-12-31"))
+    assert all_of_it.equals(df)
+    none_of_it = slice_period(df, pd.Timestamp("2030-01-01"), pd.Timestamp("2030-12-31"))
+    assert none_of_it.empty
 
 
 def test_position_length_mismatch_raises() -> None:

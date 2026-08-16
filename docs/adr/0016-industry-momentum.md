@@ -21,7 +21,7 @@
 
 ## 실측 (2026-08-07)
 
-`scripts/kis_probe_industry.py` — 실전 키, 조회 전용.
+`scripts/kis_probe_industry.py` — 실전 키, 조회 전용. (2026-08-16 삭제 — 근거 확인은 끝났고 스크립트는 git 이력에 남아 있다)
 
 ### KIS 에 테마는 없다
 

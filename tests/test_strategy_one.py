@@ -32,7 +32,7 @@ LEFT_BARS = [
     (16_000, 16_200, 15_800, 16_000),  # 기준일
 ]
 
-BASE = "2023-12-29"  # validate(2024) split 시작 직전 거래일
+BASE = "2023-12-29"  # 검사 구간(2024~) 시작 직전 거래일 — 선별은 이날 1회
 
 
 def daily(right_bars: list[tuple[float, float, float, float]]) -> pd.DataFrame:
@@ -98,7 +98,8 @@ def run(right_bars, *, sell=None, stop=None, cost=NO_COST, **kw):
     return run_strategy_one(
         PRICE_COND,
         "and",
-        "validate",
+        start="2024-01-01",
+        end="2024-12-31",
         zz=ZZ,
         sr=SR,
         buy=[{"ratio": 0.5, "weight": 100}],
@@ -189,7 +190,8 @@ def test_깊은_차수는_아래_자리까지_내려간다() -> None:
     out = run_strategy_one(
         PRICE_COND,
         "and",
-        "validate",
+        start="2024-01-01",
+        end="2024-12-31",
         zz=ZZ,
         sr=SR,
         buy=[{"ratio": 0.786, "weight": 100}],
@@ -203,12 +205,14 @@ def test_깊은_차수는_아래_자리까지_내려간다() -> None:
     assert out["results"] == []
 
 
-def test_test_split_requires_explicit_consent() -> None:
-    with pytest.raises(ValueError, match="단 1회"):
+def test_거꾸로_준_날짜만_거부한다() -> None:
+    """구간은 막지 않는다 — 시작이 끝보다 뒤인 것만 실수라서 멈춘다 (ADR-0019)."""
+    with pytest.raises(ValueError, match="끝나는 날"):
         run_strategy_one(
             PRICE_COND,
             "and",
-            "test",
+            start="2025-01-01",
+            end="2024-01-01",
             zz=ZZ,
             sr=SR,
             buy=[{"ratio": 0.5, "weight": 100}],

@@ -35,7 +35,10 @@ class TestPct:
 
     def test_아직_안_샀으면_그을_수_없다(self):
         # 평단이 없으면 평단 기준 손절선은 존재하지 않는다 — 오류가 아니라 '없음'.
-        assert stop_price(cfg(mode="pct", pct=10), avg_entry=None, cycle_low=LOW, wave_high=HIGH) is None
+        assert (
+            stop_price(cfg(mode="pct", pct=10), avg_entry=None, cycle_low=LOW, wave_high=HIGH)
+            is None
+        )
 
     def test_퍼센트가_없으면_거부(self):
         with pytest.raises(ValueError, match="0보다 커야"):
@@ -58,17 +61,23 @@ class TestFib:
         assert a == b
 
     def test_비율을_고를_수_있다(self):
-        px = stop_price(cfg(mode="fib", fib_ratio=0.618), avg_entry=None, cycle_low=LOW, wave_high=HIGH)
+        px = stop_price(
+            cfg(mode="fib", fib_ratio=0.618), avg_entry=None, cycle_low=LOW, wave_high=HIGH
+        )
         assert px == round_to_tick(20_000 - 0.618 * 10_000, "down")
 
     def test_호가_이동(self):
         base = stop_price(cfg(mode="fib"), avg_entry=None, cycle_low=LOW, wave_high=HIGH)
-        below = stop_price(cfg(mode="fib", tick_offset=-2), avg_entry=None, cycle_low=LOW, wave_high=HIGH)
+        below = stop_price(
+            cfg(mode="fib", tick_offset=-2), avg_entry=None, cycle_low=LOW, wave_high=HIGH
+        )
         assert below is not None and base is not None and below < base
 
     def test_표준_비율이_아니면_거부(self):
         with pytest.raises(ValueError, match="쓸 수 없는 되돌림 비율"):
-            stop_price(cfg(mode="fib", fib_ratio=0.42), avg_entry=None, cycle_low=LOW, wave_high=HIGH)
+            stop_price(
+                cfg(mode="fib", fib_ratio=0.42), avg_entry=None, cycle_low=LOW, wave_high=HIGH
+            )
 
     def test_파동이_없으면_거부(self):
         with pytest.raises(ValueError, match="바닥과 꼭대기"):

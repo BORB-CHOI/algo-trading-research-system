@@ -4,7 +4,7 @@
 """
 
 import src
-from src import layer1_data, layer2_signals, layer3_strategy, layer4_execution
+from src import layer1_data, layer2_llm_reading, layer3_strategy, layer4_execution
 
 
 def test_version() -> None:
@@ -13,5 +13,5 @@ def test_version() -> None:
 
 def test_layers_importable() -> None:
     # 4개 레이어 패키지가 import 되는지 (구조 무결성).
-    for layer in (layer1_data, layer2_signals, layer3_strategy, layer4_execution):
+    for layer in (layer1_data, layer2_llm_reading, layer3_strategy, layer4_execution):
         assert layer.__doc__ is not None

@@ -45,7 +45,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from src.layer1_data.derived import drop_halted, load_adjusted
+from src.layer1_data.daily import daily_bars
+from src.layer1_data.derived import drop_halted
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer3_strategy import conditions as cond_registry
@@ -246,7 +247,7 @@ def run_walk_forward(
     cost: CostModel = DEFAULT_COST,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
     hist: pd.DataFrame | None = None,
-    loader: Callable[[str], pd.DataFrame | None] = load_adjusted,
+    loader: Callable[[str], pd.DataFrame | None] = daily_bars,
     progress: ProgressFn | None = None,
 ) -> dict:
     """전 기간·전 종목 백테스트. 반환은 `strategy_one` 과 같은 모양 + 매일 고른 흔적.

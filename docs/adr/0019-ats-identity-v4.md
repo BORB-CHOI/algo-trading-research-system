@@ -157,4 +157,4 @@ docs/archive/PROJECT_GUIDELINES-v3.8.md   원본 통째 보존
 
 **없다.** 조건·임계값·진입 방식·검사 구간은 오너가 화면에서 정한다(§0.4) — ADR이 들고 있을 것이 아니다.
 
-안 만든 기능은 PROJECT_GUIDELINES §12, 데이터에 없는 것은 §5.4 에 있다.
+안 만든 기능은 PROJECT_GUIDELINES §12, 데이터에 없는 것은 §5.5 에 있다.

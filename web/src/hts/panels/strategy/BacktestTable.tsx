@@ -132,6 +132,11 @@ function RoundRow(props: {
                         <th>구분</th>
                         <th className="num">가격</th>
                         <th className="num">비중</th>
+                        {/* 0 = 저가가 목표가에 딱 닿기만 했다 → 실전에선 못 샀을 수 있다.
+                            오너가 호가 오프셋을 조절하며 볼 재료(2026-08-16). */}
+                        <th className="num" title="저가가 목표가보다 몇 호가 더 내려갔나. 0이면 딱 닿기만 한 것이라 실전에서는 못 샀을 수 있습니다.">
+                          여유
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -145,6 +150,18 @@ function RoundRow(props: {
                             </td>
                             <td className="num">{fmtPrice(f.price)}</td>
                             <td className="num dim">{f.w.toFixed(0)}</td>
+                            <td
+                              className={`num ${f.slack_ticks === 0 ? 'down' : 'dim'}`}
+                              title={
+                                f.slack_ticks == null
+                                  ? ''
+                                  : f.slack_ticks === 0
+                                    ? '목표가에 딱 닿기만 했습니다 — 실전에서는 못 샀을 수 있습니다'
+                                    : `목표가보다 ${f.slack_ticks}호가 더 내려갔습니다`
+                              }
+                            >
+                              {f.slack_ticks == null ? '—' : `${f.slack_ticks}호가`}
+                            </td>
                           </tr>
                         ))}
                     </tbody>

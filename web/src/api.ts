@@ -445,7 +445,6 @@ export async function postSimulate(req: SimulateRequest): Promise<SimulateRespon
 // ── ④ 백테스팅 (POST /api/backtest) — 전략 1호 전수 검사 (ADR-0013·0014) ──
 
 export type BacktestRequest = StartParams & {
-  split: 'train' | 'validate' | 'test'
   conditions: ScreenCondition[]
   logic: 'and' | 'or'
   zz_depth: number
@@ -477,6 +476,11 @@ export type BacktestFill = {
   side: 'buy' | 'sell'
   price: number
   w: number // 비중(매수는 차수 비중, 매도는 청산한 비중)
+  stage?: number // 몇 차인지. 0 = 손절
+  /** 저가가 목표가보다 **몇 호가 더** 내려갔나 (매수만).
+   *  0 = 그날 저가가 목표가에 **딱 닿기만** 했다 → 실전에선 앞 물량에 막혀 못 샀을 수 있다.
+   *  체결 판정은 안 바꾼다 — 호가 오프셋 값을 조절하며 볼 재료다(오너 2026-08-16). */
+  slack_ticks?: number
 }
 
 export type BacktestOrder = {
@@ -512,7 +516,7 @@ export type BacktestRow = {
 }
 
 export type BacktestResponse = {
-  split: string // train | validate | test | all(전 구간)
+  split: string // 늘 'all'. 옛 보관함 기록이 이 이름을 가져서 남아 있는 칸
   split_start: string // 검사 구간 시작
   split_end: string // 검사 구간 끝
   base_date: string | null // 종목을 고른 날. 전 구간 검사는 매일 고르므로 null
@@ -792,4 +796,37 @@ export async function fetchSupportResistance(
     ...Object.fromEntries(Object.entries(SR_TOOL_DEFAULTS).map(([k, v]) => [k, String(v)])),
   })
   return getJson(`/api/support-resistance?${windowParams(p, w).toString()}`)
+}
+
+// ── 데이터가 어디까지 들어와 있나 (GET /api/data/freshness) ──
+//
+// 묵은 데이터는 **화면이 멀쩡히 그려진다**. 값이 비지도, 오류가 뜨지도 않는다.
+// 그래서 날짜만 띄우면 그냥 지나친다 — 서버가 등급(ok·warn·stale)을 같이 준다.
+
+export type DataSourceFreshness = {
+  key: string
+  label: string // 화면에 그대로 띄울 이름 ("차트 일봉")
+  why: string // 이게 묵으면 뭐가 잘못되나
+  last_date: string | null // 마지막으로 들어온 날. 받은 적 없으면 null
+  days_behind: number | null
+  grade: 'ok' | 'warn' | 'stale'
+  n_symbols?: number | null
+  checked_at?: string | null
+}
+
+export type DataFreshness = {
+  sources: DataSourceFreshness[]
+  worst: 'ok' | 'warn' | 'stale'
+  refreshing: boolean
+  finished_at: string | null
+  manual_command: string // 무거운 갱신은 사람이 돌린다 — 그 명령
+}
+
+export async function fetchFreshness(): Promise<DataFreshness> {
+  return getJson('/api/data/freshness')
+}
+
+/** 차트 일봉만 지금 최신으로 (marcap git pull → 캐시 비우기). 몇 초. */
+export async function refreshData(): Promise<{ started: boolean; message: string }> {
+  return postJson('/api/data/refresh', {})
 }

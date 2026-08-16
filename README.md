@@ -36,7 +36,7 @@ algo-trading-research-system/
 │   └── PROGRESS.md               ← 레이어별 작업 기록
 ├── src/
 │   ├── layer1_data/              데이터 수집·정제·저장          (가동 중)
-│   ├── layer2_signals/           신호 — LLM 자리                (2단계, 비어 있음)
+│   ├── layer2_llm_reading/           신호 — LLM 자리                (2단계, 비어 있음)
 │   ├── layer3_strategy/          선정·모양·진입·청산            (가동 중)
 │   └── layer4_execution/         백테스트·체결·실행             (가동 중)
 ├── api/ + web/                   케이스 검사기 웹 (ADR-0005·0008)

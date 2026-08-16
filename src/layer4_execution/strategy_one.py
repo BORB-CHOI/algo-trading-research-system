@@ -2,13 +2,13 @@
 
 ## 시간 구조 ("신호 계산 시점 < 체결 시점"을 구조로 강제)
 
-- **검사할 종목·기준일**: 조건검색식으로 split 시작 직전 거래일에 **1회** 선별
+- **검사할 종목·기준일**: 조건검색식으로 검사 구간 시작 직전 거래일에 **1회** 선별
   (`runner._select_universe` 재사용). 구간 도중 다시 안 고른다 — 그래서 "2020~2023 검사"라
   해도 실제로 본 건 2019-12-30 하루에 걸린 종목뿐이다(오너 지적 2026-08-09:
   "2019년부터 26년까지 백테스트 눌렀는데 24개라는 게 말이 되나"). 날짜별 재선별은 BORB-66.
 - **세팅(기준일 왼쪽만)**: 기준일까지 데이터로 파동 바닥·꼭대기·지지/저항선·분할
   목표가·손절선을 확정한다 — `/api/simulate` 와 같은 규칙(레벨에서 가장 가까운 선 ±호가).
-- **체결(기준일 오른쪽)**: 기준일 다음 거래일부터 split 종료일까지 봉을 날짜순으로
+- **체결(기준일 오른쪽)**: 기준일 다음 거래일부터 구간 종료일까지 봉을 날짜순으로
   지나가며 지정가를 채운다(체결 규칙은 `fills.walk` 와 동일 — ③ 시뮬레이션과 같음).
   매수 = Low ≤ 목표가, 매도 = High ≥ 목표가. **1차만 체결돼도 매도가 나가고**, 평단이
   내려가면 매도 목표가도 따라 내려간다(오너 지적 2026-08-09 — 전에는 마지막 매수
@@ -41,17 +41,18 @@ from collections.abc import Callable
 
 import pandas as pd
 
-from src.layer1_data.derived import drop_halted, load_adjusted
+from src.layer1_data.daily import daily_bars
+from src.layer1_data.derived import drop_halted
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy
 from src.layer3_strategy.base_breakout import refine_start
 from src.layer3_strategy.entry_levels import SRTarget, buy_targets_sr
 from src.layer3_strategy.fibonacci import fib_zones_for, wave_start_of
 from src.layer3_strategy.market_structure import wave_series
 from src.layer3_strategy.support_resistance import SRLevel
-from src.layer3_strategy.zigzag import WaveLow, zigzag_params_from
-from src.layer4_execution.backtest import SPLITS, Trade, slice_split
-from src.layer4_execution.costs import DEFAULT_COST, CostModel
 from src.layer3_strategy.tick_size import tick_size
+from src.layer3_strategy.zigzag import WaveLow, zigzag_params_from
+from src.layer4_execution.backtest import Trade, resolve_period
+from src.layer4_execution.costs import DEFAULT_COST, CostModel
 from src.layer4_execution.fills import (
     SELL_BASES,
     _basis_of,
@@ -60,8 +61,6 @@ from src.layer4_execution.fills import (
 )
 from src.layer4_execution.runner import _aggregate, _select_universe
 from src.layer4_execution.stops import stop_price
-
-_EMPTY_DAILY = pd.DataFrame({"Date": pd.Series(dtype="datetime64[ns]")})
 
 
 def _plan_buys(
@@ -160,9 +159,7 @@ def _run_symbol(
     # 그 값 그대로 걸고 파동이 바뀌어도 옮기지 않는다.
     buy_ov = [b.get("price_override") for b in buys]
     buy_px: list[float | None] = [
-        float(buy_ov[k])
-        if buy_ov[k]
-        else (float(targets[k].price) if k < len(targets) else None)
+        float(buy_ov[k]) if buy_ov[k] else (float(targets[k].price) if k < len(targets) else None)
         for k in range(len(buys))
     ]
     buy_done = [False] * len(buys)
@@ -242,15 +239,17 @@ def _run_symbol(
             buy_done[k] = True
             hit = True
             filled.append((float(px), weights[k]))
-            fills.append({
-                "date": day,
-                "price": float(px),
-                "w": weights[k],
-                "stage": k + 1,
-                # 얼마나 아슬아슬했나 — 0 이면 딱 닿기만 한 것(실제로는 못 살 수 있다).
-                # 체결 판정은 안 바꾼다. 호가 오프셋을 조절하며 볼 재료다.
-                "slack_ticks": near_miss_ticks(low, float(px), float(tick_size(float(px)))),
-            })
+            fills.append(
+                {
+                    "date": day,
+                    "price": float(px),
+                    "w": weights[k],
+                    "stage": k + 1,
+                    # 얼마나 아슬아슬했나 — 0 이면 딱 닿기만 한 것(실제로는 못 살 수 있다).
+                    # 체결 판정은 안 바꾼다. 호가 오프셋을 조절하며 볼 재료다.
+                    "slack_ticks": near_miss_ticks(low, float(px), float(tick_size(float(px)))),
+                }
+            )
             bought += weights[k]
             held += weights[k]
         if hit:  # 평단이 바뀌었다 — 매도·손절 주문을 정정한다(다음 봉부터 적용)
@@ -402,8 +401,9 @@ def _run_symbol(
 def run_strategy_one(
     conditions: list[dict],
     logic: str,
-    split: str,
     *,
+    start: str | None = None,
+    end: str | None = None,
     zz: dict,
     sr: dict,
     buy: list[dict],
@@ -415,24 +415,23 @@ def run_strategy_one(
     stop: dict | None = None,
     cost: CostModel = DEFAULT_COST,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
-    i_know_test_is_once: bool = False,
     hist: pd.DataFrame | None = None,
-    loader: Callable[[str], pd.DataFrame | None] = load_adjusted,
+    loader: Callable[[str], pd.DataFrame | None] = daily_bars,
 ) -> dict:
     """조건검색식 유니버스 전 종목에 전략 1호를 걸어 집계한다 (④ 백테스팅 탭의 본체).
 
-    반환: {split, base_date, universe(선별 수), results(체결 종목 행, 순수익률 내림차순),
-    no_fill(매수 미체결 수), skipped({code: 사유}), metrics(runner._aggregate 정의)}.
-    Test split 은 i_know_test_is_once=True 없이는 거부한다(§4.1 — 가드 정본 slice_split).
+    검사 구간은 start/end 로 받는다 — **화면에서 고른 날짜가 그대로 온다**(ADR-0019).
+    안 주면 2007-01-01 ~ 오늘. 코드가 구간을 나누거나 막지 않는다.
+
+    반환: {split, split_start, split_end, base_date, universe(선별 수),
+    results(체결 종목 행, 순수익률 내림차순), no_fill(매수 미체결 수), skipped({code: 사유}),
+    metrics(runner._aggregate 정의)}.
     """
-    if split not in SPLITS:
-        raise ValueError(f"알 수 없는 split: {split!r} — 사용 가능: {list(SPLITS)}")
-    slice_split(_EMPTY_DAILY, split, i_know_test_is_once=i_know_test_is_once)
     buys = [b for b in buy if 0 < b.get("ratio", 0) < 1]
     if not buys:
         raise ValueError("분할 매수 차수가 없습니다 — 되돌림 비율(0~1)을 1개 이상 주세요.")
 
-    split_start, split_end = (pd.Timestamp(d) for d in SPLITS[split])
+    split_start, split_end = resolve_period(start, end)
     universe, base_date, names = _select_universe(conditions, logic, split_start, hist, exclusions)
 
     p = {
@@ -483,7 +482,8 @@ def run_strategy_one(
     results.sort(key=lambda r: r["net_return"], reverse=True)
     no_fill_rows.sort(key=lambda r: r["code"])
     return {
-        "split": split,
+        # 'split' 이름은 옛 보관함 기록(run_store)이 그 열을 가져서 유지한다. 값은 늘 '전 기간'.
+        "split": "all",
         "split_start": split_start.strftime("%Y-%m-%d"),
         "split_end": split_end.strftime("%Y-%m-%d"),
         "base_date": base_date.strftime("%Y-%m-%d"),
