@@ -4,9 +4,16 @@
       .venv/Scripts/python scripts/update_data.py --minutes  # 분봉·신용잔고까지 강제
 
 무엇을 갱신하나 (요일별):
-  평일  : 나무 일·주·월봉(전 종목, NXT 상장은 통합·NXT까지) + KIS 수급(상장 종목) + DART 공시(이번 달)
-  토요일: 위 + 분봉 9종 + KIS 신용잔고  (1분봉 보관이 약 6주라 주 1회면 안 잃는다)
+  평일  : 나무 일·주봉(전 종목, NXT 상장은 통합·NXT까지) + KIS 수급 + DART 공시(이번 달)
+  토요일: 위 + 월봉 + 분봉 9종 + KIS 신용잔고  (1분봉 보관이 약 6주라 주 1회면 안 잃는다)
   일요일: 아무것도 안 함 (장이 없던 날)
+
+호출을 아끼는 방법 (2026-08-17 최적화 — 전에는 헛돌아 3.3시간):
+  1. 시장 마지막 거래일을 **1회 호출**로 먼저 확인. 저장된 날짜가 그와 같으면 그 파일은 건너뛴다.
+     주말·휴장 다음이면 이 한 번으로 전 종목이 걸러진다.
+  2. 종목 단위 **병렬**(수집기와 같은 줄기·속도). 순차는 왕복 지연 때문에 초당 1.4건뿐이다.
+  3. 월봉은 토요일만. 진행 중인 달의 봉은 파일만 보고 최신인지 알 수 없어 매일 헛호출이 된다
+     (화면은 일봉 꼬리 합성으로 이미 정확하다 — api.main.period_candles).
 
 - 마지막으로 저장된 날짜 이후 것만 받아 이어붙인다. PC가 며칠 꺼져 있었어도
   그 공백만큼 뒤로 넘겨 받아 따라잡는다.
@@ -22,7 +29,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -43,8 +52,15 @@ from src.layer1_data import freshness  # noqa: E402
 LOCK_PATH = ROOT / "data" / "derived" / "_update.lock"
 LOG_PATH = ROOT / "data" / "derived" / "_update_log.jsonl"
 
-DAILY_INTERVALS = [i for i in bars.INTERVALS if i[0] in ("day", "week", "month")]
+# 평일에 만지는 주기. 월봉은 뺀다 — 진행 중인 달의 봉은 "최신인지"를 파일만 보고 알 수 없어
+# 매일 전 종목을 헛호출하게 된다(5,510호출 ≈ 16분). 화면은 일봉 꼬리 합성으로 이미 정확하고
+# (api.main.period_candles), 수집본은 토요일에 맞춰 주면 충분하다.
+WEEKDAY_INTERVALS = [i for i in bars.INTERVALS if i[0] in ("day", "week")]
+WEEKEND_INTERVALS = [i for i in bars.INTERVALS if i[0] == "month"]
 MINUTE_INTERVALS = [i for i in bars.INTERVALS if i[0].startswith("min")]
+
+# 시장의 마지막 거래일을 판정할 기준 종목. 매일 거래되는 대형주면 무엇이든 된다.
+REFERENCE_CODE = "005930"
 
 
 def log_line(**fields) -> None:
@@ -70,6 +86,34 @@ def last_date_of(path: Path, date_col: str) -> str:
     return "" if len(col) == 0 else str(max(col.to_pylist()))
 
 
+def market_last_trading_day() -> str:
+    """시장의 마지막 거래일 — 기준 종목 일봉 **1회 호출**로 알아낸다.
+
+    전 종목을 하나씩 물어보기 전에 "받을 게 있기는 한가"를 먼저 본다.
+    주말·휴장 다음 갱신이면 이 한 번으로 봉 갱신 전체를 건너뛴다.
+
+    실측 2026-08-17: 이 판정이 없어 마지막 거래일(8/14) 데이터를 이미 다 갖고도
+    16,530개 조합을 전부 호출했다 — 순차 초당 1.4건이라 3.3시간이 그냥 날아간다.
+    """
+    try:
+        rows = bars.call_page("KRX", REFERENCE_CODE, "1", None, datetime.now().strftime("%Y%m%d"))
+    except bars.NhplugError:
+        return ""  # 못 물어봤으면 판정하지 않는다 — 평소대로 전부 확인한다
+    return max((str(r["bsop_date"]) for r in rows if r.get("bsop_date")), default="")
+
+
+def is_fresh(folder: str, since: str, last_day: str) -> bool:
+    """이 파일이 이미 최신인가 — API 호출 없이 저장된 날짜만으로 판단.
+
+    월봉은 `YYYYMM` 이라 그 달 마지막 거래일까지 반영됐는지 알 수 없다 → 항상 False.
+    일·주·분봉의 `bsop_date` 는 실제 거래일이라 마지막 거래일과 바로 견줄 수 있다
+    (주봉 날짜 = 그 주 마지막 거래일).
+    """
+    if not since or not last_day or folder == "month":
+        return False
+    return since >= last_day
+
+
 def merge_save(path: Path, old: pd.DataFrame | None, new: pd.DataFrame, keys: list[str]) -> int:
     """새 조각을 기존 파일에 이어붙인다. 같은 봉은 새 값으로 덮는다. 늘어난 행 수 반환."""
     if new.empty:
@@ -88,33 +132,57 @@ def merge_save(path: Path, old: pd.DataFrame | None, new: pd.DataFrame, keys: li
     return max(grown, 0)
 
 
-def update_bars(intervals: list[tuple[str, str, str | None]]) -> dict:
-    """나무 봉 증분 — 저장된 마지막 날짜 이후만 받아 이어붙인다. 파일이 없으면 전체 수집."""
+def update_bars(intervals: list[tuple[str, str, str | None]], last_day: str) -> dict:
+    """나무 봉 증분 — 저장된 마지막 날짜 이후만 받아 이어붙인다. 파일이 없으면 전체 수집.
+
+    종목 단위로 병렬 처리한다(수집기와 같은 줄기 수·같은 속도 조절기).
+    순차로 돌면 호출 왕복 730ms 가 그대로 쌓여 초당 1.4건밖에 못 낸다 — 실측 2026-08-17.
+    """
     master = bars.load_master("m_new_stock")
-    added = 0
-    errors = 0
-    for r in master.itertuples():
-        code = str(r.sCode)
-        markets = ["KRX"] + (["UNT", "NXT"] if str(r.nxt_yn) == "Y" else [])
+    jobs = [
+        (str(r.sCode), ["KRX"] + (["UNT", "NXT"] if str(r.nxt_yn) == "Y" else []))
+        for r in master.itertuples()
+    ]
+    totals = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
+    lock = threading.Lock()
+
+    def work(job: tuple[str, list[str]]) -> None:
+        code, markets = job
+        added = errors = skipped = called = 0
         for market in markets:
             for folder, gubun, xtick in intervals:
                 path = bars.OUT_DIR / market.lower() / folder / f"{code}.parquet"
-                # 먼저 날짜만 본다. 받을 게 없으면 파일을 열지도, 호출하지도 않는다.
+                # 먼저 날짜만 본다. 최신이면 파일을 열지도, 호출하지도 않는다.
                 since = last_date_of(path, "bsop_date")
-                if since >= datetime.now().strftime("%Y%m%d"):
-                    continue  # 오늘 봉까지 이미 있다 — 호출 낭비 안 한다
+                if is_fresh(folder, since, last_day):
+                    skipped += 1
+                    continue
                 old = pd.read_parquet(path) if path.exists() else None
                 try:
                     if not since:
                         new = bars.collect_one(market, code, gubun, xtick)  # 처음 = 전체
                     else:
                         new = _bars_since(market, code, gubun, xtick, since)
+                    called += 1
                 except bars.NhplugError:
                     errors += 1
                     continue
                 keys = [c for c in ("bsop_date", "bsop_time") if c in new.columns] or ["bsop_date"]
                 added += merge_save(path, old, new, keys)
-    return {"added_rows": added, "errors": errors}
+        with lock:
+            totals["added"] += added
+            totals["errors"] += errors
+            totals["skipped"] += skipped
+            totals["called"] += called
+
+    with ThreadPoolExecutor(max_workers=bars.WORKERS) as pool:
+        list(pool.map(work, jobs))
+    return {
+        "added_rows": totals["added"],
+        "errors": totals["errors"],
+        "skipped": totals["skipped"],
+        "called": totals["called"],
+    }
 
 
 def _bars_since(market: str, code: str, gubun: str, xtick: str | None, since: str) -> pd.DataFrame:
@@ -136,30 +204,52 @@ def _bars_since(market: str, code: str, gubun: str, xtick: str | None, since: st
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def update_kis(module, out_dir: Path, date_col: str, label: str) -> dict:
-    """KIS 일별 데이터(수급·신용잔고) 증분 — 상장 종목만, 저장된 마지막 날짜 이후를 받는다."""
+KIS_UPDATE_WORKERS = 3  # 백필과 같은 줄기 수. 갱신은 하루치라 더 늘릴 이유가 없다.
+
+
+def update_kis(module, out_dir: Path, date_col: str, label: str, last_day: str) -> dict:
+    """KIS 일별 데이터(수급·신용잔고) 증분 — 상장 종목만, 저장된 마지막 날짜 이후를 받는다.
+
+    종목 단위 병렬. 줄기마다 클라이언트를 따로 쓴다(`_thread_client`).
+    """
     master = bars.load_master("m_new_stock")
-    listed = {str(r.sCode) for r in master.itertuples()}
     today = datetime.now().strftime("%Y%m%d")
-    added = 0
-    errors = 0
-    for code in sorted(listed):
+    codes = sorted({str(r.sCode) for r in master.itertuples()})
+    totals = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
+    lock = threading.Lock()
+
+    def work(code: str) -> None:
         path = out_dir / f"{code}.parquet"
         since = last_date_of(path, date_col)
         if not since:
-            continue  # 백필이 아직 안 만든 종목 — 백필 몫이다
-        if since >= (datetime.now() - timedelta(days=1)).strftime("%Y%m%d"):
-            continue  # 이미 최신 — 파일을 열지 않는다
+            return  # 백필이 아직 안 만든 종목 — 백필 몫이다
+        if last_day and since >= last_day:
+            with lock:
+                totals["skipped"] += 1
+            return  # 마지막 거래일까지 이미 있다 — 파일도 안 열고 호출도 안 한다
         old = pd.read_parquet(path)
         try:
             new = module.collect_code(supply._thread_client(), code, since, today)
         except (module.KisApiError, OSError):
-            errors += 1
+            with lock:
+                totals["errors"] += 1
             time.sleep(5)
             supply._LOCAL.client = None
-            continue
-        added += merge_save(path, old, new, [date_col])
-    return {"label": label, "added_rows": added, "errors": errors}
+            return
+        grown = merge_save(path, old, new, [date_col])
+        with lock:
+            totals["added"] += grown
+            totals["called"] += 1
+
+    with ThreadPoolExecutor(max_workers=KIS_UPDATE_WORKERS) as pool:
+        list(pool.map(work, codes))
+    return {
+        "label": label,
+        "added_rows": totals["added"],
+        "errors": totals["errors"],
+        "skipped": totals["skipped"],
+        "called": totals["called"],
+    }
 
 
 def update_disclosures() -> dict:
@@ -220,18 +310,25 @@ def main() -> int:
     do_minutes = force_minutes or weekday == 5  # 토요일
     summary: dict = {"minutes_included": do_minutes}
     try:
-        print("① 나무 일·주·월봉 증분...", flush=True)
-        summary["bars_daily"] = update_bars(DAILY_INTERVALS)
+        last_day = market_last_trading_day()
+        print(f"⓪ 시장 마지막 거래일: {last_day or '(판정 실패 — 전부 확인한다)'}", flush=True)
+        summary["last_trading_day"] = last_day
+
+        intervals = WEEKDAY_INTERVALS + (WEEKEND_INTERVALS if do_minutes else [])
+        print(f"① 나무 봉 증분 ({', '.join(i[0] for i in intervals)})...", flush=True)
+        summary["bars_daily"] = update_bars(intervals, last_day)
         if do_minutes:
             print("② 나무 분봉 증분...", flush=True)
-            summary["bars_minutes"] = update_bars(MINUTE_INTERVALS)
+            summary["bars_minutes"] = update_bars(MINUTE_INTERVALS, last_day)
         print("③ KIS 수급 증분...", flush=True)
-        summary["supply"] = update_kis(supply, supply.OUT_DIR, "stck_bsop_date", "수급")
+        summary["supply"] = update_kis(supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day)
         print("③-2 DART 공시 증분...", flush=True)
         summary["disclosures"] = update_disclosures()
         if do_minutes:
             print("④ KIS 신용잔고 증분...", flush=True)
-            summary["credit"] = update_kis(credit, credit.OUT_DIR, "deal_date", "신용잔고")
+            summary["credit"] = update_kis(
+                credit, credit.OUT_DIR, "deal_date", "신용잔고", last_day
+            )
         print("⑤ 워터마크 갱신...", flush=True)
         summary["freshness"] = freshness.refresh_marks()
         summary["ok"] = True
