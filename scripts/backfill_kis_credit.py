@@ -43,7 +43,7 @@ CREDIT_TR = "FHPST04760000"
 # 나무 PLUG 에는 종목별 신용잔고 조회 API 자체가 없다(신용 매수/매도 주문만) — 대체 창구 없음.
 FLOOR_DATE = "20070712"
 MAX_PAGES_PER_CODE = 300
-WORKERS = 3
+WORKERS = 5  # 신용잔고는 응답이 가벼워 3줄기에서 거절 0.03%뿐 — 오너 승인(2026-08-16)으로 상향
 STATE_LOCK = threading.Lock()
 
 
