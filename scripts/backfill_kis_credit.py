@@ -4,7 +4,9 @@
       .venv/Scripts/python scripts/backfill_kis_credit.py 005930     # 한 종목만
 
 - 개인 신용매수 잔고의 일별 추이 — 레버리지 쏠림·반대매매 압력 신호용 (오너 선택 2026-08-15).
-- 실측(2026-08-15): 30행/호출, 날짜를 뒤로 밀며 페이징. 2010년 요청 응답, 2005년 이전 빈 응답.
+- 실측(2026-08-16): 30행/호출, 날짜를 뒤로 밀며 페이징. **과거 바닥 = 2007-07-12**
+  (그 이전은 어느 종목이든 빈 응답. KIS 보관 한계이고 나무에는 이 API 자체가 없다).
+  검사 구간 시작(2007-01)보다 반년 늦다 — 2007 상반기와 그 이전은 신용잔고 없이 봐야 한다.
 - 저장: data/derived/credit/<종목코드>.parquet. 체크포인트 _state.json 이어받기.
 - ⚠️ 수급 백필(backfill_kis_supply.py)과 같은 KIS 한도를 쓴다 — **수급이 끝난 뒤에 돌린다.**
 - 유니버스·클라이언트·병렬 골격은 수급 백필 것을 그대로 가져다 쓴다.
@@ -36,7 +38,10 @@ STATE_PATH = OUT_DIR / "_state.json"
 CREDIT_PATH = "/uapi/domestic-stock/v1/quotations/daily-credit-balance"
 CREDIT_TR = "FHPST04760000"
 
-FLOOR_DATE = "20050101"  # 실측: 2010 응답 · 2005 빈 응답 — 이보다 과거는 요청하지 않는다
+# 실측 바닥 = 2007-07-12 (2026-08-16, 삼성전자·SK하이닉스 동일).
+# 20070801 요청 → 12행(20070712~20070730), 20070713 요청 → 빈 응답. 그 이전은 KIS 가 안 준다.
+# 나무 PLUG 에는 종목별 신용잔고 조회 API 자체가 없다(신용 매수/매도 주문만) — 대체 창구 없음.
+FLOOR_DATE = "20070712"
 MAX_PAGES_PER_CODE = 300
 WORKERS = 3
 STATE_LOCK = threading.Lock()
