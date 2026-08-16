@@ -1,8 +1,10 @@
 """멀티종목 백테스트 러너 (layer4 runner.run_universe) — 합성 데이터 검증.
 
-전략 카탈로그는 case_overlay 가 병렬 개편 중이므로 카탈로그 접점(runner._resolve_strategy)을
-monkeypatch 로 대체한다 — "key 로 찾은 신호 함수에 params 를 키워드 인자로 넘긴다"는
-인터페이스만 검증하고, 실제 카탈로그의 key 이름에는 의존하지 않는다.
+전략 카탈로그 접점(runner._resolve_strategy)을 monkeypatch 로 대체해, 실제 카탈로그의
+key 이름에 의존하지 않고 배관만 검증한다. 신호 함수 규약은 **fn(df, params: dict)** —
+카탈로그(case_overlay.Strategy.signal_fn)와 API(/api/signals)가 쓰는 것과 같다.
+(2026-08-17 정정: 예전엔 params 를 키워드로 펼쳐 넘긴다고 적혀 있었는데, 카탈로그 개편 뒤
+실제 규약은 dict 한 개다. 러너가 낡은 규약대로 부르고 있어 run_universe 가 죽어 있었다.)
 """
 
 from __future__ import annotations
@@ -60,11 +62,11 @@ def make_daily(code: str, start: str, opens: list[float], amount: float = 1e9) -
     )
 
 
-def fixed_dates_strategy(df: pd.DataFrame, buy: str, sell: str) -> pd.DataFrame:
+def fixed_dates_strategy(df: pd.DataFrame, p: dict) -> pd.DataFrame:
     """지정한 날짜에 buy/sell 신호를 내는 테스트 전략 — params 전달 경로 검증용."""
     rows = [
         {"Date": ts, "side": side}
-        for d, side in ((buy, "buy"), (sell, "sell"))
+        for d, side in ((p["buy"], "buy"), (p["sell"], "sell"))
         for ts in [pd.Timestamp(d)]
         if (df["Date"] == ts).any()
     ]

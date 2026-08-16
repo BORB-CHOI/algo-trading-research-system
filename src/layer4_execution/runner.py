@@ -42,7 +42,7 @@ from src.layer4_execution.slippage import SqrtImpactSlippage
 
 # 전략 신호 함수 시그니처(카탈로그 인터페이스): (일봉 df, **params) → 신호 행 DataFrame.
 # 신호 행: Date + side('buy'|'sell'). df 의 실제 거래일에만 신호를 낸다.
-StrategyFn = Callable[..., pd.DataFrame]
+StrategyFn = Callable[[pd.DataFrame, dict], pd.DataFrame]
 
 
 def _resolve_strategy(key: str) -> StrategyFn:
@@ -54,9 +54,14 @@ def _resolve_strategy(key: str) -> StrategyFn:
     """
     from src.layer3_strategy.case_overlay import STRATEGIES  # 지연 임포트 — 개편 대비 격리
 
-    fn = STRATEGIES.get(key)
-    if fn is None:
+    entry = STRATEGIES.get(key)
+    if entry is None:
         raise ValueError(f"전략 카탈로그에 없는 key: {key!r} (등록된 전략: {sorted(STRATEGIES)})")
+    # 카탈로그 개편(ADR-0009) 뒤로 값이 Strategy(메타+함수) 객체다. 예전처럼 함수를 그대로
+    # 돌려주면 `'Strategy' object is not callable` 로 죽는다(실측 2026-08-17).
+    fn = getattr(entry, "signal_fn", entry)
+    if fn is None:
+        raise ValueError(f"{key!r} 는 신호를 만들지 않는 전략이다(오버레이 전용).")
     return fn
 
 
@@ -265,7 +270,8 @@ def run_universe(
             skipped[code] = "구간 내 거래일 부족"
             continue
         # split 이전에 선 buy 가 아직 유효하면 구간 첫날 신호로 이월된다(보유 중 진입).
-        position = signals_to_position(df, strategy_fn(df, **params)).loc[sliced.index]
+        # 카탈로그 신호 함수의 규약은 fn(df, params) 다 — 키워드로 펼치면 안 된다.
+        position = signals_to_position(df, strategy_fn(df, params)).loc[sliced.index]
         result = run_symbol(
             sliced, position, cost=cost, slippage=slippage, order_notional=order_notional
         )

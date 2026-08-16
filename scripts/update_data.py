@@ -4,8 +4,8 @@
       .venv/Scripts/python scripts/update_data.py --minutes  # 분봉·신용잔고까지 강제
 
 무엇을 갱신하나 (요일별):
-  평일  : 나무 일·주봉(전 종목, NXT 상장은 통합·NXT까지) + KIS 수급 + DART 공시(이번 달)
-  토요일: 위 + 월봉 + 분봉 9종 + KIS 신용잔고  (1분봉 보관이 약 6주라 주 1회면 안 잃는다)
+  평일  : 나무 일·주·월봉(전 종목, NXT 상장은 통합·NXT까지) + KIS 수급 + DART 공시(이번 달)
+  토요일: 위 + 분봉 9종 + KIS 신용잔고  (1분봉 보관이 약 6주라 주 1회면 안 잃는다)
   일요일: 아무것도 안 함 (장이 없던 날)
 
 ⚠️ **KIS 수급은 조회 가능 시각이 있다** — `OPSQ2001 TIME LIMIT 00:00 ~ 15:40`.
@@ -16,8 +16,8 @@
   1. 시장 마지막 거래일을 **1회 호출**로 먼저 확인. 저장된 날짜가 그와 같으면 그 파일은 건너뛴다.
      주말·휴장 다음이면 이 한 번으로 전 종목이 걸러진다.
   2. 종목 단위 **병렬**(수집기와 같은 줄기·속도). 순차는 왕복 지연 때문에 초당 1.4건뿐이다.
-  3. 월봉은 토요일만. 진행 중인 달의 봉은 파일만 보고 최신인지 알 수 없어 매일 헛호출이 된다
-     (화면은 일봉 꼬리 합성으로 이미 정확하다 — api.main.period_candles).
+  3. 월봉은 `YYYYMM` 이라 관문으로 못 거른다 — 매일 받는다(오너 결정 2026-08-17).
+     수집본을 뒤처지게 두는 건 최적화가 아니라 손실이다.
 
 - 마지막으로 저장된 날짜 이후 것만 받아 이어붙인다. PC가 며칠 꺼져 있었어도
   그 공백만큼 뒤로 넘겨 받아 따라잡는다.
@@ -49,6 +49,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import backfill_dart_disclosures as disclosures  # noqa: E402
 import backfill_kis_credit as credit  # noqa: E402
 import backfill_kis_supply as supply  # noqa: E402
+import collect_kis_members as members  # noqa: E402
 import collect_namuh_bars as bars  # noqa: E402
 
 from src.layer1_data import freshness  # noqa: E402
@@ -56,11 +57,10 @@ from src.layer1_data import freshness  # noqa: E402
 LOCK_PATH = ROOT / "data" / "derived" / "_update.lock"
 LOG_PATH = ROOT / "data" / "derived" / "_update_log.jsonl"
 
-# 평일에 만지는 주기. 월봉은 뺀다 — 진행 중인 달의 봉은 "최신인지"를 파일만 보고 알 수 없어
-# 매일 전 종목을 헛호출하게 된다(5,510호출 ≈ 16분). 화면은 일봉 꼬리 합성으로 이미 정확하고
-# (api.main.period_candles), 수집본은 토요일에 맞춰 주면 충분하다.
-WEEKDAY_INTERVALS = [i for i in bars.INTERVALS if i[0] in ("day", "week")]
-WEEKEND_INTERVALS = [i for i in bars.INTERVALS if i[0] == "month"]
+# 일·주·월봉은 **매일** 맞춘다 (오너 결정 2026-08-17).
+# 한때 월봉을 토요일로 미뤘다가 되돌렸다 — 화면이 합성으로 가려주더라도 수집본 자체가
+# 뒤처지는 건 최적화가 아니라 손실이다. 호출을 아끼는 건 관문(마지막 거래일)으로 한다.
+DAILY_INTERVALS = [i for i in bars.INTERVALS if i[0] in ("day", "week", "month")]
 MINUTE_INTERVALS = [i for i in bars.INTERVALS if i[0].startswith("min")]
 
 # 시장의 마지막 거래일을 판정할 기준 종목. 매일 거래되는 대형주면 무엇이든 된다.
@@ -339,7 +339,7 @@ def main() -> int:
         print(f"⓪ 시장 마지막 거래일: {last_day or '(판정 실패 — 전부 확인한다)'}", flush=True)
         summary["last_trading_day"] = last_day
 
-        intervals = WEEKDAY_INTERVALS + (WEEKEND_INTERVALS if do_minutes else [])
+        intervals = DAILY_INTERVALS
         print(f"① 나무 봉 증분 ({', '.join(i[0] for i in intervals)})...", flush=True)
         summary["bars_daily"] = update_bars(intervals, last_day)
         if do_minutes:
@@ -347,7 +347,9 @@ def main() -> int:
             summary["bars_minutes"] = update_bars(MINUTE_INTERVALS, last_day)
         print("③ KIS 수급 증분...", flush=True)
         summary["supply"] = update_kis(supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day)
-        print("③-2 DART 공시 증분...", flush=True)
+        print("③-2 거래원 당일 상위5 (전 종목)...", flush=True)
+        summary["members"] = {"rows": members.snapshot_all()}
+        print("③-3 DART 공시 증분...", flush=True)
         summary["disclosures"] = update_disclosures()
         if do_minutes:
             print("④ KIS 신용잔고 증분...", flush=True)
