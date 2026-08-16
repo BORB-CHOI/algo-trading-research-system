@@ -8,6 +8,10 @@
   토요일: 위 + 월봉 + 분봉 9종 + KIS 신용잔고  (1분봉 보관이 약 6주라 주 1회면 안 잃는다)
   일요일: 아무것도 안 함 (장이 없던 날)
 
+⚠️ **KIS 수급은 조회 가능 시각이 있다** — `OPSQ2001 TIME LIMIT 00:00 ~ 15:40`.
+   장 마감 뒤(15:40 이후)에 돌려야 받아진다. 그래서 정기 갱신은 저녁으로 잡혀 있다.
+   시간에 걸리면 첫 종목에서 멈추고 요약에 `blocked` 로 남긴다(헛호출 금지).
+
 호출을 아끼는 방법 (2026-08-17 최적화 — 전에는 헛돌아 3.3시간):
   1. 시장 마지막 거래일을 **1회 호출**로 먼저 확인. 저장된 날짜가 그와 같으면 그 파일은 건너뛴다.
      주말·휴장 다음이면 이 한 번으로 전 종목이 걸러진다.
@@ -215,10 +219,14 @@ def update_kis(module, out_dir: Path, date_col: str, label: str, last_day: str) 
     master = bars.load_master("m_new_stock")
     today = datetime.now().strftime("%Y%m%d")
     codes = sorted({str(r.sCode) for r in master.itertuples()})
-    totals = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
+    totals: dict = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
     lock = threading.Lock()
 
+    stop = threading.Event()  # 시간 제한을 만나면 전 종목 헛호출을 멈춘다
+
     def work(code: str) -> None:
+        if stop.is_set():
+            return
         path = out_dir / f"{code}.parquet"
         since = last_date_of(path, date_col)
         if not since:
@@ -230,7 +238,21 @@ def update_kis(module, out_dir: Path, date_col: str, label: str, last_day: str) 
         old = pd.read_parquet(path)
         try:
             new = module.collect_code(supply._thread_client(), code, since, today)
-        except (module.KisApiError, OSError):
+        except module.KisApiError as e:
+            # KIS 는 조회 가능 시각이 정해진 TR 이 있다(수급: OPSQ2001 "TIME LIMIT 00:00 ~ 15:40").
+            # 시간 문제면 어느 종목을 불러도 똑같이 막히므로 첫 건에서 통째로 멈춘다 —
+            # 안 그러면 4,000번을 실패하며 헛돈다(실측 2026-08-17 새벽).
+            if "TIME LIMIT" in str(e) or "OPSQ2001" in str(e):
+                with lock:
+                    totals["blocked"] = str(e).split(":", 1)[-1].strip()
+                stop.set()
+                return
+            with lock:
+                totals["errors"] += 1
+            time.sleep(5)
+            supply._LOCAL.client = None
+            return
+        except OSError:
             with lock:
                 totals["errors"] += 1
             time.sleep(5)
@@ -243,13 +265,16 @@ def update_kis(module, out_dir: Path, date_col: str, label: str, last_day: str) 
 
     with ThreadPoolExecutor(max_workers=KIS_UPDATE_WORKERS) as pool:
         list(pool.map(work, codes))
-    return {
+    out = {
         "label": label,
         "added_rows": totals["added"],
         "errors": totals["errors"],
         "skipped": totals["skipped"],
         "called": totals["called"],
     }
+    if totals.get("blocked"):
+        out["blocked"] = totals["blocked"]  # 조회 가능 시각이 아니었다 — 다음 회차에 받는다
+    return out
 
 
 def update_disclosures() -> dict:
