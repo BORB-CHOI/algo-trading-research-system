@@ -1062,7 +1062,10 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       for (const d of list) if (d.timestamp >= a && d.timestamp <= b) n++
       if (n <= 0) return
       // 양옆 여유 — 매매 앞뒤 흐름이 보여야 판단이 된다. 하루짜리 매매도 최소 60봉.
-      fitBars(chart, el, Math.max(60, Math.ceil(n * 1.4) + 20))
+      // **받아온 봉 수를 넘지 않게 자른다** — 넘으면 왼쪽에 빈 칸이 생겨 "캔들이 끊겼다"로
+      // 보인다(오너 지적 2026-08-18).
+      const want = Math.max(60, Math.ceil(n * 1.4) + 20)
+      fitBars(chart, el, Math.min(want, list.length))
       await this.showUntil(to)
     },
     async showUntil(date) {
@@ -1360,6 +1363,27 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
               지우기
             </button>
           </span>
+          {/* 겹치기 칩 — 도구 막대가 있으면 **여기**에 둔다. 차트 위에 띄우면 캔들을
+              가린다(오너 지적 2026-08-18). 막대를 숨긴 화면에서는 아래 떠 있는 쪽을 쓴다. */}
+          {props.layerToggles && (
+            <span className="grp" title="차트에 얹은 선을 하나씩 켜고 끈다">
+              {OVERLAY_LAYERS.map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  className={layerVis[k] ? 'on' : ''}
+                  onClick={() => {
+                    const next = { ...layerVis, [k]: !layerVis[k] }
+                    setLayerVis(next)
+                    overlayRef.current?.setVisibility(next)
+                    repaint()
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </span>
+          )}
           {busy && <span className="dim">불러오는 중…</span>}
         </div>
       )}
@@ -1368,7 +1392,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
             각각 오버레이 키고 끌수 있는 버튼 추가해"). 선이 여러 겹 깔리면 캔들이 안
             보이는데, 사이드 패널이 없는 화면(백테스트 결과 차트)에서는 끌 방법이
             아예 없었다. 차트가 스스로 들고 있어야 어느 화면에 놓아도 따라온다. */}
-        {props.layerToggles && (
+        {props.layerToggles && props.hideToolbar && (
           <div className="pro-layers">
             {OVERLAY_LAYERS.map(([k, label]) => (
               <button

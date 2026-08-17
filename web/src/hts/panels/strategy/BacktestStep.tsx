@@ -148,10 +148,12 @@ function RowChart(props: {
       title={`${r.name || r.code} ${r.code} — ${planDate} 기준`}
     >
       <div className="bt-chart-canvas">
+        {/* 도구 막대는 ③ 시뮬레이션·차트 탭과 **같은 것**을 쓴다 — 봉 수(200·300·500·
+            1000·전부)·주기·지표·그리기 도구가 다 여기 있다. 예전엔 숨기고 라디오 두 개만
+            뒀는데, 정작 500봉으로 보는 길이 없었다(오너 2026-08-18: "기껏 모듈화 했는데"). */}
         <ProChart
           ref={proRef}
           initialSymbol={{ code: r.code, name: r.name || r.code, market: '' }}
-          hideToolbar
           layerToggles
           onBaseBar={() => {
             // 봉이 들어왔다는 신호 — 이때부터 showUntil·오버레이가 먹는다.
