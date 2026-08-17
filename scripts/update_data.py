@@ -42,6 +42,12 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+# 진행 표시에 ⓪·③ 같은 글자를 쓴다. 로그 파일로 넘기면 윈도 기본 인코딩(cp949)이라
+# 그 글자에서 죽는다 — 어떻게 띄우든 살아 있게 출력 인코딩을 UTF-8 로 못 박는다.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
