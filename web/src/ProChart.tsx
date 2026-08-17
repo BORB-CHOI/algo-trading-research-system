@@ -3,6 +3,7 @@ import {
   ActionType,
   dispose as disposeKLineChart,
   init,
+  LoadDataType,
   registerIndicator,
   registerOverlay,
   type Chart,
@@ -662,11 +663,16 @@ async function fetchCandles(
   bars: BarCount,
   minStart?: string,
   market: BarMarket = 'unt',
+  /** 이 날짜까지만. 왼쪽으로 밀어 **더 옛날 봉을 이어 받을 때** 쓴다(그 앞 구간만 받는다). */
+  end?: string,
 ): Promise<{ bars: KLineData[]; source: string }> {
-  const auto = startFor(period, bars)
+  // `end` 가 있으면 그 시점을 기준으로 거슬러 센다 — 지금부터 세면 엉뚱한 구간을 받는다.
+  const auto = startFor(period, bars, end ? Date.parse(`${end}T00:00:00`) : undefined)
   // 전체(bars===0)면 이미 다 받으므로 minStart 는 볼 필요 없다.
   const start = auto == null ? '1990-01-01' : minStart && minStart < auto ? minStart : auto
-  const q = `code=${encodeURIComponent(code)}&period=${period}&start=${start}&market=${market}`
+  const q =
+    `code=${encodeURIComponent(code)}&period=${period}&start=${start}&market=${market}` +
+    (end ? `&end=${end}` : '')
   const res = await fetch(`/api/candles?${q}`)
   if (!res.ok) return { bars: [], source: 'none' } // 404 등 — 화면은 "데이터 없음"으로 남는다
   const { candles, source } = (await res.json()) as {
@@ -842,7 +848,6 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   // 늦게 온 이전 종목 응답이 새 종목을 덮지 않게 하는 순번 (Pro 데이터피드가 하던 일).
   const loadSeq = useRef(0)
   // 지금 받아둔 데이터가 감당하는 봉 수. 0 = 전체 이력. 이보다 많이 보려 하면 다시 받는다.
-  const loadedForRef = useRef<BarCount>(props.initialBars ?? 500)
   // 앞쪽(과거)으로 넓혀 받은 시작일. 기준일을 과거로 옮겼을 때만 채워진다.
   const minStartRef = useRef<string | undefined>(undefined)
   // 부모 콜백을 ref 로 들고 있는다 — 구독은 마운트 때 한 번만 걸고(deps []), 그 클로저가
@@ -906,10 +911,10 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       )
       if (seq !== loadSeq.current) return // 그 사이 종목·주기가 또 바뀌었다 — 이 응답은 버린다
       setSource(source)
-      loadedForRef.current = want
       lastBaseRef.current = null // 데이터가 통째로 바뀌었다 — 오른쪽 끝을 다시 알린다
       lastSentRef.current = null
-      chart.applyNewData(data)
+      // `more=true` — 왼쪽 끝에 닿으면 엔진이 더 달라고 부른다(setLoadDataCallback).
+      chart.applyNewData(data, true)
       fitBars(chart, el, barsRef.current)
     } finally {
       if (seq === loadSeq.current) setBusy(false)
@@ -997,14 +1002,11 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
 
   /** 봉 개수 전환. 받아둔 데이터로 충분하면 화면만 맞추고(즉시), 모자라면 다시 받는다. */
   function applyBars(n: BarCount): void {
-    const have = loadedForRef.current
     barsRef.current = n
     setBarsState(n)
-    const enough = have === 0 || (n !== 0 && n <= have)
-    if (!enough) {
-      void reload()
-      return
-    }
+    // 봉 수는 **화면 배율**일 뿐이다 — 받아올 범위가 아니다. 모자라면 왼쪽으로 밀 때
+    // 엔진이 알아서 더 받아온다(setLoadDataCallback). 예전엔 여기서 다시 받아오느라
+    // 봉 수가 곧 데이터 범위가 됐고, 그 앞은 밀어도 안 나왔다(오너 지적 2026-08-18).
     const chart = chartRef.current
     const el = elRef.current
     if (chart && el) fitBars(chart, el, n)
@@ -1120,6 +1122,29 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     // 나갔다) — `OnZoom` 을 따로 구독해야 "딱 줌한 부분만" 다시 계산된다.
     chart.subscribeAction(ActionType.OnVisibleRangeChange, emitBase)
     chart.subscribeAction(ActionType.OnZoom, emitBase)
+    // 왼쪽 끝까지 밀면 **그 앞 구간을 이어 받는다** — 증권사 차트와 같은 동작이고,
+    // 엔진에 이미 있는 기능이다. 예전엔 봉 수(=화면 배율)가 받아올 범위까지 정해서,
+    // 500봉을 고르면 그 앞이 아예 없어 아무리 밀어도 안 나왔다
+    // (오너 지적 2026-08-18: "500봉으로 캔들 보이는 게 조절되게 하라고 했지
+    //  언제 500개로 캔들 짤라먹으라고 했냐").
+    chart.setLoadDataCallback(({ type, data, callback }) => {
+      if (type !== LoadDataType.Forward || !data) {
+        callback([], type !== LoadDataType.Backward)
+        return
+      }
+      const oldest = new Date(data.timestamp - 86_400_000).toISOString().slice(0, 10)
+      void fetchCandles(
+        symbolRef.current.code,
+        periodRef.current,
+        barsRef.current || 500,
+        undefined,
+        marketRef.current,
+        oldest,
+      ).then(({ bars }) => {
+        // 받은 게 있으면 아직 더 있을 수 있다 — 빈 응답이 오면 거기가 상장일이다.
+        callback(bars, bars.length > 0)
+      })
+    })
     void reload()
 
     // 패널(dockview) 크기가 바뀌면 차트에 알려준다. 엔진은 resize() 를 직접 준다 —
