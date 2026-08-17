@@ -154,6 +154,11 @@ function RowChart(props: {
         <ProChart
           ref={proRef}
           initialSymbol={{ code: r.code, name: r.name || r.code, market: '' }}
+          // 처음부터 **전 이력**을 받는다. 기본(500봉)이면 오늘 기준 500거래일치만
+          // 받아와서, 몇 년 전 매매를 열면 그 앞이 통째로 없다 — 데이터가 없는 게
+          // 아니라 안 받아온 것인데 "캔들이 끊겼다"로 보인다(오너 지적 2026-08-18).
+          // 이 창은 지나간 매매 하나를 들여다보는 자리라 처음부터 다 있어야 한다.
+          initialBars={0}
           layerToggles
           onBaseBar={() => {
             // 봉이 들어왔다는 신호 — 이때부터 showUntil·오버레이가 먹는다.
