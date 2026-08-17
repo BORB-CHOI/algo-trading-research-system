@@ -48,7 +48,7 @@ export function DataFreshness() {
   // 갱신이 도는 동안엔 자주 확인한다 — 몇 초짜리라 1분 주기로는 끝난 걸 못 본다.
   useEffect(() => {
     if (!data?.refreshing) return
-    const t = setInterval(() => void load(), 2000)
+    const t = setInterval(() => void load(), 1000)
     return () => clearInterval(t)
   }, [data?.refreshing, load])
 
@@ -123,8 +123,36 @@ export function DataFreshness() {
 
           <div className="fresh-act">
             <button className="primary" disabled={data.refreshing} onClick={() => void onRefresh()}>
-              {data.refreshing ? '갱신 중…' : '차트 일봉 지금 갱신 (몇 초)'}
+              {data.refreshing ? '갱신 중…' : '지금 갱신 (약 30초)'}
             </button>
+
+            {/* 파일 16,576개를 훑느라 30초쯤 걸린다 — 돌고는 있는지 보여야 한다. */}
+            {data.refreshing && (
+              <div className="fresh-gauge">
+                <div className="fresh-gauge-head">
+                  <span>{data.progress.phase || '시작하는 중'}</span>
+                  <span className="mono">
+                    {data.progress.total > 0
+                      ? `${data.progress.done.toLocaleString()} / ${data.progress.total.toLocaleString()}`
+                      : '준비 중…'}
+                  </span>
+                </div>
+                <div className="fresh-gauge-track">
+                  <div
+                    className="fresh-gauge-fill"
+                    style={{
+                      width:
+                        data.progress.total > 0
+                          ? `${Math.min(100, (data.progress.done / data.progress.total) * 100)}%`
+                          : '0%',
+                    }}
+                  />
+                </div>
+                <p className="hint">
+                  창을 닫거나 딴 화면을 봐도 서버에서 계속 돕니다 — 돌아오면 이어서 보입니다.
+                </p>
+              </div>
+            )}
             <p className="hint">
               차트 일봉은 서버를 켤 때마다 자동으로 최신이 됩니다. 수급·신용잔고처럼 종목마다
               따로 받아야 하는 것은 호출 한도가 커서 버튼으로 시작하지 않습니다 — 아래 명령을

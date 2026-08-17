@@ -814,10 +814,18 @@ export type DataSourceFreshness = {
   checked_at?: string | null
 }
 
+export type RefreshProgress = {
+  phase: string // 지금 무엇을 훑는 중인지 ("수급(외인·기관·개인) 훑는 중")
+  done: number
+  total: number
+}
+
 export type DataFreshness = {
   sources: DataSourceFreshness[]
   worst: 'ok' | 'warn' | 'stale'
   refreshing: boolean
+  /** 갱신은 파일 16,576개를 훑어 약 27초 걸린다 — 게이지 재료. */
+  progress: RefreshProgress
   finished_at: string | null
   manual_command: string // 무거운 갱신은 사람이 돌린다 — 그 명령
 }

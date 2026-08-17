@@ -106,7 +106,14 @@ _CANDLE_COLS = [
 # 그건 사람이 `scripts/update_data.py` 로 돌린다.
 
 _REFRESH_LOCK = threading.Lock()
-_REFRESH_STATE: dict[str, Any] = {"running": False, "finished_at": None, "result": None}
+_REFRESH_STATE: dict[str, Any] = {
+    "running": False,
+    "phase": "",
+    "done": 0,
+    "total": 0,
+    "finished_at": None,
+    "result": None,
+}
 
 
 def _clear_data_caches() -> None:
@@ -131,19 +138,27 @@ def _run_refresh(*, rescan: bool) -> dict:
         if _REFRESH_STATE["running"]:
             return {"skipped": "이미 갱신 중입니다."}
         _REFRESH_STATE["running"] = True
+    _REFRESH_STATE.update(phase="차트 일봉 받는 중", done=0, total=0)
+
+    def progress(label: str, done: int, total: int) -> None:
+        _REFRESH_STATE.update(phase=f"{label} 훑는 중", done=done, total=total)
+
     try:
         pulled = pull_marcap()
         if pulled.get("changed"):
             _clear_data_caches()
         if rescan or pulled.get("changed"):
-            freshness.refresh_marks()
+            freshness.refresh_marks(on_progress=progress)
         result = {"marcap": pulled, "sources": freshness.report()}
     except Exception as e:  # 서버가 이것 때문에 죽으면 안 된다 — 실패도 값으로 남긴다
         result = {"error": f"{type(e).__name__}: {e}"}
     finally:
-        _REFRESH_STATE["running"] = False
-        _REFRESH_STATE["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-        _REFRESH_STATE["result"] = result
+        _REFRESH_STATE.update(
+            running=False,
+            phase="",
+            finished_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            result=result,
+        )
     return result
 
 
@@ -773,6 +788,12 @@ def api_data_freshness() -> dict:
         "sources": freshness.report(),
         "worst": freshness.worst_grade(),
         "refreshing": bool(_REFRESH_STATE["running"]),
+        # 게이지용 — 갱신은 파일 16,576개를 훑어 약 27초 걸린다(실측 2026-08-17).
+        "progress": {
+            "phase": _REFRESH_STATE["phase"],
+            "done": int(_REFRESH_STATE["done"]),
+            "total": int(_REFRESH_STATE["total"]),
+        },
         "finished_at": _REFRESH_STATE["finished_at"],
         # 무거운 갱신은 서버가 안 한다 — 사람이 돌릴 명령을 화면에 그대로 보여 준다.
         "manual_command": ".venv/Scripts/python scripts/update_data.py",
@@ -781,7 +802,11 @@ def api_data_freshness() -> dict:
 
 @app.post("/api/data/refresh")
 def api_data_refresh() -> dict:
-    """차트 일봉을 지금 최신으로 (marcap git pull → 캐시 비우기). 몇 초짜리다.
+    """차트 일봉을 지금 최신으로 (marcap git pull → 캐시 비우기 → 워터마크 다시 훑기).
+
+    실측 2026-08-17: 파일 16,577개를 훑어 약 30초. **뒤에서 도는 스레드**라 그동안에도
+    화면은 그대로 쓸 수 있다 — 갱신 중 차트 응답 147ms → 149ms(1.0배, 실측).
+    파일 읽기는 GIL 을 놓기 때문이다.
 
     나무 봉·KIS 수급 증분은 **여기서 하지 않는다** — 호출 한도를 크게 태우는 일이라
     화면 버튼 하나로 시작할 것이 아니다(`manual_command` 참조).
@@ -789,7 +814,7 @@ def api_data_refresh() -> dict:
     if _REFRESH_STATE["running"]:
         return {"started": False, "message": "이미 갱신 중입니다."}
     threading.Thread(target=lambda: _run_refresh(rescan=True), daemon=True).start()
-    return {"started": True, "message": "갱신을 시작했습니다 — 몇 초 걸립니다."}
+    return {"started": True, "message": "갱신을 시작했습니다 — 약 30초, 그동안 화면은 그대로 쓰셔도 됩니다."}
 
 
 def _load_history_panel(

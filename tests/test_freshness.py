@@ -202,3 +202,62 @@ class Test워터마크_다시_만들기:
         assert needs_rescan(root=d) is True
         write_mark("supply", "20260803", root=d)
         assert needs_rescan(root=d, today=pd.Timestamp.today().normalize()) is False
+
+
+class Test진행_알림:
+    """갱신은 파일 16,576개를 훑어 약 27초 걸린다 — 화면이 어디까지 왔는지 알아야 한다."""
+
+    def _make(self, tmp_path):
+        import pandas as pd
+
+        for sub, col, n in [("supply", "stck_bsop_date", 3), ("credit", "deal_date", 2)]:
+            d = tmp_path / "derived" / sub
+            d.mkdir(parents=True)
+            for i in range(n):
+                pd.DataFrame({col: ["20260803"]}).to_parquet(d / f"00000{i}.parquet")
+        m = tmp_path / "marcap"
+        m.mkdir()
+        pd.DataFrame({"Date": pd.to_datetime(["2026-08-13"])}).to_parquet(m / "marcap-2026.parquet")
+        return tmp_path / "derived", m
+
+    def test_소스마다_이름과_진행도를_알린다(self, tmp_path) -> None:
+        from src.layer1_data.freshness import refresh_marks
+
+        root, marcap = self._make(tmp_path)
+        seen = []
+        refresh_marks(
+            root=root, marcap_dir=marcap, on_progress=lambda p, d, t: seen.append((p, d, t))
+        )
+        assert seen, "진행 알림이 한 번도 안 왔다"
+        phases = [p for p, _, _ in seen]
+        assert "수급(외인·기관·개인)" in phases  # 화면이 그대로 띄울 이름
+        assert all(0 <= d <= t for _, d, t in seen)
+
+    def test_마지막에는_다_찼다(self, tmp_path) -> None:
+        from src.layer1_data.freshness import refresh_marks
+
+        root, marcap = self._make(tmp_path)
+        seen = []
+        refresh_marks(
+            root=root, marcap_dir=marcap, on_progress=lambda p, d, t: seen.append((p, d, t))
+        )
+        _, done, total = seen[-1]
+        assert done == total and total > 0
+
+    def test_전체_개수는_처음부터_고정이다(self, tmp_path) -> None:
+        """게이지가 도중에 늘어나면 되감기는 것처럼 보인다."""
+        from src.layer1_data.freshness import refresh_marks
+
+        root, marcap = self._make(tmp_path)
+        seen = []
+        refresh_marks(
+            root=root, marcap_dir=marcap, on_progress=lambda p, d, t: seen.append((p, d, t))
+        )
+        assert len({t for _, _, t in seen}) == 1
+
+    def test_알림을_안_줘도_돈다(self, tmp_path) -> None:
+        from src.layer1_data.freshness import read_marks, refresh_marks
+
+        root, marcap = self._make(tmp_path)
+        refresh_marks(root=root, marcap_dir=marcap)
+        assert read_marks(root=root)["supply"]["last_date"] == "2026-08-03"

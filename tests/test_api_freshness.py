@@ -89,3 +89,42 @@ class Test봉이_어디서_왔나:
     def test_상장_종목은_나무에서_온다(self) -> None:
         """증권사 수정주가라 액면분할·병합이 이미 반영돼 있다 (실측 2026-08-16: marcap 보정은 7.6% 어긋남)."""
         assert client.get("/api/candles?code=005930&start=2026-06-01").json()["source"] == "namuh"
+
+
+class Test갱신_진행도:
+    """갱신은 파일 16,576개를 훑어 약 27초 걸린다 — 화면이 게이지를 그릴 재료가 있어야 한다."""
+
+    def test_진행도_칸이_늘_있다(self) -> None:
+        p = client.get("/api/data/freshness").json()["progress"]
+        assert set(p) == {"phase", "done", "total"}
+        assert isinstance(p["done"], int) and isinstance(p["total"], int)
+
+    def test_도는_동안_어느_소스를_훑는지_말한다(self) -> None:
+        from api.main import _REFRESH_STATE, _run_refresh
+
+        seen = []
+
+        def fake(*, on_progress=None):
+            on_progress("수급(외인·기관·개인)", 3, 10)
+            seen.append(dict(_REFRESH_STATE))
+            return {}
+
+        with (
+            patch("api.main.pull_marcap", return_value={"ok": True, "changed": False}),
+            patch("api.main.freshness.refresh_marks", side_effect=fake),
+        ):
+            _run_refresh(rescan=True)
+        assert seen[0]["done"] == 3 and seen[0]["total"] == 10
+        assert "수급" in seen[0]["phase"]
+
+    def test_끝나면_진행_표시를_지운다(self) -> None:
+        """게이지가 100%에 멈춰 남아 있으면 아직 도는 줄 안다."""
+        from api.main import _REFRESH_STATE, _run_refresh
+
+        with (
+            patch("api.main.pull_marcap", return_value={"ok": True, "changed": False}),
+            patch("api.main.freshness.refresh_marks", return_value={}),
+        ):
+            _run_refresh(rescan=True)
+        assert _REFRESH_STATE["running"] is False
+        assert _REFRESH_STATE["phase"] == ""

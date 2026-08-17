@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -113,10 +114,19 @@ def grade(last_date: Any, *, today: pd.Timestamp | None = None) -> str:
 # 하루 지났을 때 뒤에서 한 번만 돌린다. 평소 화면은 `report()` 로 워터마크만 읽는다.
 
 
-def scan_last_date(dirpath: Path, date_col: str) -> tuple[str | None, int]:
+def count_files(dirpath: Path) -> int:
+    """훑기 전에 몇 개인지 — 게이지의 분모다. 도중에 늘면 되감기처럼 보인다."""
+    d = Path(dirpath)
+    return sum(1 for _ in d.glob("*.parquet")) if d.is_dir() else 0
+
+
+def scan_last_date(
+    dirpath: Path, date_col: str, *, on_file: Callable[[], None] | None = None
+) -> tuple[str | None, int]:
     """폴더 안 parquet 들에서 가장 늦은 날짜. **날짜 열만** 읽는다(통째로 열면 10배 느리다).
 
     파일 하나가 깨져도 나머지로 답한다 — 하나 때문에 "모른다"가 되면 안 된다.
+    `on_file` 은 파일 하나 볼 때마다 불린다(화면 게이지용, 깨진 파일도 센다).
     """
     import pyarrow.parquet as pq
 
@@ -126,6 +136,8 @@ def scan_last_date(dirpath: Path, date_col: str) -> tuple[str | None, int]:
     best = ""
     n = 0
     for path in dirpath.glob("*.parquet"):
+        if on_file is not None:
+            on_file()
         try:
             col = pq.read_table(path, columns=[date_col])[date_col]
         except (OSError, ValueError, KeyError):
@@ -235,22 +247,49 @@ def needs_rescan(*, root: Path = DEFAULT_ROOT, today: pd.Timestamp | None = None
 
 
 def refresh_marks(
-    *, root: Path = DEFAULT_ROOT, marcap_dir: Path = DEFAULT_MARCAP_DIR
+    *,
+    root: Path = DEFAULT_ROOT,
+    marcap_dir: Path = DEFAULT_MARCAP_DIR,
+    on_progress: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, str]:
     """데이터를 실제로 훑어 워터마크를 다시 적는다. **느리다** — 뒤에서 돌려라.
 
+    실측 2026-08-17: 파일 16,576개, 약 27초. 그래서 `on_progress(소스이름, 한 것, 전체)` 로
+    어디까지 왔는지 알린다 — 화면이 그대로 게이지에 쓴다.
+
+    전체 개수는 **훑기 전에 한 번** 세서 고정한다. 도중에 늘어나면 게이지가 되감긴다.
     폴더가 아예 없는 소스는 건너뛴다 — "모름"을 적으면 화면이 헷갈린다.
     """
+    counts = {
+        s["key"]: (1 if s["key"] == "marcap" else count_files(Path(root) / s["dir"]))
+        for s in SOURCES
+    }
+    total = sum(counts.values())
+    done = 0
+
+    def tick(label: str) -> Callable[[], None]:
+        def _one() -> None:
+            nonlocal done
+            done += 1
+            if on_progress is not None:
+                on_progress(label, done, total)
+
+        return _one
+
     written: dict[str, str] = {}
     for src in SOURCES:
+        step = tick(str(src["label"]))
         if src["key"] == "marcap":
             last, n = _scan_marcap(Path(marcap_dir))
+            step()
         else:
-            last, n = scan_last_date(Path(root) / src["dir"], src["date_col"])
+            last, n = scan_last_date(Path(root) / src["dir"], src["date_col"], on_file=step)
         if last is None:
             continue
         write_mark(src["key"], last, n_symbols=n, root=root)
         written[src["key"]] = last
+    if on_progress is not None:
+        on_progress("끝", total, total)
     return written
 
 
