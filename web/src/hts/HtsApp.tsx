@@ -12,6 +12,7 @@ import { onSymbolPick, pickSymbol, type SymbolPick } from './bus'
 import { chgClass, fmtChg } from './format'
 import { MiniCandles } from './MiniCandles'
 import { SymbolDrawer } from './SymbolDrawer'
+import { DataFreshness } from './DataFreshness'
 import { SearchModal } from './components/SearchModal'
 import { SymbolResults } from './components/SymbolResults'
 import { useListCursor, useLiveSearch } from './components/useLiveSearch'
@@ -169,7 +170,6 @@ function Ticker() {
 export function HtsApp() {
   const apiRef = useRef<DockviewApi | null>(null)
   const [activeKind, setActiveKind] = useState('home')
-  const [dataDate, setDataDate] = useState<string | null>(null)
   const [drawer, setDrawer] = useState<SymbolPick | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false) // 헤더 ⋯ 창관리 팝업
@@ -177,19 +177,6 @@ export function HtsApp() {
 
   // 어디서 종목을 고르든 우측 요약이 따라 열린다. 상세(호가·차트)는 차트 패널 몫.
   useEffect(() => onSymbolPick(setDrawer), [])
-
-  useEffect(() => {
-    let alive = true
-    fetch('/api/heatmap?top=10')
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then(({ date }: { date: string }) => {
-        if (alive && date) setDataDate(date)
-      })
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [])
 
   function addPanel(kind: string, floating = false) {
     const api = apiRef.current
@@ -259,7 +246,7 @@ export function HtsApp() {
           "헤더가 화면의 1/5"). 창 관리 버튼 3개는 ⋯ 팝업으로 접었다. */}
       <header className="topbar">
         <span className="brand">
-          ATS <em>Auto Trading System</em>
+          ATS <em>Algo Trading Research System</em>
         </span>
         <nav className="mainnav">
           {MENU.map((k) => (
@@ -280,7 +267,7 @@ export function HtsApp() {
           }}
         />
         <Ticker />
-        {dataDate && <span className="badge">시세 {dataDate}</span>}
+        <DataFreshness />
         <div className="more">
           <button className="ghost" title="창 관리" onClick={() => setMoreOpen((v) => !v)}>
             ⋯

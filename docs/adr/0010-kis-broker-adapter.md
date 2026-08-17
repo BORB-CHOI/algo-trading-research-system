@@ -67,7 +67,7 @@
 ## 미해결 (Open questions)
 
 1. ~~시장구분 코드 매핑이 실측 추정이다.~~ **해소 (2026-08-05, BORB-47).**
-   `scripts/kis_probe_supply.py market` 으로 응답 20종목을 marcap `Market` 과 대조했다.
+   `scripts/kis_probe_supply.py market` 으로 응답 20종목을 marcap `Market` 과 대조했다. (2026-08-16 삭제 — 근거 확인은 끝났고 스크립트는 git 이력에 남아 있다)
    `J` 는 KOSPI 13종목 전부와 ETF 4종목(069500·122630·233740·360750)에,
    `Q` 는 KOSDAQ 2종목과 KOSDAQ GLOBAL 1종목에 붙었다.
    → **`J`=유가증권(ETF 포함), `Q`=코스닥(글로벌 세그먼트 포함).** 세그먼트를 나누지 않는다.

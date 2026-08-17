@@ -12,7 +12,7 @@ P&L 대조 oracle 로만 쓴다. 여기는 그 얇은 엔진이다 — 한 종�
 - **거래정지**: 체결일 Amount==0 이면 사지도 팔지도 못한다. 다음 거래 가능일로 미룬다
   (DATA_SCHEMA 2026-07-24 점검: Amount==0 ⇔ Volume==0).
 - **거래비용 처음부터 포함**: ADR-0004 CostModel 을 왕복 1회당 물린다.
-- **3분할**: §4.1 구간을 상수로 박고, Test 는 명시 플래그 없이 못 자른다(단 1회 원칙).
+- **검사 구간**: 화면에서 고른 날짜가 그대로 쓰인다(ADR-0019). 코드가 구간을 나누지 않는다.
 - **N<30 신뢰 불가**: 요약에 거래 수와 신뢰 플래그를 함께 낸다.
 
 전략(무엇을 사고팔지)은 여기 없다 — layer3 가 만든 포지션 열을 받을 뿐이다.
@@ -58,26 +58,12 @@ def resolve_period(
     return s, e
 
 
-# (2026-08-16 이후 안 쓴다) 옛 3분할. 오너가 "나누지 않고 전체"로 정해 호출부가 없어졌다.
-# 지우지 않는 것은 옛 보관함 기록(run_store.runs.split)이 이 이름을 가리키기 때문이다.
-SPLITS: dict[str, tuple[str, str]] = {
-    "train": ("2020-01-01", "2023-12-31"),
-    "validate": ("2024-01-01", "2024-12-31"),
-    "test": ("2025-01-01", "2025-12-31"),
-}
-
 # CLAUDE.md: N<30 이면 통계를 신뢰하지 않는다.
 MIN_RELIABLE_TRADES = 30
 
 
-def slice_split(df: pd.DataFrame, split: str, *, i_know_test_is_once: bool = False) -> pd.DataFrame:
-    """§4.1 구간으로 자른다. Test 는 명시적 동의 없이 못 자른다 — 보고 고치면 Train 이 된다."""
-    if split == "test" and not i_know_test_is_once:
-        raise ValueError(
-            "Test 구간은 단 1회만 쓴다(§4.1). 정말 최종 평가라면 "
-            "i_know_test_is_once=True 를 명시하라."
-        )
-    start, end = SPLITS[split]
+def slice_period(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """화면에서 고른 구간으로 자른다. **막지 않는다** — 코드가 방법론을 강제하지 않는다."""
     return df[(df["Date"] >= start) & (df["Date"] <= end)]
 
 

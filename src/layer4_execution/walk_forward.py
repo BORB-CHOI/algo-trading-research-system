@@ -40,12 +40,15 @@ docstring 의 표 참조.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 
 import pandas as pd
 
-from src.layer1_data.derived import drop_halted, load_adjusted
+from src.layer1_data.daily import daily_bars
+from src.layer1_data.derived import drop_halted
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer3_strategy import conditions as cond_registry
@@ -79,6 +82,37 @@ def _panel_years(start: pd.Timestamp, end: pd.Timestamp, lookback: int) -> tuple
         raise FileNotFoundError("marcap 데이터가 없습니다 — data/marcap/data 확인.")
     back = max(1, -(-lookback // _TRADING_DAYS_PER_YEAR))
     return max(years[0], start.year - back), min(years[-1], end.year)
+
+
+def worker_count(n_jobs: int) -> int:
+    """이 컴퓨터에서 쓸 프로세스 수 — 실행할 때 정한다(코어 수를 코드에 박지 않는다).
+
+    한 개는 화면·OS 몫으로 남긴다. 종목이 적으면 그만큼만 띄운다(프로세스 만드는
+    값이 계산보다 비싸지면 손해다).
+    """
+    cores = os.cpu_count() or 1
+    return max(1, min(cores - 1, n_jobs))
+
+
+def _rounds_job(args: tuple) -> tuple[str, list[dict], list[Trade | None], str]:
+    """한 종목의 라운드 전부 — 프로세스 하나가 통째로 맡는다.
+
+    데이터는 **워커 안에서 직접 읽는다**. 메인이 읽어 넘기면 종목마다 표를 통째로
+    직렬화해 보내야 해서, 계산을 나눠 번 이득을 전송 비용이 도로 까먹는다.
+    """
+    code, days, p, cost, end_ts = args
+    raw = daily_bars(code)
+    if raw is None or raw.empty:
+        return code, [], [], "데이터 없음"
+    df = drop_halted(raw).sort_values("Date").reset_index(drop=True)
+    if df.empty:
+        return code, [], [], "거래정지일만 있음"
+    rows: list[dict] = []
+    trades: list[Trade | None] = []
+    for row, trade in _rounds_for_code(code, df, days, end=end_ts, p=p, cost=cost):
+        rows.append(row)
+        trades.append(trade)
+    return code, rows, trades, "" if rows else "계획을 세울 수 있는 날이 없음"
 
 
 def screen_by_day(
@@ -246,7 +280,7 @@ def run_walk_forward(
     cost: CostModel = DEFAULT_COST,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
     hist: pd.DataFrame | None = None,
-    loader: Callable[[str], pd.DataFrame | None] = load_adjusted,
+    loader: Callable[[str], pd.DataFrame | None] = daily_bars,
     progress: ProgressFn | None = None,
 ) -> dict:
     """전 기간·전 종목 백테스트. 반환은 `strategy_one` 과 같은 모양 + 매일 고른 흔적.
@@ -306,20 +340,11 @@ def run_walk_forward(
     no_fill_rows: list[dict] = []
     trades: list[Trade] = []
     skipped: dict[str, str] = {}
-    for n, (code, days) in enumerate(sorted(by_code.items()), 1):
-        raw = loader(code)
-        if raw is None or raw.empty:
-            skipped[code] = "데이터 없음"
-            continue
-        # 거래정지일(OHLC 0원)을 빼고 본다 — 저가가 0 이면 어떤 지정가든 체결된 것으로
-        # 판정된다(BORB-32, 실측 2026-08-10: -100.5% 같은 불가능한 수익률이 나왔다).
-        df = drop_halted(raw).sort_values("Date").reset_index(drop=True)
-        if df.empty:
-            skipped[code] = "거래정지일만 있음"
-            continue
-        got = 0
-        for row, trade in _rounds_for_code(code, df, days, end=end_ts, p=p, cost=cost):
-            got += 1
+    jobs = sorted(by_code.items())
+
+    def absorb(n: int, code: str, rows: list, got_trades: list, reason: str) -> None:
+        """워커가 낸 결과를 순서대로 담는다 — 담는 일은 메인 혼자 한다(순서 보장)."""
+        for row, trade in zip(rows, got_trades, strict=True):
             row["code"] = code
             row["name"] = names.get(code, "")  # 코드만 보면 어느 회사인지 알 수 없다
             if trade is None:
@@ -327,10 +352,39 @@ def run_walk_forward(
             else:
                 results.append(row)
                 trades.append(trade)
-        if got == 0:
-            skipped[code] = "계획을 세울 수 있는 날이 없음"
-        if progress and (n % 5 == 0 or n == len(by_code)):
-            progress(Progress("매매 검사 중", n, len(by_code)))
+        if reason:
+            skipped[code] = reason
+        if progress and (n % 5 == 0 or n == len(jobs)):
+            progress(Progress("매매 검사 중", n, len(jobs)))
+
+    # 종목끼리는 서로 볼 일이 없어서 그대로 나눠 돌릴 수 있다. pandas 계산은 한 번에
+    # 코어 하나만 쓰므로(GIL), 스레드가 아니라 **프로세스**로 나눠야 실제로 빨라진다.
+    # 기본 loader 가 아니면(테스트용 주입) 프로세스에 못 넘기니 예전처럼 한 줄로 돈다.
+    n_workers = worker_count(len(jobs)) if loader is daily_bars else 1
+    if n_workers > 1:
+        payload = [(code, days, p, cost, end_ts) for code, days in jobs]
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            for n, (code, rows, got_trades, reason) in enumerate(
+                pool.map(_rounds_job, payload, chunksize=8), 1
+            ):
+                absorb(n, code, rows, got_trades, reason)
+    else:
+        for n, (code, days) in enumerate(jobs, 1):
+            raw = loader(code)
+            if raw is None or raw.empty:
+                skipped[code] = "데이터 없음"
+                continue
+            # 거래정지일(OHLC 0원)을 빼고 본다 — 저가가 0 이면 어떤 지정가든 체결된 것으로
+            # 판정된다(BORB-32, 실측 2026-08-10: -100.5% 같은 불가능한 수익률이 나왔다).
+            df = drop_halted(raw).sort_values("Date").reset_index(drop=True)
+            if df.empty:
+                skipped[code] = "거래정지일만 있음"
+                continue
+            rows, got_trades = [], []
+            for row, trade in _rounds_for_code(code, df, days, end=end_ts, p=p, cost=cost):
+                rows.append(row)
+                got_trades.append(trade)
+            absorb(n, code, rows, got_trades, "" if rows else "계획을 세울 수 있는 날이 없음")
 
     # 미청산 판정은 **정렬 전에** 한다 — results 를 수익률 순으로 섞은 뒤 trades 와 짝지으면
     # 엉뚱한 거래가 "안 팔린 것"으로 분류된다(두 리스트는 append 순서로만 짝이 맞는다).

@@ -1597,3 +1597,97 @@ table.grid.tight td {
 .bt-grid tr.round > td { border-top: 1px solid var(--hts-line); }
 .bt-grid tr.round .ind { padding-left: 26px; color: var(--hts-text-2); }
 .bt-grid .chip { margin-left: 6px; }
+
+/* ── 데이터 최신 상태 알약 (헤더) ─────────────────────────────
+   묵은 데이터는 화면이 멀쩡히 그려져서 눈에 안 띈다. 그래서 날짜 옆에 색점을 박는다 —
+   초록은 지나쳐도 되고, 주황·빨강은 걸리게. */
+.fresh { position: relative; display: inline-flex; }
+
+.fresh-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 10px;
+  border: 1px solid var(--hts-border); border-radius: var(--r-pill);
+  background: var(--hts-panel); color: var(--hts-text-2);
+  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+  cursor: pointer; white-space: nowrap;
+  transition: border-color .15s, background .15s;
+}
+.fresh-pill:hover { background: var(--hts-hover); border-color: var(--hts-scrollbar); }
+.fresh-pill .spin { font-style: normal; color: var(--hts-accent-down); font-weight: 500; }
+/* 차트는 멀쩡한데 다른 데이터가 묵었을 때만 붙는 작은 점 — "열어 보라"는 신호. */
+.fresh-pill .alarm { width: 6px; height: 6px; border-radius: 50%; margin-left: -2px; }
+.fresh-pill .alarm.g-warn { background: #d97706; }
+.fresh-pill .alarm.g-stale { background: var(--hts-up); }
+
+.fresh .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--hts-text-3); }
+.g-ok    .dot, .g-ok    > .dot { background: #16a34a; }
+.g-warn  .dot, .g-warn  > .dot { background: #d97706; }
+.g-stale .dot, .g-stale > .dot { background: var(--hts-up); }
+.fresh-pill.g-warn  { border-color: #fbbf24; background: #fffbeb; color: #92400e; }
+.fresh-pill.g-stale { border-color: #fca5a5; background: #fef2f2; color: #b91c1c; }
+
+.fresh-pop {
+  position: absolute; top: 28px; right: 0; z-index: 60;
+  width: 360px; padding: 12px;
+  background: var(--hts-panel); border: 1px solid var(--hts-border);
+  border-radius: 10px; box-shadow: 0 12px 32px rgba(20, 26, 38, .16);
+}
+.fresh-pop > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.fresh-pop > header b { font-size: 12px; }
+.fresh-pop .tag {
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: var(--r-pill);
+  background: var(--hts-bg); color: var(--hts-text-2);
+}
+.fresh-pop .tag.g-warn  { background: #fef3c7; color: #92400e; }
+.fresh-pop .tag.g-stale { background: #fee2e2; color: #b91c1c; }
+
+.fresh-list { list-style: none; margin: 0; padding: 0; }
+.fresh-list li {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 7px 0; border-top: 1px solid var(--hts-line);
+}
+.fresh-list li:first-child { border-top: 0; }
+.fresh-list li .dot { margin-top: 4px; }
+.fresh-list .who { flex: 1; min-width: 0; }
+.fresh-list .who b { display: block; font-size: 12px; }
+.fresh-list .who small { display: block; color: var(--hts-text-3); font-size: 11px; line-height: 1.4; }
+.fresh-list .when { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.fresh-list .when b { display: block; font-size: 12px; }
+.fresh-list .when small { display: block; font-size: 10px; color: var(--hts-text-3); }
+.fresh-list li.g-warn  .when b { color: #b45309; }
+.fresh-list li.g-stale .when b { color: var(--hts-up); }
+
+.fresh-act { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--hts-line); }
+.fresh-act button { width: 100%; }
+.fresh-cmd {
+  display: block; margin-top: 4px; padding: 6px 8px;
+  background: var(--hts-elev); border: 1px solid var(--hts-line); border-radius: 6px;
+  font-size: 11px; color: var(--hts-text-2); user-select: all; overflow-x: auto;
+}
+
+/* 이 봉이 어디서 왔나 — 나무(증권사 수정주가) / marcap(자체 보정).
+   두 소스를 같이 쓰므로 "지금 보는 게 어느 쪽 값인지"가 보여야 한다. */
+.pro-bar .sym .src {
+  margin-left: 6px; padding: 1px 6px; border-radius: var(--r-pill);
+  font-size: 10px; font-weight: 700; letter-spacing: .2px; vertical-align: 2px;
+}
+.pro-bar .sym .src.namuh  { background: var(--hts-accent-soft); color: var(--hts-accent-down); }
+.pro-bar .sym .src.marcap { background: #fef3c7; color: #92400e; }
+
+/* 갱신 게이지 — 파일 16,576개를 훑느라 약 30초. 돌고는 있는지 보여야 한다. */
+.fresh-gauge { margin-top: 8px; }
+.fresh-gauge-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 11px; color: var(--hts-text-2); margin-bottom: 4px;
+}
+.fresh-gauge-head .mono { font-variant-numeric: tabular-nums; color: var(--hts-text-3); }
+.fresh-gauge-track {
+  height: 6px; border-radius: var(--r-pill);
+  background: var(--hts-bg); overflow: hidden;
+}
+.fresh-gauge-fill {
+  height: 100%; border-radius: var(--r-pill);
+  background: var(--hts-accent);
+  transition: width .3s ease-out;
+}
+.fresh-gauge .hint { margin: 6px 0 0; }

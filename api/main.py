@@ -21,6 +21,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Literal
@@ -30,13 +31,14 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from src.layer1_data import kv_store, run_store
+from src.layer1_data import freshness, kv_store, run_store
 from src.layer1_data.adjust import (
     SPLIT_PRICE_MATCH,
     SPLIT_SHARE_HI,
     SPLIT_SHARE_LO,
     apply_split_adjustment,
 )
+from src.layer1_data.daily import NAMUH, daily_bars, daily_source
 from src.layer1_data.dart import load_financials
 from src.layer1_data.derived import (
     MINUTE_SPANS,
@@ -49,12 +51,12 @@ from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer1_data.market import index_boards, market_snapshot
-from src.layer1_data.provider import DataProvider
 from src.layer1_data.news import market_news, stock_news
+from src.layer1_data.provider import DataProvider
 from src.layer1_data.quotes_rt import realtime_quotes
 from src.layer1_data.recent import merge_with_marcap, recent_meta
+from src.layer1_data.refresh import pull_marcap
 from src.layer1_data.themes import theme_map
-from src.layer4_execution.backtest import resolve_period
 from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy import fibonacci, price_zones, sr_overlay, support_resistance
 from src.layer3_strategy.case_overlay import (
@@ -69,6 +71,7 @@ from src.layer3_strategy.support_resistance import SRLevel
 from src.layer3_strategy.surge import find_52w_high
 from src.layer3_strategy.zigzag import last_atr
 from src.layer4_execution import stops
+from src.layer4_execution.backtest import resolve_period
 from src.layer4_execution.costs import CostModel
 from src.layer4_execution.fills import _basis_of, _sell_prices
 from src.layer4_execution.runner import aggregate_returns
@@ -91,7 +94,87 @@ _CANDLE_COLS = [
     "Stocks",
 ]
 
-app = FastAPI(title="ATS API", version="0.1.0")
+# ── 데이터 최신 상태 (워터마크 방식) ──────────────────────────
+#
+# 증분 갱신의 업계 표준은 **"어디까지 받았나"를 작은 상태 파일 하나에 적어 두고 그 뒤부터만
+# 받는 것**이다(high watermark). 데이터 파일을 전부 열어 보며 알아내지 않는다 — 실측
+# 2026-08-16 기준 수급 폴더 하나 훑는 데 47초, 나무 봉 전체는 4.2분이었다(API 호출 0건인데도).
+#
+# **서버를 켤 때는 빠른 것만 한다**: marcap `git pull`(몇 초) → 프로세스 캐시 비우기.
+# 차트 일봉의 정본이 그 깃 복제본이라, 그것만 당기면 차트 오른쪽 끝이 오늘이 된다.
+# 나무 봉·KIS 수급 증분은 호출 한도를 크게 태우므로 **서버가 멋대로 시작하지 않는다** —
+# 그건 사람이 `scripts/update_data.py` 로 돌린다.
+
+_REFRESH_LOCK = threading.Lock()
+_REFRESH_STATE: dict[str, Any] = {
+    "running": False,
+    "phase": "",
+    "done": 0,
+    "total": 0,
+    "finished_at": None,
+    "result": None,
+}
+
+
+def _clear_data_caches() -> None:
+    """새로 받은 데이터를 읽으려면 프로세스가 들고 있던 옛 표를 버려야 한다.
+
+    이걸 빼먹으면 `git pull` 은 됐는데 화면은 그대로다 — 오너가 "갱신했는데 왜 그대로냐"를
+    묻게 되는 자리다.
+    """
+    for fn in (
+        _load_year_slim,
+        full_history_adjusted,
+        _load_year_screen,
+        _symbol_master,
+        _latest_marcap,
+    ):
+        fn.cache_clear()
+
+
+def _run_refresh(*, rescan: bool) -> dict:
+    """빠른 갱신 한 번. 두 번 겹쳐 돌지 않는다."""
+    with _REFRESH_LOCK:
+        if _REFRESH_STATE["running"]:
+            return {"skipped": "이미 갱신 중입니다."}
+        _REFRESH_STATE["running"] = True
+    _REFRESH_STATE.update(phase="차트 일봉 받는 중", done=0, total=0)
+
+    def progress(label: str, done: int, total: int) -> None:
+        _REFRESH_STATE.update(phase=f"{label} 훑는 중", done=done, total=total)
+
+    try:
+        pulled = pull_marcap()
+        if pulled.get("changed"):
+            _clear_data_caches()
+        if rescan or pulled.get("changed"):
+            freshness.refresh_marks(on_progress=progress)
+        result = {"marcap": pulled, "sources": freshness.report()}
+    except Exception as e:  # 서버가 이것 때문에 죽으면 안 된다 — 실패도 값으로 남긴다
+        result = {"error": f"{type(e).__name__}: {e}"}
+    finally:
+        _REFRESH_STATE.update(
+            running=False,
+            phase="",
+            finished_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            result=result,
+        )
+    return result
+
+
+def _startup_refresh() -> None:
+    """서버 시작 훅에서 뒤로 돌린다. 훑기는 오늘 아직 안 했을 때만."""
+    _run_refresh(rescan=freshness.needs_rescan())
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """켜자마자 차트 일봉을 최신으로 — 뒤에서. 서버 뜨는 걸 막지 않는다."""
+    threading.Thread(target=_startup_refresh, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="ATS API", version="0.1.0", lifespan=_lifespan)
 
 # Vite dev 서버에서 직접 부를 때를 대비. proxy 를 쓰면 사실상 필요 없다.
 app.add_middleware(
@@ -153,6 +236,14 @@ def full_history_adjusted(code: str) -> pd.DataFrame:
     호출부는 반환값을 수정하지 말 것(캐시 공유본).
     """
     code = code.strip().zfill(6)
+    # 상장 종목은 나무 수집본이 정본이다 — 증권사가 보정한 값이라 액면분할·병합이 이미
+    # 반영돼 있고, marcap 저장소보다 하루 빠르다 (오너 결정 2026-08-16, layer1/daily.py).
+    if daily_source(code) == NAMUH:
+        bars = daily_bars(code)
+        if bars is not None and not bars.empty:
+            return bars.reindex(columns=[*_FULL_COLS]).assign(Date=bars["Date"])
+
+    # 상장폐지·미수집 종목만 이 길로 온다: marcap 원주가 + 우리 보정(ADR-0006).
     years = available_years()
     if not years:
         raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
@@ -178,6 +269,18 @@ def get_candles(code: str, start: str | None, end: str | None, adjust: bool = Tr
     adjust=True 면 액면분할/병합을 최신일 기준으로 back-adjust 한다(ADR-0006).
     """
     code = code.strip().zfill(6)
+    # 수정주가 요청이면 상장 종목은 나무 수집본이 정본이다 (오너 결정 2026-08-16).
+    # 원주가(adjust=False)는 marcap 만 준다 — 나무 봉은 이미 보정된 값이라 섞으면 안 된다.
+    if adjust:
+        bars = daily_bars(code)
+        if bars is not None and not bars.empty and daily_source(code) == NAMUH:
+            out = bars.assign(Name=_name_of(code))
+            if start:
+                out = out[out["Date"] >= pd.Timestamp(start)]
+            if end:
+                out = out[out["Date"] <= pd.Timestamp(end)]
+            return drop_halted(out.reset_index(drop=True))
+
     years = available_years()
     if not years:
         raise HTTPException(status_code=503, detail="marcap 데이터가 없습니다.")
@@ -529,6 +632,9 @@ def api_candles(
         "name": str(df["Name"].iloc[-1]),
         "count": len(candles),
         "candles": candles,
+        # 이 봉이 어디서 왔나 — 화면이 그대로 띄운다. 두 소스를 같이 쓰기 때문에
+        # "지금 보고 있는 게 어느 쪽 값인지"가 보여야 한다 (오너 2026-08-16).
+        "source": daily_source(code),
     }
 
 
@@ -640,7 +746,7 @@ def api_conditions() -> dict:
     """조건검색 조건 목록 — 프런트가 이 메타로 조건식 UI 를 그린다(계약 고정).
 
     `data_notes` 는 조건을 고르기 전에 알아야 할 데이터 사실이다 — 고치지 않고 알린다
-    (지침서 §5.3). 지금은 수급 결손 하나뿐이다.
+    (지침서 §5.5 알려진 구멍). 지금은 수급 결손 하나뿐이다.
     """
     payload = cond_registry.categories_payload()
     payload["data_notes"] = _data_notes()
@@ -669,6 +775,46 @@ def _data_notes() -> list[dict]:
             }
         )
     return notes
+
+
+@app.get("/api/data/freshness")
+def api_data_freshness() -> dict:
+    """데이터가 어디까지 들어와 있나 — 화면 상단 배지가 쓴다.
+
+    **워터마크 파일 하나만 읽는다.** 데이터 파일을 열지 않으므로 1밀리초다.
+    묵은 데이터는 화면이 멀쩡히 그려져서 눈에 안 띈다 — 그래서 날짜만이 아니라 등급을 준다.
+    """
+    return {
+        "sources": freshness.report(),
+        "worst": freshness.worst_grade(),
+        "refreshing": bool(_REFRESH_STATE["running"]),
+        # 게이지용 — 갱신은 파일 16,576개를 훑어 약 27초 걸린다(실측 2026-08-17).
+        "progress": {
+            "phase": _REFRESH_STATE["phase"],
+            "done": int(_REFRESH_STATE["done"]),
+            "total": int(_REFRESH_STATE["total"]),
+        },
+        "finished_at": _REFRESH_STATE["finished_at"],
+        # 무거운 갱신은 서버가 안 한다 — 사람이 돌릴 명령을 화면에 그대로 보여 준다.
+        "manual_command": ".venv/Scripts/python scripts/update_data.py",
+    }
+
+
+@app.post("/api/data/refresh")
+def api_data_refresh() -> dict:
+    """차트 일봉을 지금 최신으로 (marcap git pull → 캐시 비우기 → 워터마크 다시 훑기).
+
+    실측 2026-08-17: 파일 16,577개를 훑어 약 30초. **뒤에서 도는 스레드**라 그동안에도
+    화면은 그대로 쓸 수 있다 — 갱신 중 차트 응답 147ms → 149ms(1.0배, 실측).
+    파일 읽기는 GIL 을 놓기 때문이다.
+
+    나무 봉·KIS 수급 증분은 **여기서 하지 않는다** — 호출 한도를 크게 태우는 일이라
+    화면 버튼 하나로 시작할 것이 아니다(`manual_command` 참조).
+    """
+    if _REFRESH_STATE["running"]:
+        return {"started": False, "message": "이미 갱신 중입니다."}
+    threading.Thread(target=lambda: _run_refresh(rescan=True), daemon=True).start()
+    return {"started": True, "message": "갱신을 시작했습니다 — 약 30초, 그동안 화면은 그대로 쓰셔도 됩니다."}
 
 
 def _load_history_panel(
@@ -1737,13 +1883,21 @@ def api_simulate(req: SimulateRequest) -> dict:
             if f["side"] == "buy":
                 stage_b = buys[f["stage"] - 1]
                 frac = (stage_b.weight / 100.0) if buy_wsum > 0 else 1 / len(buys)
-                shares = int(req.qty * frac) if req.qty_type == "shares" else int(req.qty * frac / px)
+                shares = (
+                    int(req.qty * frac) if req.qty_type == "shares" else int(req.qty * frac / px)
+                )
                 if shares <= 0:
                     continue
                 position += shares
                 cost_amt += shares * px
                 trade_buys.append(
-                    {"stage": f["stage"], "time": when, "price": px, "shares": shares, "amount": shares * px}
+                    {
+                        "stage": f["stage"],
+                        "time": when,
+                        "price": px,
+                        "shares": shares,
+                        "amount": shares * px,
+                    }
                 )
             elif position > 0:
                 avg_cost = cost_amt / position
@@ -1824,7 +1978,6 @@ def api_simulate(req: SimulateRequest) -> dict:
 
 
 class BacktestRequest(BaseModel):
-    split: str  # train | validate | test(명시 동의 필요)
     conditions: list[dict] = Field(default_factory=list)  # POST /api/screen/run 과 동일 형식
     logic: str = "and"
     # 시작점 — SimulateRequest 와 동일(ADR-0013 7차)
@@ -1853,15 +2006,14 @@ class BacktestRequest(BaseModel):
     sell_tick_offset: int = 0
     buy_min_gap_pct: float = 0.0
     stop: SimStop | None = None
-    # §4.1 Test 는 단 1회 — UI 의 명시 체크 없이는 서버가 거부한다(가드 정본 slice_split).
-    i_know_test_is_once: bool = False
     # 보관함에 남길 이름·검색식 (오너 2026-08-09: "백테스트 돌린 거 어디에 저장해둘 수
     # 있게 해서, 데이터 분석을 너가 가능하도록 해"). 안 주면 이름 없이 담는다.
     label: str = ""
     screen_name: str = ""
-    # 「전 구간」 — 구간 시작 하루가 아니라 **거래일마다** 검색식을 다시 돌린다
+    # **검사 구간 — 화면에서 고른 날짜가 그대로 온다**(ADR-0019). 코드가 안 나눈다.
+    # 안 주면 2007-01-01 ~ 최신 거래일(resolve_period).
+    # /api/backtest/all(전 구간)은 이 구간의 **거래일마다** 검색식을 다시 돌린다
     # (walk_forward, 오너 2026-08-10: "그때부터 하루씩 지금까지 매매 가능해야지").
-    # split 대신 이 두 날짜를 쓴다. 몇 분 걸리므로 /api/backtest/all 로만 받는다.
     start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     # (2026-08-10 폐기) reenter_same_wave — 이제 검색식에 걸린 날마다 무조건 라운드를
@@ -1932,8 +2084,8 @@ def api_backtest(req: BacktestRequest) -> dict:
         result = run_strategy_one(
             req.conditions,
             req.logic,
-            req.split,
-            i_know_test_is_once=req.i_know_test_is_once,
+            start=req.start,
+            end=req.end,
             **_strategy_kwargs(req),
         )
     except ValueError as e:
@@ -2060,5 +2212,7 @@ def api_backtest_all_status(job_id: str) -> dict:
     with _WF_LOCK:
         job = _WF_JOBS.get(job_id)
         if job is None:
-            raise HTTPException(status_code=404, detail="그 검사 기록이 없습니다 — 다시 실행하세요.")
+            raise HTTPException(
+                status_code=404, detail="그 검사 기록이 없습니다 — 다시 실행하세요."
+            )
         return dict(job)

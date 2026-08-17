@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 from api.main import app
 from fastapi.testclient import TestClient
@@ -477,7 +478,7 @@ def test_모르는_되돌림_비율은_거부한다() -> None:
 # ── 주봉·월봉 = 나무증권 원본 + 상폐만 합성 (2026-08-15 오너 결정) ────────────
 
 
-def _fake_daily() -> "pd.DataFrame":
+def _fake_daily() -> pd.DataFrame:
     import pandas as pd
 
     dates = pd.bdate_range("2026-07-06", "2026-07-17")  # 2주(평일 10일)
