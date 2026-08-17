@@ -144,15 +144,17 @@ def screen_by_day(
         raise ValueError(f"{end.date()} 까지의 일봉이 없습니다.")
 
     root = cond_registry.HistPanel(hist, hist["Date"].max())
-    by_day = {d: g.set_index("Code") for d, g in hist.groupby("Date")}
+    # 스팩·코넥스·우선주·리츠·관리종목 제외(ADR-0003)는 **한 번만** 건다.
+    # 날마다 걸면 4,000종목 이름에 정규식을 거래일 수만큼 다시 돌린다
+    # (실측 2026-08-17: 6.5ms/일 → 4,800거래일이면 33초). 규칙이 행 단위라
+    # (그날의 Market·Dept·Name) 통째로 걸어도 날짜별 판정과 결과가 같다.
+    picked = apply_exclusions(hist, exclusions) if exclusions is not None else hist
+    by_day = {d: g.set_index("Code") for d, g in picked.groupby("Date")}
     days = [d for d in sorted(by_day) if start <= pd.Timestamp(d) <= end]
 
     out: dict[pd.Timestamp, list[str]] = {}
     for n, d in enumerate(days, 1):
         base = by_day[d]
-        if exclusions is not None:
-            # 스팩·코넥스·우선주·리츠·관리종목 (ADR-0003). 인덱스(Code)를 유지해야 한다.
-            base = apply_exclusions(base.reset_index(), exclusions).set_index("Code")
         if base.empty:
             continue
         mask = cond_registry.evaluate(parsed, root.at(d, window=lookback + 1), base, logic)
