@@ -52,6 +52,7 @@ from src.layer1_data.derived import drop_halted
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer3_strategy import conditions as cond_registry
+from src.layer3_strategy.fibonacci import FIB_HIGH_MODES
 from src.layer3_strategy.market_structure import wave_series
 from src.layer3_strategy.zigzag import WaveLow, zigzag_params_from
 from src.layer4_execution.backtest import Trade
@@ -275,6 +276,7 @@ def run_walk_forward(
     buy: list[dict],
     sell: list[dict],
     sell_basis: str = "avg_entry",
+    fib_high_mode: str = FIB_HIGH_MODES[0],
     buy_tick_offset: int = 0,
     sell_tick_offset: int = 0,
     buy_min_gap_pct: float = 0.0,
@@ -324,9 +326,15 @@ def run_walk_forward(
     for days in by_code.values():
         days.sort()
 
+    # ── 검색식 값이 진입으로 흐른다 (ADR-0020) ──────────────────────
+    # 250일(52주) 신고가로 종목을 골라 놓고 되돌림은 3년짜리 파동에서 긋던 것을 막는다.
+    # 기간을 진입 쪽에 따로 적지 않는다 — **검색식이 정한 값을 그대로 이어받는다.**
+    fib_high_days = cond_registry.new_high_days(cond_registry.parse_conditions(conditions))
     p = {
         **zz,
         **sr,
+        "fib_high_mode": fib_high_mode,
+        "fib_high_days": fib_high_days,
         "buy": sorted(buys, key=lambda b: b["ratio"]),
         "sell": sorted(
             (s for s in sell if s.get("rebound_pct", 0) > 0), key=lambda s: s["rebound_pct"]

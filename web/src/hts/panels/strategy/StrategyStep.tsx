@@ -47,6 +47,15 @@ export function StrategyStep(props: {
     setDraft((d) => ({ ...d, [k]: v }))
 
   const entryDef = stratMap.get(draft.entryKey)
+  // 검색식이 정한 신고가 기간 — **보여주기 전용**이다. 실제로 쓰는 값은 서버가
+  // 검색식에서 다시 꺼낸다(정본 하나). 어디서 온 값인지 안 보이면 또 두 갈래가 된다.
+  const newHighDays = useMemo(() => {
+    const days = draft.conditions
+      .filter((c) => c.key === 'new_high' || c.key === 'new_high_burst')
+      .map((c) => Number(c.params?.days))
+      .filter((n) => Number.isFinite(n) && n > 0)
+    return days.length ? Math.max(...days) : null
+  }, [draft.conditions])
 
   /** ①에서 만든 검색식을 전략의 종목선정으로 끌어온다 */
   function attachScreen(n: string) {
@@ -201,6 +210,41 @@ export function StrategyStep(props: {
                   values={draft.entryParams}
                   onChange={(k, v) => set('entryParams', { ...draft.entryParams, [k]: v })}
                 />
+              )}
+              {/* 피보나치 **끝점(최고점)** — ADR-0020. 피보나치는 신고가 전용 도구가
+                  아니라서 못 박지 않고 고르게 둔다(오너 2026-08-18). 기간은 여기서 안 받는다 —
+                  검색식이 정한 값을 서버가 그대로 이어받는다(두 곳에 적으면 어긋난다). */}
+              {isFixedDefinition(entryDef.key) && (
+                <>
+                  <KV label="피보나치 끝점">
+                    <select
+                      style={{ flex: 1 }}
+                      value={draft.fibHighMode}
+                      onChange={(e) => set('fibHighMode', e.target.value)}
+                    >
+                      <option value="파동 꼭대기">파동 꼭대기 — 바닥 이후 최고 고가</option>
+                      <option value="N일 신고가">N일 신고가 — 검색식이 정한 기간</option>
+                    </select>
+                  </KV>
+                  <p className="hint">
+                    {draft.fibHighMode === 'N일 신고가' ? (
+                      newHighDays == null ? (
+                        <span className="warn">
+                          검색식에 <b>N일신고가돌파</b>(또는 신고가+거래대금)가 없습니다 —
+                          기간을 가져올 데가 없어 검사가 오류로 끝납니다. ①에서 붙이거나
+                          '파동 꼭대기'로 되돌리세요.
+                        </span>
+                      ) : (
+                        <>
+                          검색식이 정한 <b>{newHighDays}거래일</b>을 그대로 씁니다. 검색식을
+                          고치면 여기도 같이 바뀝니다.
+                        </>
+                      )
+                    ) : (
+                      '바닥 이후 가장 높았던 고가를 끝점으로 씁니다. 검색식이 52주 신고가로 골라도 파동이 더 옛날까지 거슬러 갈 수 있습니다.'
+                    )}
+                  </p>
+                </>
               )}
               {/* "차트에 적용" 버튼은 삭제 (오너 결정 2026-08-06) — ②는 설정만,
                   눈으로 확인은 ③ 시뮬레이션에서. 차트 탭 오버레이 입구도 함께 폐기. */}

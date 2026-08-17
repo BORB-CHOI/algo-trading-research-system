@@ -44,9 +44,15 @@ import pandas as pd
 from src.layer1_data.daily import daily_bars
 from src.layer1_data.derived import drop_halted
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy
+from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy.base_breakout import refine_start
 from src.layer3_strategy.entry_levels import SRTarget, buy_targets_sr
-from src.layer3_strategy.fibonacci import fib_zones_for, wave_start_of
+from src.layer3_strategy.fibonacci import (
+    FIB_HIGH_MODES,
+    fib_zones_for,
+    wave_high_of,
+    wave_start_of,
+)
 from src.layer3_strategy.market_structure import wave_series
 from src.layer3_strategy.support_resistance import SRLevel
 from src.layer3_strategy.tick_size import tick_size
@@ -79,9 +85,7 @@ def _plan_buys(
     # `wave_series` 로 전 날짜 파동을 미리 구해 두고 그걸 넘긴다(실측: 26ms → 0ms).
     if cycle is None:
         cycle = wave_start_of(left, p)
-    rise = left.loc[left["Date"] >= cycle.date].reset_index(drop=True)
-    hi = int(rise["High"].idxmax())
-    high_price = float(rise["High"].iloc[hi])
+    high_price, _ = wave_high_of(left, cycle, p)
     span = high_price - cycle.price
     if span <= 0:
         raise ValueError("파동 바닥과 꼭대기가 같습니다")
@@ -115,7 +119,7 @@ def _wave_key_of(left: pd.DataFrame, p: dict, base: WaveLow) -> tuple[WaveLow, f
 
     선 배치(`_plan_buys`, 8ms)는 비싸니 호출부가 열쇠부터 비교하고 다를 때만 태운다."""
     cycle, _ = refine_start(left, base, p)
-    hi = float(left.loc[left["Date"] >= cycle.date, "High"].max())
+    hi, _ = wave_high_of(left, cycle, p)  # 끝점 정본 하나 (ADR-0020)
     return cycle, hi, (cycle.date, round(float(cycle.price), 4), round(hi, 4))
 
 
@@ -409,6 +413,7 @@ def run_strategy_one(
     buy: list[dict],
     sell: list[dict],
     sell_basis: str = "avg_entry",
+    fib_high_mode: str = FIB_HIGH_MODES[0],
     buy_tick_offset: int = 0,
     sell_tick_offset: int = 0,
     buy_min_gap_pct: float = 0.0,
@@ -434,7 +439,11 @@ def run_strategy_one(
     split_start, split_end = resolve_period(start, end)
     universe, base_date, names = _select_universe(conditions, logic, split_start, hist, exclusions)
 
+    # 검색식이 정한 신고가 기간을 진입이 이어받는다 (ADR-0020).
+    fib_high_days = cond_registry.new_high_days(cond_registry.parse_conditions(conditions))
     p = {
+        "fib_high_mode": fib_high_mode,
+        "fib_high_days": fib_high_days,
         # 파동 파라미터(zz_ 접두 평면 키) — zigzag_params_from 이 읽는다
         **zz,
         # 지지/저항 존 파라미터(sr_prd 등 sr_ 접두 평면 키) — sr_params_from 이 읽는다

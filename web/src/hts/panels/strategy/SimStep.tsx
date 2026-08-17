@@ -164,6 +164,8 @@ export function SimStep(props: {
           id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled, price_override: s.priceOverride,
         })),
         sell_basis: draft.sellBasis,
+      fib_high_mode: draft.fibHighMode,
+      conditions: draft.conditions,
         buy_tick_offset: Number.isInteger(buyOff) ? buyOff : 0,
         sell_tick_offset: Number.isInteger(sellOff) ? sellOff : 0,
         buy_min_gap_pct: Number.isFinite(minGap) && minGap >= 0 ? minGap : 0,

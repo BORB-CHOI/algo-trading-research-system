@@ -1172,6 +1172,28 @@ def required_lookback(parsed: Parsed) -> int:
     return max((cond.lookback(params) for cond, params in parsed), default=0)
 
 
+# 신고가 기간을 들고 있는 조건들 — 뒤 단계(진입)가 이 값을 이어받는다 (ADR-0020).
+NEW_HIGH_KEYS = ("new_high", "new_high_burst")
+
+
+def new_high_days(parsed: Parsed) -> int | None:
+    """**검색식이 정한 신고가 기간**(거래일). 없으면 None.
+
+    ADR-0020: 250일(52주) 신고가로 종목을 골라 놓고 진입은 3년짜리 파동으로 재던 것을
+    막는다. 진입 단계가 이 값을 그대로 이어받으므로, 검색식을 250 → 120 으로 바꾸면
+    피보나치 끝점도 같이 바뀐다 — **둘이 어긋날 길이 없다.**
+
+    신고가 조건이 여러 개면 **가장 긴 것**을 쓴다. 짧은 쪽을 쓰면 긴 조건이 요구한
+    구간을 진입이 못 보게 되어, 화면에서 고른 것보다 좁게 재는 꼴이 된다.
+    """
+    days = [
+        int(params["days"])
+        for cond, params in parsed
+        if cond.key in NEW_HIGH_KEYS and params.get("days")
+    ]
+    return max(days) if days else None
+
+
 def evaluate(parsed: Parsed, hist: HistPanel, base: pd.DataFrame, logic: str) -> pd.Series:
     """조건들을 평가해 AND/OR 로 합친 bool 마스크(base 인덱스)를 돌려준다."""
     combined: pd.Series | None = None

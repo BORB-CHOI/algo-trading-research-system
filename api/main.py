@@ -1595,6 +1595,13 @@ class SimulateRequest(BaseModel):
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high(파동 꼭대기)
+    # 피보나치 **끝점(최고점)** 을 어디로 잡을지 (ADR-0020).
+    # '파동 꼭대기'(기본) = 바닥 이후 최고 고가 — 안 고르면 예전과 결과가 같다.
+    # 'N일 신고가' = 검색식이 정한 신고가 기간을 그대로 쓴다(서버가 conditions 에서 꺼낸다).
+    fib_high_mode: str = fibonacci.FIB_HIGH_MODES[0]
+    # 이 전략의 검색식. 끝점을 'N일 신고가'로 둘 때 **기간을 여기서 꺼낸다** —
+    # 화면이 기간을 따로 계산해 보내면 검색식과 어긋날 수 있다(정본 하나).
+    conditions: list[dict] = Field(default_factory=list)
     buy_tick_offset: int = 0  # 매수 = 선택된 지지/저항선 ±N호가
     sell_tick_offset: int = 0
     buy_min_gap_pct: float = 0.0  # 매수 차수 사이 최소 간격(%) — 0 이면 안 씀
@@ -1642,14 +1649,25 @@ def api_simulate(req: SimulateRequest) -> dict:
             raise HTTPException(
                 status_code=404, detail=f"'{code}' {req.plan_date} 까지 데이터가 없습니다."
             )
+    # 끝점을 'N일 신고가'로 두면 **검색식이 정한 기간**을 그대로 쓴다 (ADR-0020).
+    # 화면이 기간을 따로 보내지 않는다 — 그러면 검색식과 어긋날 수 있다.
+    sim_p = req.model_dump()
+    if req.conditions:
+        try:
+            sim_p["fib_high_days"] = cond_registry.new_high_days(
+                cond_registry.parse_conditions(req.conditions)
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
     try:
-        cycle = fibonacci.wave_start_of(plan_df, req.model_dump())
+        cycle = fibonacci.wave_start_of(plan_df, sim_p)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    rise = plan_df.loc[plan_df["Date"] >= cycle.date].reset_index(drop=True)
-    hp = int(rise["High"].idxmax())  # 동률이면 가장 이른 날 (idxmax = 최초 발생)
-    high_date = pd.Timestamp(rise["Date"].iloc[hp])
-    high_price = float(rise["High"].iloc[hp])
+    # 끝점(최고점)은 layer3 정본 하나가 정한다 — ③·④·오버레이가 같은 답을 내야 한다(ADR-0020).
+    try:
+        high_price, high_date = fibonacci.wave_high_of(plan_df, cycle, sim_p)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     fib_span = high_price - cycle.price
     if fib_span <= 0:
         raise HTTPException(
@@ -1682,7 +1700,7 @@ def api_simulate(req: SimulateRequest) -> dict:
     try:
         fib_map, zones = fibonacci.fib_zones_for(
             plan_df,
-            req.model_dump(),
+            sim_p,
             low=cycle.price,
             high=high_price,
             wave_start=cycle.date,
@@ -1734,7 +1752,7 @@ def api_simulate(req: SimulateRequest) -> dict:
     # 피보나치 선 + 밴드, 지지저항 선 — 차트 오버레이(fibonacci.compute_overlay)와
     # **같은 함수**를 쓴다. 두 화면에서 다르게 보이면 어느 쪽을 믿을지 알 수 없다.
     lines += fibonacci.fib_lines(
-        fib_map, req.model_dump(), span=high_price - cycle.price, atr=last_atr(plan_df)
+        fib_map, sim_p, span=high_price - cycle.price, atr=last_atr(plan_df)
     )
     lines += fibonacci.sr_lines(zones)
 
@@ -1804,6 +1822,8 @@ def api_simulate(req: SimulateRequest) -> dict:
             }
             for s_ in sells
         ],
+        "fib_high_mode": req.fib_high_mode,
+        "fib_high_days": sim_p.get("fib_high_days"),
         "sell_basis": req.sell_basis,
         "buy_tick_offset": req.buy_tick_offset,
         "sell_tick_offset": req.sell_tick_offset,
@@ -2034,6 +2054,10 @@ class BacktestRequest(BaseModel):
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"
+    # 피보나치 **끝점(최고점)** 을 어디로 잡을지 (ADR-0020).
+    # '파동 꼭대기'(기본) = 바닥 이후 최고 고가 — 안 고르면 예전과 결과가 같다.
+    # 'N일 신고가' = 검색식이 정한 신고가 기간을 그대로 쓴다(서버가 conditions 에서 꺼낸다).
+    fib_high_mode: str = fibonacci.FIB_HIGH_MODES[0]
     buy_tick_offset: int = 0
     sell_tick_offset: int = 0
     buy_min_gap_pct: float = 0.0
@@ -2072,6 +2096,7 @@ def _strategy_kwargs(req: BacktestRequest) -> dict:
             "start_volume_mult": req.start_volume_mult,
             "start_keep_mult": req.start_keep_mult,
         },
+        "fib_high_mode": req.fib_high_mode,
         "sr": {
             "fib_band_mode": req.fib_band_mode,
             "fib_band_value": req.fib_band_value,
