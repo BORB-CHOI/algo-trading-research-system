@@ -817,6 +817,11 @@ function fitBars(chart: Chart, el: HTMLElement, want: number): void {
     if (shown <= 0 || Math.abs(shown - n) <= 1) break
     space = Math.max(0.5, (space * shown) / n)
   }
+  // **오른쪽 끝으로 되돌린다.** 봉 폭만 바꾸고 말면, 앞서 스크롤해 둔 자리(showUntil·
+  // 손스크롤)가 그대로 남아 창이 첫 봉보다 왼쪽까지 뻗는다 — 그 자리가 빈 칸으로 보인다
+  // (오너 지적 2026-08-18: "일반 차트로 볼 때 왜 이전 캔들 안 보이냐 왜 또 짤라먹었어").
+  // 구간을 따로 맞추는 쪽(showUntil·showSpan)은 이 뒤에 다시 스크롤하므로 영향이 없다.
+  chart.scrollToDataIndex(total - 1)
 }
 
 export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProChart(props, ref) {
@@ -1062,10 +1067,8 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       for (const d of list) if (d.timestamp >= a && d.timestamp <= b) n++
       if (n <= 0) return
       // 양옆 여유 — 매매 앞뒤 흐름이 보여야 판단이 된다. 하루짜리 매매도 최소 60봉.
-      // **받아온 봉 수를 넘지 않게 자른다** — 넘으면 왼쪽에 빈 칸이 생겨 "캔들이 끊겼다"로
-      // 보인다(오너 지적 2026-08-18).
-      const want = Math.max(60, Math.ceil(n * 1.4) + 20)
-      fitBars(chart, el, Math.min(want, list.length))
+      // 받아온 봉 수로 자르는 일은 `fitBars` 가 한다 — 여기서 또 하지 않는다(정본 하나).
+      fitBars(chart, el, Math.max(60, Math.ceil(n * 1.4) + 20))
       await this.showUntil(to)
     },
     async showUntil(date) {
