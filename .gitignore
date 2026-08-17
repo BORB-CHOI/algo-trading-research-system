@@ -98,3 +98,10 @@ web/dist/
 web/node_modules/
 *.tsbuildinfo
 .gstack/
+
+# 수집 데이터 압축본 — GitHub 업로드 금지 (CLAUDE.md: 수집 데이터 재배포 ❌).
+# data/ 는 이미 막혀 있지만 data.zip 처럼 밖으로 싸 놓으면 그물을 빠져나간다.
+*.zip
+*.7z
+*.tar
+*.tar.gz
