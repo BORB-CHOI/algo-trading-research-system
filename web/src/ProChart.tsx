@@ -37,6 +37,17 @@ type DrawCtx = {
 const RED = '#e01e1e'
 const BLUE = '#1668d0'
 
+/** 그린 수평선 옆에 가격을 **항상** 보여줄지. 그리기 도구 등록은 전역 1회라
+ *  런타임 값은 이 모듈 변수로 읽는다(그릴 때마다 다시 읽힌다). 기본은 꺼짐 —
+ *  오너가 버튼으로 켠다(2026-08-18). */
+let alwaysShowLinePrice = false
+
+/** 수평선 가격을 항상 보일지 정한다. 바꾼 뒤에는 다시 그려야 반영된다.
+ *  **내보내지 않는다** — 이 파일 안 버튼만 쓴다(fast refresh 경고를 늘리지 않게). */
+function setAlwaysShowLinePrice(on: boolean): void {
+  alwaysShowLinePrice = on
+}
+
 let indicatorsRegistered = false
 function ensureIndicators(): void {
   if (indicatorsRegistered) return
@@ -90,6 +101,58 @@ function ensureIndicators(): void {
       return [
         { type: 'line', attrs: { coordinates } },
         ...texts.filter((t): t is NonNullable<typeof t> => t != null),
+      ]
+    },
+  })
+
+  // ── 그리기 도구 '수평선' — 가격을 **항상** 보이게 (오너 2026-08-18).
+  //
+  // 내장 정의는 선 하나만 그리고 가격은 **Y축 딱지**로만 낸다. 그 딱지는 지금 눌러
+  // 고른 선에만 뜬다 — klinecharts `OverlayYAxisView.getDefaultFigures` 가
+  // `overlay.id === clickInstanceInfo.instance?.id` 로 거른다. 그래서 배경을 누르면
+  // 사라진다. 옵션으로 끌 수 있는 게 아니라, 선 위에 글자를 직접 얹어 재등록한다 —
+  // `createPointFigures` 는 고르든 말든 늘 그려지고, 끌면 좌표가 같이 따라온다.
+  //
+  // 기본은 꺼짐이다. 수평선을 여러 개 그으면 오른쪽 끝에 이미 줄지어 있는
+  // 되돌림·지지저항 글자와 겹치기 때문에, 켤지 말지는 오너가 버튼으로 정한다.
+  registerOverlay({
+    name: 'horizontalStraightLine',
+    totalStep: 2,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true, // 눌러 고르면 Y축 딱지도 그대로 뜬다
+    createPointFigures: ({ coordinates, bounding, overlay }) => {
+      const y = coordinates[0]?.y
+      if (y == null) return []
+      const line = {
+        type: 'line',
+        attrs: { coordinates: [{ x: 0, y }, { x: bounding.width, y }] },
+      }
+      const v = overlay.points[0]?.value
+      if (!alwaysShowLinePrice || v == null) return [line]
+      return [
+        line,
+        {
+          type: 'text',
+          ignoreEvent: true, // 글자가 선 집는 걸 방해하지 않게
+          attrs: {
+            x: bounding.width - 2,
+            y: y - 3,
+            text: Math.round(v).toLocaleString('ko-KR'),
+            align: 'right',
+            baseline: 'bottom',
+          },
+          styles: {
+            color: '#1668d0',
+            size: 11,
+            backgroundColor: 'rgba(255,255,255,0.9)',
+            paddingLeft: 4,
+            paddingRight: 4,
+            paddingTop: 2,
+            paddingBottom: 2,
+            borderRadius: 2,
+          },
+        },
       ]
     },
   })
@@ -703,6 +766,9 @@ export type ProChartHandle = {
   setVisibleBars: (n: BarCount) => void
   /** 이 날짜가 화면 왼쪽 끝에 오도록 맞춘다 — 파동 시작점이 화면 밖일 때 쓴다. */
   showFrom: (date: string) => void
+  /** 두 날짜 사이만 화면에 담는다 — 오른쪽 끝이 `to`. 백테스트 표에서 매매 하나를
+   *  눌렀을 때 그 매매 구간으로 좁혀 보여주는 데 쓴다(오너 2026-08-18). */
+  showSpan: (from: string, to: string) => Promise<void>
   /** 이 날짜가 화면 **오른쪽 끝**에 오도록 옮긴다 — 기준일을 손으로 고쳤을 때 차트를 맞춘다.
    *  받아둔 데이터보다 과거면 앞쪽을 더 받아온 뒤 옮긴다. */
   showUntil: (date: string) => Promise<void>
@@ -803,6 +869,9 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     '가격 빈틈': false,
   })
   const toolsRef = useRef(tools)
+  // 그린 수평선의 가격을 항상 띄울지 — 기본은 꺼짐(예전 그대로). 실제 값은 모듈
+  // 변수가 들고 있다(그리기 도구 등록이 전역 1회라서). 여기는 버튼 표시용이다.
+  const [showLinePrice, setShowLinePrice] = useState(false)
   const [busy, setBusy] = useState(false)
   // 차트가 스스로 들고 있는 겹치기 상태 — `layerToggles` 를 켠 화면에서만 쓴다.
   // 바깥에서 setOverlayVisibility 로 덮어써도 되지만, 그건 사이드 패널이 있는 ③ 얘기다.
@@ -979,6 +1048,22 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       if (i < 0) return
       // 그 날짜부터 마지막 봉까지가 화면에 들어오게 — 양옆 여유 5%.
       fitBars(chart, el, Math.ceil((list.length - i) * 1.05))
+    },
+    async showSpan(from, to) {
+      // 먼저 `from` 까지 실제로 받아 온다 — 안 받아왔으면 셀 봉이 없다.
+      await this.showUntil(from)
+      const chart = chartRef.current
+      const el = elRef.current
+      if (!chart || !el) return
+      const list = chart.getDataList()
+      const a = dayTs(from)
+      const b = dayTs(to)
+      let n = 0
+      for (const d of list) if (d.timestamp >= a && d.timestamp <= b) n++
+      if (n <= 0) return
+      // 양옆 여유 — 매매 앞뒤 흐름이 보여야 판단이 된다. 하루짜리 매매도 최소 60봉.
+      fitBars(chart, el, Math.max(60, Math.ceil(n * 1.4) + 20))
+      await this.showUntil(to)
     },
     async showUntil(date) {
       const chart = chartRef.current
@@ -1251,6 +1336,22 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
                 {label}
               </button>
             ))}
+            {/* 그린 수평선의 가격을 항상 띄울지. 끄면 예전처럼 **누른 선만** 보인다
+                (klinecharts 가 Y축 딱지를 고른 오버레이에만 그린다). 여러 개 그으면
+                오른쪽 끝 되돌림·지지저항 글자와 겹쳐서, 켤지는 오너가 정한다. */}
+            <button
+              type="button"
+              className={showLinePrice ? 'on' : ''}
+              title="그린 수평선의 가격을 항상 보이게 (끄면 누른 선만)"
+              onClick={() => {
+                const next = !showLinePrice
+                setShowLinePrice(next)
+                setAlwaysShowLinePrice(next)
+                repaint()
+              }}
+            >
+              값 항상 보기
+            </button>
             <button
               type="button"
               title="그린 것 전부 지우기"

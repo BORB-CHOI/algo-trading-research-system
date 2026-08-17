@@ -360,7 +360,12 @@ export type StartParams = {
 
 export type SimulateRequest = StartParams & {
   code: string
+  /** 데이터·체결을 어디까지 볼지. ③은 기준일, ④ 행 차트는 **검사 종료일**을 준다. */
   end?: string
+  /** 계획을 세우는 날 하나. 주면 그날 계획으로 시작한 매매 **한 건만** 그린다
+   *  (④ 표의 한 줄 = 라운드 하나). 계획은 이 날까지의 데이터로만 세우고, 체결은
+   *  그 다음날부터 `end` 까지 본다. 안 주면 최근 750거래일을 걸으며 여러 건을 낸다. */
+  plan_date?: string
   // 파동(올라간 구간) — TradingView 내장 Auto Fib Retracement 포팅(ADR-0013 5차)
   zz_depth: number // 꼭대기·바닥 판단 — 좌우 zz_depth÷2 봉 창의 극값
   zz_deviation: number // 이만큼은 움직여야 한 파동 (자동이면 배, 고정이면 %)
