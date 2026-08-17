@@ -219,6 +219,51 @@ def zone_label(z: FibZone) -> str:
     return f"{z.ratio * 100:.1f}% 지지저항 · {turns}{place} · {where}"
 
 
+# 피보나치 **끝점(최고점)** 을 어디로 잡을지 (ADR-0020). 화면이 고른다.
+FIB_HIGH_MODES = ("파동 꼭대기", "N일 신고가")
+
+
+def wave_high_of(d: pd.DataFrame, cycle: WaveLow, p: dict) -> tuple[float, pd.Timestamp]:
+    """피보나치 끝점 — **정본은 여기 하나다.** 반환 (가격, 날짜).
+
+    `d` 는 기준일까지 잘린 일봉(오름차순). 호출부가 자른다 — 여기서는 안 자른다.
+
+    - **파동 꼭대기**(기본): 바닥 이후 최고 고가. 지금까지의 방식이라 안 고르면 결과가 안 바뀐다.
+    - **N일 신고가**: 마지막 N거래일 중 최고 고가. N 은 **검색식이 정한다**(`fib_high_days`).
+
+    ## 왜 옵션인가 (ADR-0020)
+
+    250일(52주) 신고가로 종목을 골라 놓고, 되돌림은 3년 7개월짜리 파동에서 그었다
+    (실측 이스트소프트 047560: 2023-01-09 8,480 → 49,800). 검색식이 잡은 사이클과
+    피보나치가 그리는 사이클이 서로 달라, "52주 신고가 눌림"을 확인하려던 게 아니게 됐다.
+
+    그렇다고 못 박지는 않는다 — 피보나치는 신고가 전용 도구가 아니다
+    (오너 2026-08-18: "애초에 피보나치라는 게 신고가에만 적용하는 게 아니잖아").
+
+    동률이면 **가장 이른 날**을 고른다(결정론 — 같은 입력에 같은 답).
+    """
+    mode = str(p.get("fib_high_mode") or FIB_HIGH_MODES[0])
+    if mode not in FIB_HIGH_MODES:
+        raise ValueError(
+            f"모르는 피보나치 끝점 방식입니다: {mode!r} (쓸 수 있는 값: {', '.join(FIB_HIGH_MODES)})"
+        )
+    if mode == FIB_HIGH_MODES[0]:
+        seg = d.loc[d["Date"] >= cycle.date]
+    else:
+        days = p.get("fib_high_days")
+        if not days or int(days) < 1:
+            raise ValueError(
+                "끝점을 'N일 신고가'로 두려면 검색식에 'N일신고가돌파'(또는 신고가+거래대금) "
+                "조건이 있어야 합니다 — 거기서 기간을 가져옵니다."
+            )
+        seg = d.tail(int(days))
+    seg = seg.reset_index(drop=True)
+    if seg.empty:
+        raise ValueError("끝점을 잡을 봉이 없습니다.")
+    hi = int(np.argmax(seg["High"].to_numpy(dtype=np.float64)))
+    return float(seg["High"].iloc[hi]), pd.Timestamp(seg["Date"].iloc[hi])
+
+
 def compute_overlay(df: pd.DataFrame, p: dict) -> dict:
     """일봉(전체 이력, 수정주가) → 올라간 구간 피보나치 + 지지/저항 오버레이 dict.
 
@@ -228,11 +273,7 @@ def compute_overlay(df: pd.DataFrame, p: dict) -> dict:
     """
     cycle = wave_start_of(df, p)
     d = df.loc[df["Close"] > 0].reset_index(drop=True)
-    rise = d.loc[d["Date"] >= cycle.date].reset_index(drop=True)
-    highs = rise["High"].to_numpy(dtype=np.float64)
-    hi = int(np.argmax(highs))  # 동률이면 가장 이른 날 (결정론)
-    high_price = float(highs[hi])
-    high_date = pd.Timestamp(rise["Date"].iloc[hi])
+    high_price, high_date = wave_high_of(d, cycle, p)
     span = high_price - cycle.price
     if span <= 0:
         raise ValueError(

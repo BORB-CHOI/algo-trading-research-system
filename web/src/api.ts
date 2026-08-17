@@ -360,7 +360,16 @@ export type StartParams = {
 
 export type SimulateRequest = StartParams & {
   code: string
+  /** 데이터·체결을 어디까지 볼지. ③은 기준일, ④ 행 차트는 **검사 종료일**을 준다. */
   end?: string
+  /** 이 전략의 검색식 — 끝점을 'N일 신고가'로 둘 때 서버가 여기서 기간을 꺼낸다. */
+  conditions?: ScreenCondition[]
+  /** 피보나치 **끝점(최고점)** — '파동 꼭대기'(기본) | 'N일 신고가' (ADR-0020). */
+  fib_high_mode?: string
+  /** 계획을 세우는 날 하나. 주면 그날 계획으로 시작한 매매 **한 건만** 그린다
+   *  (④ 표의 한 줄 = 라운드 하나). 계획은 이 날까지의 데이터로만 세우고, 체결은
+   *  그 다음날부터 `end` 까지 본다. 안 주면 최근 750거래일을 걸으며 여러 건을 낸다. */
+  plan_date?: string
   // 파동(올라간 구간) — TradingView 내장 Auto Fib Retracement 포팅(ADR-0013 5차)
   zz_depth: number // 꼭대기·바닥 판단 — 좌우 zz_depth÷2 봉 창의 극값
   zz_deviation: number // 이만큼은 움직여야 한 파동 (자동이면 배, 고정이면 %)
@@ -462,6 +471,9 @@ export type BacktestRequest = StartParams & {
   buy: SimStagePayload[]
   sell: SimStagePayload[]
   sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high'
+  /** 피보나치 **끝점(최고점)** — '파동 꼭대기'(기본) | 'N일 신고가' (ADR-0020).
+   *  기간은 안 보낸다 — 서버가 `conditions` 에서 꺼낸다(정본 하나). */
+  fib_high_mode?: string
   buy_tick_offset?: number
   sell_tick_offset?: number
   buy_min_gap_pct?: number

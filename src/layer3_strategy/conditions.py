@@ -62,6 +62,19 @@ class HistPanel:
 
     _NO_ADJ = "no-adjust"  # Stocks 없음 → 보정 생략 표식
 
+    # 이름 → (원본 컬럼, 분할 보정을 어느 쪽으로 하나).
+    #   mul  = 가격류(원본 × 계수) · div = 거래량(원본 ÷ 계수) · none = 거래대금(보정 무관)
+    # `rolled` 가 뿌리에서 굴린 값을 기준일 기준으로 되돌릴 때 이 방향을 뒤집어 쓴다.
+    _FIELDS: dict[str, tuple[str, str]] = {
+        "close": ("Close", "mul"),
+        "open": ("Open", "mul"),
+        "high": ("High", "mul"),
+        "low": ("Low", "mul"),
+        "volume": ("Volume", "div"),
+        "amount": ("Amount", "none"),
+    }
+    _AGGS = ("max", "min", "mean")
+
     def __init__(self, hist: pd.DataFrame, base_date: pd.Timestamp) -> None:
         self.base_date = pd.Timestamp(base_date)
         # 기준일 이후 데이터는 어떤 조건도 봐선 안 된다.
@@ -76,6 +89,10 @@ class HistPanel:
         self._adj_cache: pd.DataFrame | str | None = None
         self._parent: HistPanel | None = None
         self._window: int | None = None
+        # 뿌리에서 **한 번만** 굴린 "직전 N일" 값 — (이름, 기간, 집계) → Date×Code 표.
+        self._roll_cache: dict[tuple[str, int, str], pd.DataFrame] = {}
+        # 캔들패턴도 뿌리에서 한 번만 — TA-Lib 이름 → Date×Code 표(무효봉은 NaN).
+        self._pat_cache: dict[str, pd.DataFrame] = {}
 
     def at(self, base_date: pd.Timestamp | str, *, window: int | None = None) -> HistPanel:
         """기준일만 앞으로 당긴 **보기** — 원본의 와이드 표를 공유한다.
@@ -100,6 +117,8 @@ class HistPanel:
         view._adj_cache = None
         view._parent = self if self._parent is None else self._parent
         view._window = window
+        view._roll_cache = {}  # 보기는 스스로 굴리지 않는다 — 뿌리 것을 잘라 쓴다
+        view._pat_cache = {}
         return view
 
     def has(self, col: str) -> bool:
@@ -167,6 +186,173 @@ class HistPanel:
             else:
                 self._wide_cache[key] = w / adj if divide else w * adj
         return self._wide_cache[key]
+
+    def _field(self, field: str) -> pd.DataFrame:
+        """이름으로 고른 보정된 와이드 표 — close/open/high/low/volume/amount."""
+        col, mode = self._FIELDS[field]
+        if mode == "none":
+            return self._wide(col)  # 거래대금 = 가격×수량이라 분할 보정과 무관
+        return self._adjusted(col, divide=(mode == "div"))
+
+    def rolled(self, field: str, period: int, how: str) -> pd.DataFrame:
+        """**직전 period 거래일을 돌아본 값** (max|min|mean) — 뿌리에서 한 번만 굴린다.
+
+        이동평균·N일신고가·N일신저가·N일평균거래량이 전부 이 한 부품을 쓴다.
+        조건마다 따로 최적화를 박으면 조건이 늘 때마다 어긋난다 —
+        **부품은 하나, 조건의 뜻은 조건 함수에** 남긴다.
+
+        ## 왜 필요한가 (실측 2026-08-17)
+
+        조건 함수가 저마다 `hist.high.rolling(...)` 을 부르면 **날마다 같은 창을
+        처음부터 다시 굴린다.** 어제 이미 본 249일치를 오늘 또 넘기는 셈이다.
+        4,073종목 패널에서 rolling 한 번이 103~363ms 라, 5,085거래일이면 **13분**.
+        뿌리에서 전 날짜를 한 번 굴려 두고 날짜별 보기는 행만 잘라 쓰면 **0.9초**다.
+        `at()` 이 pivot 을 한 번만 하려고 쓰는 수법(47분 → 2.7분)과 같은 것이다.
+
+        ## 미래 데이터를 훔쳐보지 않는다
+
+        rolling 은 **뒤를 돌아보는 창**이다 — i 행의 값은 i 행과 그 앞 period-1 행
+        만으로 정해진다. 그래서 전 날짜를 한 번에 채워도 각 행에 적히는 숫자는
+        그날 혼자 구했을 때와 같다(실측: 뒤 데이터를 잘라내고 구한 값과 30일 전부 일치,
+        최대 차이 2e-16 = 소수점 반올림).
+
+        미래가 새어들 수 있는 곳은 **분할 보정 계수** 하나다 — 그날 이후의 액면분할에
+        좌우되기 때문이다. 그건 `_adj` 가 기준일 기준으로 다시 정규화해 이미 막고 있고,
+        여기서는 그 계수를 **종목별 양수 상수배**로만 쓴다. 상수배는 rolling 과 자리를
+        바꿀 수 있다 — max(x·k) = max(x)·k (k>0). 그래서 뿌리에서 굴린 뒤 기준일
+        계수로 되돌리는 것과, 기준일 기준으로 편 값을 굴리는 것이 **정확히 같다**.
+
+        **안 되는 조건도 있다.** "그날 거래되던 종목 중 시총 상위 20%"처럼 그날
+        종목들끼리 비교하는 조건은 미리 구해둘 수 없다 — 그건 `base` 스냅샷을 그대로
+        쓰고 이 부품을 안 거친다(그리고 이미 1ms 라 손댈 이유도 없다).
+        """
+        if field not in self._FIELDS:
+            raise ValueError(f"모르는 값입니다: {field!r} ({', '.join(self._FIELDS)})")
+        if how not in self._AGGS:
+            raise ValueError(f"모르는 집계입니다: {how!r} ({', '.join(self._AGGS)})")
+        period = int(period)
+        if period < 1:
+            raise ValueError(f"기간은 1 이상이어야 합니다: {period}")
+
+        if self._parent is None:  # 뿌리 — 여기서만 실제로 굴린다
+            key = (field, period, how)
+            if key not in self._roll_cache:
+                win = self._field(field).rolling(period, min_periods=period)
+                self._roll_cache[key] = getattr(win, how)()
+            return self._roll_cache[key]
+
+        cut = self._parent.rolled(field, period, how).loc[: self.base_date]
+        if self._window:
+            cut = cut.tail(self._window)
+        adj = self._parent._adj
+        mode = self._FIELDS[field][1]
+        head = None if isinstance(adj, str) else adj.loc[: self.base_date]
+        if head is None or head.empty or mode == "none":
+            return self._blank_warmup(cut.copy(), period)
+        # 뿌리는 패널 마지막 날 기준으로 접혀 있다 — 기준일 계수로 되돌린다.
+        k = head.iloc[-1]
+        out = self._blank_warmup(cut / k if mode == "mul" else cut * k, period)
+        return self._redo_split_columns(out, field, period, how, k)
+
+    def _redo_split_columns(
+        self, out: pd.DataFrame, field: str, period: int, how: str, k: pd.Series
+    ) -> pd.DataFrame:
+        """**기준일 뒤에 액면분할이 있는 종목**만 예전처럼 창에서 다시 굴린다.
+
+        계수가 1 인 종목(= 기준일 뒤에 분할이 없다)은 나누기가 없는 것과 같아
+        뿌리에서 굴린 값이 예전 값과 **비트 하나까지 같다**. 계수가 1 이 아니면
+        `값×(계수÷기준)` 과 `(값×계수)÷기준` 의 **반올림 차례**가 달라 마지막 자리가
+        1e-16 쯤 어긋난다. 평소엔 안 보이지만, 종가가 선에 **딱 걸린** 날
+        부등호(`<`·`>`)가 뒤집힌다.
+
+        실측 2026-08-17 (2024-03~2025-06, 21개 검색식 46만 건 대조):
+          코아스 4건 — 2024-08-07 액면분할, 기준일 계수 10
+          KH 필룩스 18건 — 2025-05-23 액면병합, 기준일 계수 0.2
+        어긋난 건 이 두 종목 22건이 전부였다. 그런 종목은 하루에 많아야 몇 개라
+        그 열만 도로 굴리면 값은 완전히 같아지고 속도는 그대로다.
+        """
+        # **딱 1.0 인지**를 본다(허용치 없음). 1.0 이면 나누기가 값을 못 바꾸므로
+        # 비트까지 같다는 게 보장되고, 1e-16 이라도 다르면 보장이 깨진다 —
+        # 여기서 근사 비교를 쓰면 이 함수가 막으려는 바로 그 차이를 놓친다.
+        moved = k.index[k.notna() & (k != 1.0)]
+        if len(moved) == 0:
+            return out
+        cols = [c for c in moved if c in out.columns]
+        if not cols:
+            return out
+        window = self._field(field).reindex(columns=cols)
+        out.loc[:, cols] = getattr(window.rolling(period, min_periods=period), how)()
+        return out
+
+    def _blank_warmup(self, frame: pd.DataFrame, period: int) -> pd.DataFrame:
+        """창 앞머리 period-1 행을 도로 비운다 — **예전 방식과 글자 그대로 맞추려고.**
+
+        창을 잘라 그 자리에서 굴리던 예전 방식은 창의 앞부분에서 period 개를 못 채워
+        NaN 이었다. 뿌리는 창 **밖** 이력까지 봐서 그 자리에 값이 있다. 조건 함수는
+        마지막 within 행만 읽으니 실제 판정은 어느 쪽이든 같지만, 표가 다르면 나중에
+        누가 앞쪽 행을 읽는 순간 조용히 달라진다. 그래서 표 자체를 같게 맞춘다.
+
+        (창을 안 씌운 경우엔 앞머리가 이미 NaN 이라 이 일이 아무것도 안 바꾼다.)
+        """
+        if period > 1 and len(frame):
+            frame.iloc[: period - 1] = float("nan")
+        return frame
+
+    def pattern(self, talib_name: str) -> pd.DataFrame:
+        """캔들패턴 판정표 (Date×Code) — **뿌리에서 종목마다 한 번만** TA-Lib 을 돌린다.
+
+        값: +100 상승형 · -100 하락형 · 0 없음 · **NaN = 그날 봉이 없거나 가짜다**
+        (상장 전, 결측, 거래정지일 O=H=L=0 — BORB-32).
+
+        ## 왜 (실측 2026-08-17)
+
+        예전엔 조건 함수가 **날마다** 종목 3,145개를 파이썬으로 돌며 종목별 표를 새로
+        만들고 TA-Lib 을 불렀다. 하루 7.2초 = 4,800거래일이면 **9.5시간**이라 사실상
+        못 쓰는 조건이었다. 종목당 한 번으로 옮기면 4,800분의 1이 된다.
+
+        ## 미래를 훔쳐보지 않는다
+
+        TA-Lib 캔들패턴은 그 봉과 **그 앞 몇 봉**만 본다(함수마다 `lookback` 으로 정해져
+        있고, 몸통 길이 판정에 쓰는 평균도 그 안에 들어간다). 뒤 봉은 안 본다.
+        그래서 전 기간을 한 번에 채워도 각 봉의 값은 그날 혼자 구했을 때와 같다.
+
+        분할 보정 배수는 판정을 안 바꾼다 — 캔들패턴은 몸통·꼬리의 **비율**만 보므로
+        종목별 양수 배수를 곱해도 -100/0/+100 이 그대로다.
+        """
+        if self._parent is not None:
+            return self._parent.pattern(talib_name)
+        if talib_name in self._pat_cache:
+            return self._pat_cache[talib_name]
+        fn = getattr(talib, talib_name)
+        o, h, low, c = self.open, self.high, self.low, self.close
+        cols: dict[str, pd.Series] = {}
+        for code in c.columns:
+            ohlc = pd.DataFrame(
+                {"o": o[code], "h": h[code], "l": low[code], "c": c[code]}
+            ).dropna()
+            # marcap 은 거래정지일을 O=H=L=0, Close=직전가로 채운다(BORB-32 실측).
+            # dropna 로는 안 걸러지므로 0 이하 행(가짜 캔들)을 명시적으로 뺀다 —
+            # 안 하면 정지 해제 부근에 장대양봉·장악형 허위 패턴이 잡힌다.
+            ohlc = ohlc[(ohlc > 0).all(axis=1)]
+            if len(ohlc) < 3:  # 최소 3봉은 있어야 패턴이 성립한다
+                continue
+            cols[code] = pd.Series(
+                fn(
+                    ohlc["o"].to_numpy(float),
+                    ohlc["h"].to_numpy(float),
+                    ohlc["l"].to_numpy(float),
+                    ohlc["c"].to_numpy(float),
+                ),
+                index=ohlc.index,
+                dtype="float64",
+            )
+        out = (
+            pd.DataFrame(cols).reindex(index=c.index, columns=c.columns)
+            if cols
+            else pd.DataFrame(float("nan"), index=c.index, columns=c.columns)
+        )
+        self._pat_cache[talib_name] = out
+        return out
 
     @property
     def close(self) -> pd.DataFrame:
@@ -267,9 +453,13 @@ def _bounds(s: pd.Series, params: dict, scale: float = 1.0) -> pd.Series:
     return mask
 
 
-def _ma(close: pd.DataFrame, period: int) -> pd.DataFrame:
-    """종가 단순이동평균. 이력이 period 미만이면 NaN(비교 시 False)."""
-    return close.rolling(period, min_periods=period).mean()
+def _ma(hist: HistPanel, period: int) -> pd.DataFrame:
+    """종가 단순이동평균. 이력이 period 미만이면 NaN(비교 시 False).
+
+    `hist.rolled` 를 거친다 — 날마다 다시 굴리지 않고 뿌리에서 한 번 굴린 걸 잘라 쓴다.
+    값은 `close.rolling(period).mean()` 과 같다(그 근거는 `rolled` 주석).
+    """
+    return hist.rolled("close", period, "mean")
 
 
 def _cross_up(fast: pd.DataFrame, slow: pd.DataFrame) -> pd.DataFrame:
@@ -379,7 +569,7 @@ def cond_new_high(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     h = hist.high
     if len(h.index) < d + 1:
         return _none(base)
-    prev_max = h.rolling(d, min_periods=d).max().shift(1)
+    prev_max = hist.rolled("high", d, "max").shift(1)
     return (h > prev_max).iloc[-p["within"] :].any()
 
 
@@ -397,7 +587,7 @@ def cond_new_high_burst(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Seri
     h = hist.high
     if len(h.index) < d + 1:
         return _none(base)
-    prev_max = h.rolling(d, min_periods=d).max().shift(1)
+    prev_max = hist.rolled("high", d, "max").shift(1)
     hit = (h > prev_max) & (hist.amount >= p["amount"] * 1e8)
     return hit.iloc[-p["within"] :].any()
 
@@ -408,7 +598,7 @@ def cond_new_low(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     c = hist.close
     if len(c.index) < d + 1:
         return _none(base)
-    prev_min = c.rolling(d, min_periods=d).min().shift(1)
+    prev_min = hist.rolled("close", d, "min").shift(1)
     return (c < prev_min).iloc[-p["within"] :].any()
 
 
@@ -448,8 +638,7 @@ def cond_consec_down(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
 
 def cond_golden_cross(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     """골든크로스: 단기이평이 장기이평을 최근 within일 이내 상향 돌파."""
-    c = hist.close
-    cross = _cross_up(_ma(c, p["short"]), _ma(c, p["long"]))
+    cross = _cross_up(_ma(hist, p["short"]), _ma(hist, p["long"]))
     return cross.iloc[-p["within"] :].any()
 
 
@@ -458,15 +647,13 @@ def cond_dead_cross(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
 
     '단기가 장기 아래로' = '장기가 단기 위로' 이므로 _cross_up 인자를 뒤집어 쓴다.
     """
-    c = hist.close
-    cross = _cross_up(_ma(c, p["long"]), _ma(c, p["short"]))
+    cross = _cross_up(_ma(hist, p["long"]), _ma(hist, p["short"]))
     return cross.iloc[-p["within"] :].any()
 
 
 def cond_ma_breakout(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     """종가이평상향돌파: 종가가 period일 이평을 최근 within일 이내 상향 돌파."""
-    c = hist.close
-    cross = _cross_up(c, _ma(c, p["period"]))
+    cross = _cross_up(hist.close, _ma(hist, p["period"]))
     return cross.iloc[-p["within"] :].any()
 
 
@@ -475,7 +662,7 @@ def cond_above_ma(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     c = hist.close
     if c.empty:
         return _none(base)
-    return c.iloc[-1] > _ma(c, p["period"]).iloc[-1]
+    return c.iloc[-1] > _ma(hist, p["period"]).iloc[-1]
 
 
 def cond_disparity(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
@@ -483,7 +670,7 @@ def cond_disparity(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     c = hist.close
     if c.empty:
         return _none(base)
-    disp = c.iloc[-1] / _ma(c, p["period"]).iloc[-1] * 100
+    disp = c.iloc[-1] / _ma(hist, p["period"]).iloc[-1] * 100
     return _bounds(disp, p)
 
 
@@ -492,9 +679,9 @@ def cond_ma_aligned(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     c = hist.close
     if c.empty:
         return _none(base)
-    s = _ma(c, p["short"]).iloc[-1]
-    m = _ma(c, p["mid"]).iloc[-1]
-    lg = _ma(c, p["long"]).iloc[-1]
+    s = _ma(hist, p["short"]).iloc[-1]
+    m = _ma(hist, p["mid"]).iloc[-1]
+    lg = _ma(hist, p["long"]).iloc[-1]
     return (s > m) & (m > lg)
 
 
@@ -547,43 +734,47 @@ def _pattern_lookback(talib_name: str) -> int:
 
 
 def _make_pattern_fn(talib_name: str, direction: int) -> CondFn:
-    """TA-Lib 캔들패턴 → '최근 within 거래일 이내 발생' 조건 함수.
+    """TA-Lib 캔들패턴 → '최근 within **거래일** 이내 발생' 조건 함수.
 
-    TA-Lib 는 종목별 1차원 배열을 받으므로 종목 루프를 돈다 — 호출당 C 연산이라
-    전 종목(~2,600)도 수백 ms 수준. 결측일(중간 NaN)은 종목별로 걷어내고 계산한다.
-    이때 결측일이 낀 종목은 "within N거래일"의 기준이 공통 달력이 아니라 그 종목의
-    유효 봉 기준이 된다 — 정지 잦은 종목에서 판정 시점이 미묘하게 다를 수 있는 알려진 한계.
+    판정표는 `HistPanel.pattern` 이 뿌리에서 종목당 한 번만 만든다(그 주석 참조).
+    여기서는 창에서 **그 종목의 마지막 유효봉 within개**만 골라 본다 — 거래정지일이
+    낀 종목은 공통 달력이 아니라 자기 봉 기준으로 세는 예전 규칙 그대로다.
     """
-    fn = getattr(talib, talib_name)
 
     def cond(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
         if not (hist.has("High") and hist.has("Low")):
             return _none(base)
-        within = p["within"]
-        o, h, low, c = hist.open, hist.high, hist.low, hist.close
-        out: dict[str, bool] = {}
-        for code in c.columns:
-            ohlc = pd.DataFrame({"o": o[code], "h": h[code], "l": low[code], "c": c[code]}).dropna()
-            # marcap 은 거래정지일을 O=H=L=0, Close=직전가로 채운다(BORB-32 실측).
-            # dropna 로는 안 걸러지므로 0 이하 가격 행(가짜 캔들)을 명시적으로 제거한다 —
-            # 안 하면 정지 해제 부근에서 장대양봉/장악형 허위 패턴이 잡힌다.
-            ohlc = ohlc[(ohlc > 0).all(axis=1)]
-            if len(ohlc) < 3:  # 최소 3봉은 있어야 패턴이 성립한다
-                out[code] = False
-                continue
-            v = fn(
-                ohlc["o"].to_numpy(float),
-                ohlc["h"].to_numpy(float),
-                ohlc["l"].to_numpy(float),
-                ohlc["c"].to_numpy(float),
-            )[-within:]
-            if direction > 0:
-                out[code] = bool((v > 0).any())
-            elif direction < 0:
-                out[code] = bool((v < 0).any())
-            else:
-                out[code] = bool((v != 0).any())
-        return pd.Series(out)
+        within = int(p["within"])
+        w = hist.pattern(talib_name).loc[: hist.base_date]
+        if hist._window:
+            w = w.tail(hist._window)
+        if w.empty:
+            return _none(base)
+        valid = w.notna()
+        if not valid.to_numpy().any():
+            return _none(base)
+        # 아래(최근)에서부터 센 유효봉 순번 — within 번째까지만 본다.
+        rank = valid[::-1].cumsum()[::-1]
+        # 위에서부터 센 순번 — 창 앞머리 워밍업 구간은 판정하지 않는다.
+        #
+        # 예전 코드는 **창 안의 봉만** TA-Lib 에 넘겼다. TA-Lib 은 몸통 길이를 재려고
+        # 앞 몇 봉의 평균을 쓰는데(함수마다 `lookback`), 그 앞부분은 값을 못 내고 0 을
+        # 돌려준다 = "패턴 없음". 정지일이 껴서 창 안 유효봉이 모자란 종목은 그 0 구간이
+        # 판정 범위 안까지 밀고 들어와, **있는 패턴을 못 본 채 지나갔다.**
+        # 뿌리에서 전 이력으로 계산하면 그 봉에도 제대로 된 값이 있어 답이 달라진다
+        # (실측 2026-08-17, 40거래일 × 3,145종목: 도지 3,779건 · 망치형 586건 · 장악형 112건).
+        # 어느 쪽이 옳은지는 오너가 정할 일이라 **지금은 예전과 같게 맞춘다.**
+        warm = _pattern_lookback(talib_name)
+        take = valid & (rank <= within) & (valid.cumsum() > warm)
+        seen = w.where(take)
+        if direction > 0:
+            hit = (seen > 0).any()
+        elif direction < 0:
+            hit = (seen < 0).any()
+        else:
+            hit = (seen != 0).any()
+        # 유효봉이 3개 미만이면 패턴이 성립하지 않는다 (예전 규칙 그대로).
+        return hit & (valid.sum() >= 3)
 
     return cond
 
@@ -594,10 +785,10 @@ def cond_vol_vs_avg(hist: HistPanel, base: pd.DataFrame, p: dict) -> pd.Series:
     v = hist.volume
     if len(v.index) < d + 1:
         return _none(base)
-    window = v.iloc[-1 - d : -1]
-    avg = window.mean()
-    full = window.count() >= d
-    return full & (avg > 0) & (v.iloc[-1] >= avg * p["min"])
+    # 직전 d일(당일 제외) 평균 — min_periods=d 라 이력이 모자라면 NaN(비교 시 False).
+    # 예전의 `window.count() >= d` 판정과 같은 뜻이다.
+    avg = hist.rolled("volume", d, "mean").shift(1).iloc[-1]
+    return (avg > 0) & (v.iloc[-1] >= avg * p["min"])
 
 
 # ─────────────────────────────────────────────────────────────
@@ -979,6 +1170,28 @@ def parse_conditions(raw: list[dict]) -> Parsed:
 def required_lookback(parsed: Parsed) -> int:
     """조건 조합이 요구하는 기준일 이전 거래일 수(최댓값). 데이터 로드 범위 결정용."""
     return max((cond.lookback(params) for cond, params in parsed), default=0)
+
+
+# 신고가 기간을 들고 있는 조건들 — 뒤 단계(진입)가 이 값을 이어받는다 (ADR-0020).
+NEW_HIGH_KEYS = ("new_high", "new_high_burst")
+
+
+def new_high_days(parsed: Parsed) -> int | None:
+    """**검색식이 정한 신고가 기간**(거래일). 없으면 None.
+
+    ADR-0020: 250일(52주) 신고가로 종목을 골라 놓고 진입은 3년짜리 파동으로 재던 것을
+    막는다. 진입 단계가 이 값을 그대로 이어받으므로, 검색식을 250 → 120 으로 바꾸면
+    피보나치 끝점도 같이 바뀐다 — **둘이 어긋날 길이 없다.**
+
+    신고가 조건이 여러 개면 **가장 긴 것**을 쓴다. 짧은 쪽을 쓰면 긴 조건이 요구한
+    구간을 진입이 못 보게 되어, 화면에서 고른 것보다 좁게 재는 꼴이 된다.
+    """
+    days = [
+        int(params["days"])
+        for cond, params in parsed
+        if cond.key in NEW_HIGH_KEYS and params.get("days")
+    ]
+    return max(days) if days else None
 
 
 def evaluate(parsed: Parsed, hist: HistPanel, base: pd.DataFrame, logic: str) -> pd.Series:

@@ -3,6 +3,7 @@ import {
   ActionType,
   dispose as disposeKLineChart,
   init,
+  LoadDataType,
   registerIndicator,
   registerOverlay,
   type Chart,
@@ -36,6 +37,17 @@ type DrawCtx = {
 // 한국식: 상승 = 빨강, 하락 = 파랑. 형광 말고 차분한 톤.
 const RED = '#e01e1e'
 const BLUE = '#1668d0'
+
+/** 그린 수평선 옆에 가격을 **항상** 보여줄지. 그리기 도구 등록은 전역 1회라
+ *  런타임 값은 이 모듈 변수로 읽는다(그릴 때마다 다시 읽힌다). 기본은 꺼짐 —
+ *  오너가 버튼으로 켠다(2026-08-18). */
+let alwaysShowLinePrice = false
+
+/** 수평선 가격을 항상 보일지 정한다. 바꾼 뒤에는 다시 그려야 반영된다.
+ *  **내보내지 않는다** — 이 파일 안 버튼만 쓴다(fast refresh 경고를 늘리지 않게). */
+function setAlwaysShowLinePrice(on: boolean): void {
+  alwaysShowLinePrice = on
+}
 
 let indicatorsRegistered = false
 function ensureIndicators(): void {
@@ -90,6 +102,58 @@ function ensureIndicators(): void {
       return [
         { type: 'line', attrs: { coordinates } },
         ...texts.filter((t): t is NonNullable<typeof t> => t != null),
+      ]
+    },
+  })
+
+  // ── 그리기 도구 '수평선' — 가격을 **항상** 보이게 (오너 2026-08-18).
+  //
+  // 내장 정의는 선 하나만 그리고 가격은 **Y축 딱지**로만 낸다. 그 딱지는 지금 눌러
+  // 고른 선에만 뜬다 — klinecharts `OverlayYAxisView.getDefaultFigures` 가
+  // `overlay.id === clickInstanceInfo.instance?.id` 로 거른다. 그래서 배경을 누르면
+  // 사라진다. 옵션으로 끌 수 있는 게 아니라, 선 위에 글자를 직접 얹어 재등록한다 —
+  // `createPointFigures` 는 고르든 말든 늘 그려지고, 끌면 좌표가 같이 따라온다.
+  //
+  // 기본은 꺼짐이다. 수평선을 여러 개 그으면 오른쪽 끝에 이미 줄지어 있는
+  // 되돌림·지지저항 글자와 겹치기 때문에, 켤지 말지는 오너가 버튼으로 정한다.
+  registerOverlay({
+    name: 'horizontalStraightLine',
+    totalStep: 2,
+    needDefaultPointFigure: true,
+    needDefaultXAxisFigure: true,
+    needDefaultYAxisFigure: true, // 눌러 고르면 Y축 딱지도 그대로 뜬다
+    createPointFigures: ({ coordinates, bounding, overlay }) => {
+      const y = coordinates[0]?.y
+      if (y == null) return []
+      const line = {
+        type: 'line',
+        attrs: { coordinates: [{ x: 0, y }, { x: bounding.width, y }] },
+      }
+      const v = overlay.points[0]?.value
+      if (!alwaysShowLinePrice || v == null) return [line]
+      return [
+        line,
+        {
+          type: 'text',
+          ignoreEvent: true, // 글자가 선 집는 걸 방해하지 않게
+          attrs: {
+            x: bounding.width - 2,
+            y: y - 3,
+            text: Math.round(v).toLocaleString('ko-KR'),
+            align: 'right',
+            baseline: 'bottom',
+          },
+          styles: {
+            color: '#1668d0',
+            size: 11,
+            backgroundColor: 'rgba(255,255,255,0.9)',
+            paddingLeft: 4,
+            paddingRight: 4,
+            paddingTop: 2,
+            paddingBottom: 2,
+            borderRadius: 2,
+          },
+        },
       ]
     },
   })
@@ -599,11 +663,16 @@ async function fetchCandles(
   bars: BarCount,
   minStart?: string,
   market: BarMarket = 'unt',
+  /** 이 날짜까지만. 왼쪽으로 밀어 **더 옛날 봉을 이어 받을 때** 쓴다(그 앞 구간만 받는다). */
+  end?: string,
 ): Promise<{ bars: KLineData[]; source: string }> {
-  const auto = startFor(period, bars)
+  // `end` 가 있으면 그 시점을 기준으로 거슬러 센다 — 지금부터 세면 엉뚱한 구간을 받는다.
+  const auto = startFor(period, bars, end ? Date.parse(`${end}T00:00:00`) : undefined)
   // 전체(bars===0)면 이미 다 받으므로 minStart 는 볼 필요 없다.
   const start = auto == null ? '1990-01-01' : minStart && minStart < auto ? minStart : auto
-  const q = `code=${encodeURIComponent(code)}&period=${period}&start=${start}&market=${market}`
+  const q =
+    `code=${encodeURIComponent(code)}&period=${period}&start=${start}&market=${market}` +
+    (end ? `&end=${end}` : '')
   const res = await fetch(`/api/candles?${q}`)
   if (!res.ok) return { bars: [], source: 'none' } // 404 등 — 화면은 "데이터 없음"으로 남는다
   const { candles, source } = (await res.json()) as {
@@ -703,6 +772,9 @@ export type ProChartHandle = {
   setVisibleBars: (n: BarCount) => void
   /** 이 날짜가 화면 왼쪽 끝에 오도록 맞춘다 — 파동 시작점이 화면 밖일 때 쓴다. */
   showFrom: (date: string) => void
+  /** 두 날짜 사이만 화면에 담는다 — 오른쪽 끝이 `to`. 백테스트 표에서 매매 하나를
+   *  눌렀을 때 그 매매 구간으로 좁혀 보여주는 데 쓴다(오너 2026-08-18). */
+  showSpan: (from: string, to: string) => Promise<void>
   /** 이 날짜가 화면 **오른쪽 끝**에 오도록 옮긴다 — 기준일을 손으로 고쳤을 때 차트를 맞춘다.
    *  받아둔 데이터보다 과거면 앞쪽을 더 받아온 뒤 옮긴다. */
   showUntil: (date: string) => Promise<void>
@@ -751,6 +823,11 @@ function fitBars(chart: Chart, el: HTMLElement, want: number): void {
     if (shown <= 0 || Math.abs(shown - n) <= 1) break
     space = Math.max(0.5, (space * shown) / n)
   }
+  // **오른쪽 끝으로 되돌린다.** 봉 폭만 바꾸고 말면, 앞서 스크롤해 둔 자리(showUntil·
+  // 손스크롤)가 그대로 남아 창이 첫 봉보다 왼쪽까지 뻗는다 — 그 자리가 빈 칸으로 보인다
+  // (오너 지적 2026-08-18: "일반 차트로 볼 때 왜 이전 캔들 안 보이냐 왜 또 짤라먹었어").
+  // 구간을 따로 맞추는 쪽(showUntil·showSpan)은 이 뒤에 다시 스크롤하므로 영향이 없다.
+  chart.scrollToDataIndex(total - 1)
 }
 
 export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProChart(props, ref) {
@@ -771,7 +848,6 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   // 늦게 온 이전 종목 응답이 새 종목을 덮지 않게 하는 순번 (Pro 데이터피드가 하던 일).
   const loadSeq = useRef(0)
   // 지금 받아둔 데이터가 감당하는 봉 수. 0 = 전체 이력. 이보다 많이 보려 하면 다시 받는다.
-  const loadedForRef = useRef<BarCount>(props.initialBars ?? 500)
   // 앞쪽(과거)으로 넓혀 받은 시작일. 기준일을 과거로 옮겼을 때만 채워진다.
   const minStartRef = useRef<string | undefined>(undefined)
   // 부모 콜백을 ref 로 들고 있는다 — 구독은 마운트 때 한 번만 걸고(deps []), 그 클로저가
@@ -803,6 +879,9 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     '가격 빈틈': false,
   })
   const toolsRef = useRef(tools)
+  // 그린 수평선의 가격을 항상 띄울지 — 기본은 꺼짐(예전 그대로). 실제 값은 모듈
+  // 변수가 들고 있다(그리기 도구 등록이 전역 1회라서). 여기는 버튼 표시용이다.
+  const [showLinePrice, setShowLinePrice] = useState(false)
   const [busy, setBusy] = useState(false)
   // 차트가 스스로 들고 있는 겹치기 상태 — `layerToggles` 를 켠 화면에서만 쓴다.
   // 바깥에서 setOverlayVisibility 로 덮어써도 되지만, 그건 사이드 패널이 있는 ③ 얘기다.
@@ -832,10 +911,10 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       )
       if (seq !== loadSeq.current) return // 그 사이 종목·주기가 또 바뀌었다 — 이 응답은 버린다
       setSource(source)
-      loadedForRef.current = want
       lastBaseRef.current = null // 데이터가 통째로 바뀌었다 — 오른쪽 끝을 다시 알린다
       lastSentRef.current = null
-      chart.applyNewData(data)
+      // `more=true` — 왼쪽 끝에 닿으면 엔진이 더 달라고 부른다(setLoadDataCallback).
+      chart.applyNewData(data, true)
       fitBars(chart, el, barsRef.current)
     } finally {
       if (seq === loadSeq.current) setBusy(false)
@@ -923,14 +1002,11 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
 
   /** 봉 개수 전환. 받아둔 데이터로 충분하면 화면만 맞추고(즉시), 모자라면 다시 받는다. */
   function applyBars(n: BarCount): void {
-    const have = loadedForRef.current
     barsRef.current = n
     setBarsState(n)
-    const enough = have === 0 || (n !== 0 && n <= have)
-    if (!enough) {
-      void reload()
-      return
-    }
+    // 봉 수는 **화면 배율**일 뿐이다 — 받아올 범위가 아니다. 모자라면 왼쪽으로 밀 때
+    // 엔진이 알아서 더 받아온다(setLoadDataCallback). 예전엔 여기서 다시 받아오느라
+    // 봉 수가 곧 데이터 범위가 됐고, 그 앞은 밀어도 안 나왔다(오너 지적 2026-08-18).
     const chart = chartRef.current
     const el = elRef.current
     if (chart && el) fitBars(chart, el, n)
@@ -979,6 +1055,23 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       if (i < 0) return
       // 그 날짜부터 마지막 봉까지가 화면에 들어오게 — 양옆 여유 5%.
       fitBars(chart, el, Math.ceil((list.length - i) * 1.05))
+    },
+    async showSpan(from, to) {
+      // 먼저 `from` 까지 실제로 받아 온다 — 안 받아왔으면 셀 봉이 없다.
+      await this.showUntil(from)
+      const chart = chartRef.current
+      const el = elRef.current
+      if (!chart || !el) return
+      const list = chart.getDataList()
+      const a = dayTs(from)
+      const b = dayTs(to)
+      let n = 0
+      for (const d of list) if (d.timestamp >= a && d.timestamp <= b) n++
+      if (n <= 0) return
+      // 양옆 여유 — 매매 앞뒤 흐름이 보여야 판단이 된다. 하루짜리 매매도 최소 60봉.
+      // 받아온 봉 수로 자르는 일은 `fitBars` 가 한다 — 여기서 또 하지 않는다(정본 하나).
+      fitBars(chart, el, Math.max(60, Math.ceil(n * 1.4) + 20))
+      await this.showUntil(to)
     },
     async showUntil(date) {
       const chart = chartRef.current
@@ -1029,6 +1122,29 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     // 나갔다) — `OnZoom` 을 따로 구독해야 "딱 줌한 부분만" 다시 계산된다.
     chart.subscribeAction(ActionType.OnVisibleRangeChange, emitBase)
     chart.subscribeAction(ActionType.OnZoom, emitBase)
+    // 왼쪽 끝까지 밀면 **그 앞 구간을 이어 받는다** — 증권사 차트와 같은 동작이고,
+    // 엔진에 이미 있는 기능이다. 예전엔 봉 수(=화면 배율)가 받아올 범위까지 정해서,
+    // 500봉을 고르면 그 앞이 아예 없어 아무리 밀어도 안 나왔다
+    // (오너 지적 2026-08-18: "500봉으로 캔들 보이는 게 조절되게 하라고 했지
+    //  언제 500개로 캔들 짤라먹으라고 했냐").
+    chart.setLoadDataCallback(({ type, data, callback }) => {
+      if (type !== LoadDataType.Forward || !data) {
+        callback([], type !== LoadDataType.Backward)
+        return
+      }
+      const oldest = new Date(data.timestamp - 86_400_000).toISOString().slice(0, 10)
+      void fetchCandles(
+        symbolRef.current.code,
+        periodRef.current,
+        barsRef.current || 500,
+        undefined,
+        marketRef.current,
+        oldest,
+      ).then(({ bars }) => {
+        // 받은 게 있으면 아직 더 있을 수 있다 — 빈 응답이 오면 거기가 상장일이다.
+        callback(bars, bars.length > 0)
+      })
+    })
     void reload()
 
     // 패널(dockview) 크기가 바뀌면 차트에 알려준다. 엔진은 resize() 를 직접 준다 —
@@ -1251,6 +1367,22 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
                 {label}
               </button>
             ))}
+            {/* 그린 수평선의 가격을 항상 띄울지. 끄면 예전처럼 **누른 선만** 보인다
+                (klinecharts 가 Y축 딱지를 고른 오버레이에만 그린다). 여러 개 그으면
+                오른쪽 끝 되돌림·지지저항 글자와 겹쳐서, 켤지는 오너가 정한다. */}
+            <button
+              type="button"
+              className={showLinePrice ? 'on' : ''}
+              title="그린 수평선의 가격을 항상 보이게 (끄면 누른 선만)"
+              onClick={() => {
+                const next = !showLinePrice
+                setShowLinePrice(next)
+                setAlwaysShowLinePrice(next)
+                repaint()
+              }}
+            >
+              값 항상 보기
+            </button>
             <button
               type="button"
               title="그린 것 전부 지우기"
@@ -1259,6 +1391,27 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
               지우기
             </button>
           </span>
+          {/* 겹치기 칩 — 도구 막대가 있으면 **여기**에 둔다. 차트 위에 띄우면 캔들을
+              가린다(오너 지적 2026-08-18). 막대를 숨긴 화면에서는 아래 떠 있는 쪽을 쓴다. */}
+          {props.layerToggles && (
+            <span className="grp" title="차트에 얹은 선을 하나씩 켜고 끈다">
+              {OVERLAY_LAYERS.map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  className={layerVis[k] ? 'on' : ''}
+                  onClick={() => {
+                    const next = { ...layerVis, [k]: !layerVis[k] }
+                    setLayerVis(next)
+                    overlayRef.current?.setVisibility(next)
+                    repaint()
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </span>
+          )}
           {busy && <span className="dim">불러오는 중…</span>}
         </div>
       )}
@@ -1267,7 +1420,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
             각각 오버레이 키고 끌수 있는 버튼 추가해"). 선이 여러 겹 깔리면 캔들이 안
             보이는데, 사이드 패널이 없는 화면(백테스트 결과 차트)에서는 끌 방법이
             아예 없었다. 차트가 스스로 들고 있어야 어느 화면에 놓아도 따라온다. */}
-        {props.layerToggles && (
+        {props.layerToggles && props.hideToolbar && (
           <div className="pro-layers">
             {OVERLAY_LAYERS.map(([k, label]) => (
               <button

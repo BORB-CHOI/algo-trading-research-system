@@ -293,6 +293,100 @@ def test_simulate_looks_left_of_base_date_only() -> None:
     assert r2.json()["cycle"]["high_date"] >= j["cycle"]["high_date"]
 
 
+# ── ④ 표의 한 줄을 그림으로 (plan_date) ──────────────────────────────────
+#
+# 오너 지적 2026-08-17: 행을 눌러 연 차트에 상관없는 옛 매매가 수십 건 찍히고,
+# 정작 그 행이 사고판 것은 하나도 안 보였다. 원인은 `end=기준일` 로 데이터를 잘라
+# 놓고 최근 750거래일을 걸었던 것 — 계획일과 체결 구간이 뒤엉켜 있었다.
+
+_ROW_CHART_BODY = {
+    "code": "005930",
+    "start_mode": "평평한 구간 돌파",
+    "start_box_bars": 20,
+    "start_volume_mult": 2,
+    "start_keep_mult": 2,
+    "zz_depth": 10,
+    "zz_deviation": 3,
+    "zz_deviation_mode": "자동",
+    "fib_band_mode": "자동",
+    "fib_band_value": 0.5,
+    "sr_scope": "파동 구간",
+    "sr_prd": 10,
+    "sr_loopback": 290,
+    "sr_channel_width_pct": 3,
+    "sr_min_strength": 1,
+    "sr_round_max_gap_pct": 5,
+    "buy": [{"id": "a", "ratio": 0.382, "weight": 50}, {"id": "b", "ratio": 0.5, "weight": 50}],
+    "sell": [{"id": "s", "rebound_pct": 10, "weight": 100}],
+    "sell_basis": "avg_entry",
+}
+
+
+def test_simulate_plan_date_draws_fills_after_the_plan_day() -> None:
+    """`plan_date` 를 주면 체결이 **기준일 다음날부터** 그려진다.
+
+    예전엔 `end=기준일` 이라 데이터가 거기서 잘려, 이 행이 실제로 사고판 것이
+    한 건도 안 보였다(오너 2026-08-17: "기준일 이후에 매매가 하나도 없어").
+    """
+    plan, end = "2026-01-30", "2026-07-16"
+    r = client.post("/api/simulate", json={**_ROW_CHART_BODY, "plan_date": plan, "end": end})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    # 계획은 기준일까지만 본다 — 파동이 기준일 뒤로 넘어가면 미래를 본 것이다.
+    assert j["cycle"]["low_date"] <= j["cycle"]["high_date"] <= plan
+    # 체결은 전부 기준일 **뒤**. 기준일 당일 체결은 없다(신호일 < 체결일 불변식).
+    assert j["fills"], "기준일 이후 체결이 한 건도 없다 — 바로 그 버그다"
+    assert all(plan < f["time"] <= end for f in j["fills"])
+
+
+def test_simulate_plan_date_draws_exactly_one_round() -> None:
+    """`plan_date` 를 주면 라운드가 **하나뿐**이다 — ④ 표의 한 줄과 1:1.
+
+    매수 차수는 2개, 매도는 1개. 한 라운드면 매수 체결은 많아야 2건, 매도는 1건이다.
+    750거래일을 걷던 예전 방식은 같은 종목에 라운드가 여러 개 나와 이 한계를 넘었다.
+    """
+    plan, end = "2026-01-30", "2026-07-16"
+    r = client.post("/api/simulate", json={**_ROW_CHART_BODY, "plan_date": plan, "end": end})
+    assert r.status_code == 200, r.text
+    fills = r.json()["fills"]
+    n_buy = sum(1 for f in fills if f["side"] == "buy")
+    n_sell = sum(1 for f in fills if f["side"] == "sell")
+    assert n_buy <= 2, f"매수 차수는 2개인데 체결 {n_buy}건 — 라운드가 여러 개다"
+    assert n_sell <= 1, f"매도 차수는 1개인데 체결 {n_sell}건 — 라운드가 여러 개다"
+
+
+def test_simulate_plan_date_plan_ignores_data_after_the_plan_day() -> None:
+    """체결 구간(`end`)을 늘려도 **계획은 안 바뀐다** — 미래 데이터 훔쳐보기 방지.
+
+    데이터를 기준일에서 자르지 않게 바꿨으므로, 자르지 않아도 계획이 그대로인지를
+    코드로 못박아 둔다. 파동·되돌림 선·매수 목표가가 전부 같아야 한다.
+    """
+    plan = "2026-01-30"
+    near = client.post("/api/simulate", json={**_ROW_CHART_BODY, "plan_date": plan, "end": plan})
+    far = client.post(
+        "/api/simulate", json={**_ROW_CHART_BODY, "plan_date": plan, "end": "2026-07-16"}
+    )
+    assert near.status_code == 200 and far.status_code == 200, (near.text, far.text)
+    a, b = near.json(), far.json()
+    assert a["cycle"] == b["cycle"]
+    def plan_lines(j: dict) -> list[tuple]:
+        """계획으로 그어진 선만 — 파동·되돌림 선·매수 목표가."""
+        return sorted(
+            (x["kind"], x["label"], round(float(x["price"]), 6))
+            for x in j["lines"]
+            if x["kind"] in {"anchor", "fib", "buy"} and x.get("price") is not None
+        )
+
+    assert plan_lines(a) == plan_lines(b)
+
+
+def test_simulate_without_plan_date_keeps_the_old_walk() -> None:
+    """`plan_date` 를 안 주면 예전대로 — ③ 시뮬레이션은 그대로 여러 라운드를 낸다."""
+    r = client.post("/api/simulate", json={**_ROW_CHART_BODY, "end": "2026-07-16"})
+    assert r.status_code == 200, r.text
+    assert all(f["time"] <= "2026-07-16" for f in r.json()["fills"])
+
+
 def test_overlay_signals_only_strategy_400() -> None:
     """오버레이 미지원 전략(ma_cross)으로 /api/overlay 를 부르면 400."""
     r = client.post(

@@ -1567,6 +1567,11 @@ class SimStop(BaseModel):
 class SimulateRequest(BaseModel):
     code: str
     end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    # 계획을 세우는 날 하나. 주면 **그날 계획으로 시작한 매매 한 건만** 재현한다 —
+    # ④ 표의 한 줄을 그림으로 보는 길(BacktestStep 의 행 차트). 계획은 이 날까지의
+    # 데이터로만 세우고, 체결은 **그 다음날부터 end 까지** 본다. 안 주면 예전대로
+    # 최근 750거래일을 걸으며 라운드를 여러 개 낸다(③ 시뮬레이션).
+    plan_date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     # 시작점 — 평평한 구간 돌파 + 거래대금 (ADR-0013 7차, base_breakout)
     start_mode: str = "평평한 구간 돌파"  # 평평한 구간 돌파 | 상승 전환(옛 방식)
     start_box_bars: int = 20
@@ -1590,6 +1595,13 @@ class SimulateRequest(BaseModel):
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high(파동 꼭대기)
+    # 피보나치 **끝점(최고점)** 을 어디로 잡을지 (ADR-0020).
+    # '파동 꼭대기'(기본) = 바닥 이후 최고 고가 — 안 고르면 예전과 결과가 같다.
+    # 'N일 신고가' = 검색식이 정한 신고가 기간을 그대로 쓴다(서버가 conditions 에서 꺼낸다).
+    fib_high_mode: str = fibonacci.FIB_HIGH_MODES[0]
+    # 이 전략의 검색식. 끝점을 'N일 신고가'로 둘 때 **기간을 여기서 꺼낸다** —
+    # 화면이 기간을 따로 계산해 보내면 검색식과 어긋날 수 있다(정본 하나).
+    conditions: list[dict] = Field(default_factory=list)
     buy_tick_offset: int = 0  # 매수 = 선택된 지지/저항선 ±N호가
     sell_tick_offset: int = 0
     buy_min_gap_pct: float = 0.0  # 매수 차수 사이 최소 간격(%) — 0 이면 안 씀
@@ -1621,14 +1633,41 @@ def api_simulate(req: SimulateRequest) -> dict:
             raise HTTPException(
                 status_code=404, detail=f"'{code}' {req.end} 까지 데이터가 없습니다."
             )
+    # ── 계획을 세우는 날 / 체결을 보는 구간을 가른다 ──────────────────────
+    #
+    # 계획(파동·되돌림 선·지지저항·목표가)은 **고른 날까지의 데이터로만** 세운다.
+    # 체결은 그 다음날부터 봐야 한다 — 데이터를 고른 날에서 잘라 버리면 정작 궁금한
+    # "그래서 샀나 팔았나"가 통째로 사라진다(오너 2026-08-17: "기준일 이후에 매매가
+    # 하나도 없어"). 두 시점을 가르는 일은 엔진(`_run_symbol`)이 이미 하고 있다 —
+    # 계획은 `df[Date <= base_date]`, 체결은 `base_date` 다음 거래일부터.
+    plan_df = full
+    plan_ts: pd.Timestamp | None = None
+    if req.plan_date:
+        plan_ts = pd.Timestamp(req.plan_date)
+        plan_df = full.loc[full["Date"] <= plan_ts].reset_index(drop=True)
+        if plan_df.empty:
+            raise HTTPException(
+                status_code=404, detail=f"'{code}' {req.plan_date} 까지 데이터가 없습니다."
+            )
+    # 끝점을 'N일 신고가'로 두면 **검색식이 정한 기간**을 그대로 쓴다 (ADR-0020).
+    # 화면이 기간을 따로 보내지 않는다 — 그러면 검색식과 어긋날 수 있다.
+    sim_p = req.model_dump()
+    if req.conditions:
+        try:
+            sim_p["fib_high_days"] = cond_registry.new_high_days(
+                cond_registry.parse_conditions(req.conditions)
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
     try:
-        cycle = fibonacci.wave_start_of(full, req.model_dump())
+        cycle = fibonacci.wave_start_of(plan_df, sim_p)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    rise = full.loc[full["Date"] >= cycle.date].reset_index(drop=True)
-    hp = int(rise["High"].idxmax())  # 동률이면 가장 이른 날 (idxmax = 최초 발생)
-    high_date = pd.Timestamp(rise["Date"].iloc[hp])
-    high_price = float(rise["High"].iloc[hp])
+    # 끝점(최고점)은 layer3 정본 하나가 정한다 — ③·④·오버레이가 같은 답을 내야 한다(ADR-0020).
+    try:
+        high_price, high_date = fibonacci.wave_high_of(plan_df, cycle, sim_p)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     fib_span = high_price - cycle.price
     if fib_span <= 0:
         raise HTTPException(
@@ -1639,7 +1678,7 @@ def api_simulate(req: SimulateRequest) -> dict:
             ),
         )
     # 참고 정보 — 파동 꼭대기가 52주 신고가인가 (시장 표준, 전략 판단은 호출부/오너 몫)
-    _, w52_price = find_52w_high(full)
+    _, w52_price = find_52w_high(plan_df)
     is_52w = abs(high_price - w52_price) < 1e-9
 
     warnings: list[str] = []
@@ -1660,8 +1699,8 @@ def api_simulate(req: SimulateRequest) -> dict:
     # ③ 화면·차트 오버레이가 같은 함수(fibonacci.fib_zones_for)를 쓴다.
     try:
         fib_map, zones = fibonacci.fib_zones_for(
-            full,
-            req.model_dump(),
+            plan_df,
+            sim_p,
             low=cycle.price,
             high=high_price,
             wave_start=cycle.date,
@@ -1713,7 +1752,7 @@ def api_simulate(req: SimulateRequest) -> dict:
     # 피보나치 선 + 밴드, 지지저항 선 — 차트 오버레이(fibonacci.compute_overlay)와
     # **같은 함수**를 쓴다. 두 화면에서 다르게 보이면 어느 쪽을 믿을지 알 수 없다.
     lines += fibonacci.fib_lines(
-        fib_map, req.model_dump(), span=high_price - cycle.price, atr=last_atr(full)
+        fib_map, sim_p, span=high_price - cycle.price, atr=last_atr(plan_df)
     )
     lines += fibonacci.sr_lines(zones)
 
@@ -1738,7 +1777,7 @@ def api_simulate(req: SimulateRequest) -> dict:
 
     # 주문 표식을 **기준일 봉**에 매단다 — 오른쪽 끝에 몰아 놓으면 어느 날 건 건지 안 보인다
     # (오너 2026-08-10: "오른쪽 끝 표식 말고 캔들 봉 위 아래로 하라고").
-    plan_day = full["Date"].iloc[-1].strftime("%Y-%m-%d")
+    plan_day = plan_df["Date"].iloc[-1].strftime("%Y-%m-%d")
     buy_px: list[float] = []
     for stage, level in zip(buys, blevels, strict=True):
         computed[stage.id] = level.price
@@ -1783,6 +1822,8 @@ def api_simulate(req: SimulateRequest) -> dict:
             }
             for s_ in sells
         ],
+        "fib_high_mode": req.fib_high_mode,
+        "fib_high_days": sim_p.get("fib_high_days"),
         "sell_basis": req.sell_basis,
         "buy_tick_offset": req.buy_tick_offset,
         "sell_tick_offset": req.sell_tick_offset,
@@ -1797,10 +1838,21 @@ def api_simulate(req: SimulateRequest) -> dict:
         # 같은 종목에서 분 단위로 걸린다(실측 2026-08-10: 전체 이력 걷기 5분+).
         # 더 옛날 매매 기록은 ④ 전 기간 검사로 본다.
         walk_df = drop_halted(full).sort_values("Date").reset_index(drop=True)
+        if plan_ts is not None:
+            # ④ 표의 한 줄 = 그날 계획으로 시작한 매매 **한 건**. 계획일을 하루만 주면
+            # `_rounds_for_code` 가 라운드를 딱 하나 낸다(첫 라운드를 낸 뒤 더 볼 날이 없다).
+            plan_days = list(walk_df.loc[walk_df["Date"] == plan_ts, "Date"])
+            if not plan_days:
+                warnings.append(
+                    f"{req.plan_date} 은 이 종목의 거래일이 아닙니다 — 체결을 그리지 못했습니다."
+                )
+        else:
+            # ③ 시뮬레이션 — 검색식 없이 최근 750거래일 전부가 계획일 후보다.
+            plan_days = list(walk_df["Date"].iloc[-750:])
         for rnd, _trade in _rounds_for_code(
             code,
             walk_df,
-            list(walk_df["Date"].iloc[-750:]),  # 검색식 없이 — 구간 안 거래일 전부가 후보
+            plan_days,
             end=walk_df["Date"].iloc[-1],
             p=p_engine,
             cost=CostModel(round_trip_rate=0.0),  # ③ 은 표시 전용 — 비용은 ④ 소관
@@ -2002,6 +2054,10 @@ class BacktestRequest(BaseModel):
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"
+    # 피보나치 **끝점(최고점)** 을 어디로 잡을지 (ADR-0020).
+    # '파동 꼭대기'(기본) = 바닥 이후 최고 고가 — 안 고르면 예전과 결과가 같다.
+    # 'N일 신고가' = 검색식이 정한 신고가 기간을 그대로 쓴다(서버가 conditions 에서 꺼낸다).
+    fib_high_mode: str = fibonacci.FIB_HIGH_MODES[0]
     buy_tick_offset: int = 0
     sell_tick_offset: int = 0
     buy_min_gap_pct: float = 0.0
@@ -2040,6 +2096,7 @@ def _strategy_kwargs(req: BacktestRequest) -> dict:
             "start_volume_mult": req.start_volume_mult,
             "start_keep_mult": req.start_keep_mult,
         },
+        "fib_high_mode": req.fib_high_mode,
         "sr": {
             "fib_band_mode": req.fib_band_mode,
             "fib_band_value": req.fib_band_value,

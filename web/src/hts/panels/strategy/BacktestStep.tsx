@@ -48,10 +48,13 @@ const ALL_START_DEFAULT = '2007-01-01'
 function RowChart(props: {
   readonly row: BacktestRow
   readonly planDate: string
+  /** 검사 종료일 — 체결을 어디까지 볼지. 기준일에서 자르면 정작 이 행이 사고판 게
+   *  전부 화면 밖으로 사라진다(오너 2026-08-17: "기준일 이후에 매매가 하나도 없어"). */
+  readonly endDate: string
   readonly draft: StrategyDraft
   readonly onClose: () => void
 }) {
-  const { row: r, planDate, draft, onClose } = props
+  const { row: r, planDate, endDate, draft, onClose } = props
   const proRef = useRef<ProChartHandle>(null)
   const [msg, setMsg] = useState('그리는 중…')
   const [sim, setSim] = useState<SimulateResponse | null>(null)
@@ -59,19 +62,29 @@ function RowChart(props: {
   const readyRef = useRef(false)
   const simRef = useRef<SimulateResponse | null>(null)
   const drawnRef = useRef(false)
-  // 무엇을 보여줄 범위인가. 기본은 **전 기간** — 기준일까지만 보면 정작 궁금한 것(그래서
-  // 언제 샀고 언제 팔았나)이 화면 밖에 있다(오너 2026-08-10).
-  const [range, setRange] = useState<'all' | 'plan'>('all')
+  // 무엇을 보여줄 범위인가. 기본은 **이 매매 구간** — 행을 눌러 연 차트인데 전 기간을
+  // 펼쳐 놓으면 정작 이 매매가 화면에서 점 하나가 된다(오너 2026-08-18:
+  // "매매 기록 클릭하면 차트가 해당 구간으로 화면 포커싱 되야지").
+  const [range, setRange] = useState<'trade' | 'all' | 'plan'>('trade')
+
+  /** 이 매매가 벌어진 구간의 끝 — 마지막 청산. 안 팔렸으면 검사 끝까지. */
+  const tradeEnd = r.last_exit ?? (r.open ? endDate : (r.first_fill ?? planDate))
 
   /** 기준일이 화면에 들어오도록 과거 데이터를 끌어온 뒤 범위를 맞춘다.
    *  `showUntil` 이 그 날짜까지 안 받아온 구간을 다시 받아 온다 — 이걸 먼저 해야
    *  '전 기간'에서 파동 바닥(수년 전일 수 있다)이 화면에 들어온다. */
-  async function fit(mode: 'all' | 'plan') {
+  async function fit(mode: 'trade' | 'all' | 'plan') {
     if (mode === 'all') {
       // 먼저 기준일까지 끌어온 **뒤에** 전체로 편다 — 순서가 바뀌면 다시 그 날짜로
       // 스크롤돼서 뒤쪽(언제 샀고 팔았나)이 화면 밖에 남는다.
       await proRef.current?.showUntil(planDate)
       proRef.current?.setVisibleBars(0) // 0 = 받아온 봉 전부
+      return
+    }
+    if (mode === 'trade') {
+      // 기준일 ~ 마지막 청산만 화면에 담는다. 오른쪽 끝이 청산일이라 "언제 사서
+      // 언제 팔았나"가 화면 한가운데 온다.
+      await proRef.current?.showSpan(planDate, tradeEnd)
       return
     }
     proRef.current?.setVisibleBars(500)
@@ -90,7 +103,11 @@ function RowChart(props: {
     let alive = true
     postSimulate({
       code: r.code,
-      end: planDate,
+      // 계획은 **기준일 하루**, 체결은 그 다음날부터 검사 끝까지 — ④ 표의 이 한 줄과
+      // 정확히 같은 매매 한 건만 그린다. 전에는 end=기준일 이라 데이터가 거기서 잘려,
+      // 상관없는 옛 라운드 수십 건이 찍히고 정작 이 행의 체결은 하나도 안 보였다.
+      plan_date: planDate,
+      end: endDate,
       ...START_PAYLOAD,
       ...ZZ_PAYLOAD,
       ...BAND_PAYLOAD,
@@ -100,6 +117,8 @@ function RowChart(props: {
         id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled,
       })),
       sell_basis: draft.sellBasis,
+      fib_high_mode: draft.fibHighMode,
+      conditions: draft.conditions,
       buy_tick_offset: Number(draft.buyTickOffset || '0') || 0,
       sell_tick_offset: Number(draft.sellTickOffset || '0') || 0,
       buy_min_gap_pct: Number(draft.buyMinGapPct || '0') || 0,
@@ -131,10 +150,17 @@ function RowChart(props: {
       title={`${r.name || r.code} ${r.code} — ${planDate} 기준`}
     >
       <div className="bt-chart-canvas">
+        {/* 도구 막대는 ③ 시뮬레이션·차트 탭과 **같은 것**을 쓴다 — 봉 수(200·300·500·
+            1000·전부)·주기·지표·그리기 도구가 다 여기 있다. 예전엔 숨기고 라디오 두 개만
+            뒀는데, 정작 500봉으로 보는 길이 없었다(오너 2026-08-18: "기껏 모듈화 했는데"). */}
         <ProChart
           ref={proRef}
           initialSymbol={{ code: r.code, name: r.name || r.code, market: '' }}
-          hideToolbar
+          // 처음부터 **전 이력**을 받는다. 기본(500봉)이면 오늘 기준 500거래일치만
+          // 받아와서, 몇 년 전 매매를 열면 그 앞이 통째로 없다 — 데이터가 없는 게
+          // 아니라 안 받아온 것인데 "캔들이 끊겼다"로 보인다(오너 지적 2026-08-18).
+          // 이 창은 지나간 매매 하나를 들여다보는 자리라 처음부터 다 있어야 한다.
+          initialBars={0}
           layerToggles
           onBaseBar={() => {
             // 봉이 들어왔다는 신호 — 이때부터 showUntil·오버레이가 먹는다.
@@ -165,6 +191,17 @@ function RowChart(props: {
         )}
         {sim && msg && <span className="warn">{msg}</span>}
         <span style={{ marginLeft: 'auto' }} className="radios">
+          <label>
+            <input
+              type="radio"
+              checked={range === 'trade'}
+              onChange={() => {
+                setRange('trade')
+                void fit('trade')
+              }}
+            />
+            이 매매
+          </label>
           <label>
             <input
               type="radio"
@@ -292,6 +329,7 @@ export function BacktestStep(props: {
           id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled,
         })),
         sell_basis: draft.sellBasis,
+        fib_high_mode: draft.fibHighMode,
         buy_tick_offset: Number.isInteger(buyOff) ? buyOff : 0,
         sell_tick_offset: Number.isInteger(sellOff) ? sellOff : 0,
         buy_min_gap_pct: Number.isFinite(minGap) && minGap >= 0 ? minGap : 0,
@@ -542,11 +580,12 @@ export function BacktestStep(props: {
 
       {/* 행에서 연 차트 — 이 화면 위에 뜬다. 열쇠에 종목·기준일을 넣어, 다른 행을 누르면
           새로 마운트되면서 그 종목으로 다시 그린다. */}
-      {chartFor && (
+      {chartFor && btResult && (
         <RowChart
           key={`${chartFor.row.code}@${chartFor.date}`}
           row={chartFor.row}
           planDate={chartFor.date}
+          endDate={btResult.split_end}
           draft={draft}
           onClose={() => setChartFor(null)}
         />

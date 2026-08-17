@@ -69,6 +69,9 @@ export type Strategy = {
   screen: { name?: string; logic: ScreenLogic; conditions: SavedCondition[] }
   /** 진입 기법(케이스 검사기 오버레이용). 전략 1호 시뮬레이션은 안 쓴다 — 선택 사항. */
   entry?: { key: string; params: Record<string, number | string> }
+  /** 피보나치 **끝점(최고점)** — '파동 꼭대기'(기본) | 'N일 신고가' (ADR-0020).
+   *  없으면(옛 저장본) 기본값이라 성적이 안 바뀐다. 기간은 검색식이 정한다. */
+  fibHighMode?: string
   /** 분할 매수·매도 설계. 가격은 여기 없다 — 기법 파라미터와 종목에서 계산된다.
    *  목표가 = 각 레벨에서 가장 가까운 지지/저항선 ± 호가 오프셋(ADR-0014).
    *  roundTolerancePct 는 라운드 피겨 방식 폐기로 옛 저장본 호환용으로만 남는다. */
@@ -138,6 +141,10 @@ export type StrategyDraft = {
   logic: ScreenLogic
   conditions: SavedCondition[]
   entryKey: string
+  /** 피보나치 **끝점(최고점)**을 어디로 잡을지 (ADR-0020).
+   *  '파동 꼭대기' = 바닥 이후 최고 고가(기본, 예전과 같음)
+   *  'N일 신고가'  = 검색식이 정한 신고가 기간 — 기간은 **서버가 검색식에서 꺼낸다** */
+  fibHighMode: string
   entryParams: Record<string, string>
   buy: BuyStage[]
   sell: SellStage[]
@@ -180,6 +187,7 @@ export function emptyDraft(): StrategyDraft {
     logic: 'and',
     conditions: [],
     entryKey: '',
+    fibHighMode: '파동 꼭대기',
     entryParams: {},
     buy: [],
     sell: [],
@@ -209,6 +217,7 @@ export function toDraft(s: Strategy): StrategyDraft {
     logic: s.screen.logic,
     conditions: (s.screen.conditions ?? []).map((c) => ({ key: c.key, params: { ...c.params } })),
     entryKey: s.entry?.key ?? '',
+    fibHighMode: s.fibHighMode ?? '파동 꼭대기',
     entryParams,
     // split 이 없는 옛 저장본도 열려야 한다 — 빈 배열로 받는다.
     buy: (s.split?.buy ?? []).map((b) => ({ ...b })),
@@ -382,6 +391,7 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
         conditions: d.conditions,
       },
       ...(entry ? { entry } : {}),
+      ...(d.fibHighMode ? { fibHighMode: d.fibHighMode } : {}),
       ...(stop ? { stop } : {}),
       split: {
         buy: d.buy.map((b) => ({ ...b })),
