@@ -24,9 +24,11 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
 
 import pandas as pd
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -49,8 +51,10 @@ from src.layer1_data.derived import (
 )
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
+from src.layer1_data.krx_gapfill import fill_marcap_gap
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer1_data.market import index_boards, market_snapshot
+from src.layer1_data.namuh_live import LIVE, is_market_hours
 from src.layer1_data.news import market_news, stock_news
 from src.layer1_data.provider import DataProvider
 from src.layer1_data.quotes_rt import realtime_quotes
@@ -79,6 +83,8 @@ from src.layer4_execution.stops import DEFAULT_FIB_STOP_RATIO
 from src.layer4_execution.strategy_one import run_strategy_one
 from src.layer4_execution.walk_forward import Progress, _rounds_for_code, run_walk_forward
 
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")  # KRX_AUTH_KEY 등 — 빠른 갱신이 marcap 공백을 KRX 로 채울 때 쓴다
+
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
 # Amount(거래대금)는 KLineChart 의 turnover 로. Stocks(상장주식수)는 액면분할 감지용(ADR-0006).
 _CANDLE_COLS = [
@@ -100,8 +106,10 @@ _CANDLE_COLS = [
 # 받는 것**이다(high watermark). 데이터 파일을 전부 열어 보며 알아내지 않는다 — 실측
 # 2026-08-16 기준 수급 폴더 하나 훑는 데 47초, 나무 봉 전체는 4.2분이었다(API 호출 0건인데도).
 #
-# **서버를 켤 때는 빠른 것만 한다**: marcap `git pull`(몇 초) → 프로세스 캐시 비우기.
-# 차트 일봉의 정본이 그 깃 복제본이라, 그것만 당기면 차트 오른쪽 끝이 오늘이 된다.
+# **서버를 켤 때는 빠른 것만 한다**: marcap `git pull`(몇 초) → marcap 뒤쪽 공백을 KRX 로
+# 채우기(날짜당 3콜, 몇 초) → 프로세스 캐시 비우기.
+# 차트 일봉의 정본이 그 깃 복제본이라, 그것만 당기면 차트 오른쪽 끝이 어제쯤 되고,
+# KRX 공백 채우기까지 하면 오늘(장 마감 후)까지 온다.
 # 나무 봉·KIS 수급 증분은 호출 한도를 크게 태우므로 **서버가 멋대로 시작하지 않는다** —
 # 그건 사람이 `scripts/update_data.py` 로 돌린다.
 
@@ -145,11 +153,14 @@ def _run_refresh(*, rescan: bool) -> dict:
 
     try:
         pulled = pull_marcap()
-        if pulled.get("changed"):
+        _REFRESH_STATE.update(phase="marcap 뒤쪽 공백 KRX 로 채우는 중")
+        gap = fill_marcap_gap()
+        changed = bool(pulled.get("changed") or gap.get("saved") or gap.get("removed"))
+        if changed:
             _clear_data_caches()
-        if rescan or pulled.get("changed"):
+        if rescan or changed:
             freshness.refresh_marks(on_progress=progress)
-        result = {"marcap": pulled, "sources": freshness.report()}
+        result = {"marcap": pulled, "recent": gap, "sources": freshness.report()}
     except Exception as e:  # 서버가 이것 때문에 죽으면 안 된다 — 실패도 값으로 남긴다
         result = {"error": f"{type(e).__name__}: {e}"}
     finally:
@@ -443,6 +454,35 @@ def _symbol_master() -> pd.DataFrame:
     df = load_years(years[-1], years[-1])
     df = df.sort_values("Date").drop_duplicates("Code", keep="last")
     return df[["Code", "Name", "Market"]].reset_index(drop=True)
+
+
+@app.get("/api/live/bar")
+def api_live_bar(
+    code: str = Query(..., description="종목코드 6자리"),
+    market: str = Query("unt", pattern="^(krx|unt|nxt)$"),
+) -> dict:
+    """장중 **이 종목만** 오늘 봉을 실시간으로(나무 웹소켓). 표시 전용 — 파일엔 안 쓴다.
+
+    오너 결정 2026-08-18: 장중엔 전 종목을 갱신하지 않는다. 어제까지가 정본이고, 차트를 연
+    종목만 오늘 봉을 진행형으로 붙인다. 화면이 1~2초마다 이걸 부르는 동안만 구독이 살아 있다.
+
+    `stored_last_day` = 파일에 이미 들어간 마지막 날짜. 저녁 갱신이 오늘 봉을 이미 썼으면
+    화면은 실시간 봉을 덧붙이지 않는다(같은 날이 두 번 나온다).
+    """
+    code = code.strip().zfill(6)
+    raw = load_namuh_bars(code, "day", market)
+    stored_last = str(raw["Date"].max().date()) if raw is not None and not raw.empty else None
+    open_now = is_market_hours()
+    bar = LIVE.bar(market, code) if open_now else None
+    return {
+        "code": code,
+        "market": market,
+        "market_open": open_now,
+        "connected": LIVE.connected,
+        "stored_last_day": stored_last,
+        "bar": bar,
+        "error": LIVE.last_error if not LIVE.connected and open_now else None,
+    }
 
 
 @app.get("/api/health")
