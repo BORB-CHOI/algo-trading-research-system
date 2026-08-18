@@ -9,6 +9,7 @@ import {
   type Chart,
   type KLineData,
 } from 'klinecharts'
+import { mergeLive, shouldApply, todayStart, type LiveBarResponse } from './liveBar'
 import { registerKoreanLocale } from './locales'
 import { allVisible, type OverlayVisibility } from './simVisibility'
 import {
@@ -863,6 +864,8 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   const lastSentRef = useRef<number | null>(null)
 
   const [sym, setSym] = useState({ ...first })
+  // 장중 실시간 오늘 봉의 밑봉(주봉·월봉은 어제까지 합성된 진행 봉에 오늘을 합친다).
+  const liveBaseRef = useRef<KLineData | null>(null)
   // 이 봉이 어디서 왔나 — 상장 종목은 나무 수집본, 상장폐지·미수집은 marcap 보정본.
   // 두 소스를 같이 쓰므로 화면이 그걸 말해 줘야 한다 (오너 2026-08-16).
   const [source, setSource] = useState('none')
@@ -915,6 +918,9 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       lastSentRef.current = null
       // `more=true` — 왼쪽 끝에 닿으면 엔진이 더 달라고 부른다(setLoadDataCallback).
       chart.applyNewData(data, true)
+      // 장중 실시간 봉을 얹을 밑봉 = 서버가 준 마지막 봉(오늘이 아직 안 들어간 것).
+      const last = data.length ? data[data.length - 1] : null
+      liveBaseRef.current = last && last.timestamp < todayStart() ? last : null
       fitBars(chart, el, barsRef.current)
     } finally {
       if (seq === loadSeq.current) setBusy(false)
@@ -1176,6 +1182,37 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 장중 실시간 — **이 차트가 보고 있는 종목만** 2초마다 오늘 봉을 받아 오른쪽 끝에 얹는다
+  // (오너 결정 2026-08-18: 장중엔 전 종목 갱신 ❌, 차트 연 종목만 실시간). 서버가 나무
+  // 웹소켓 구독을 들고 있고, 이 폴링이 멈추면(차트 닫힘) 30초 뒤 구독도 풀린다.
+  // 분봉은 나무 수집본 그대로라 여기서 건드리지 않는다.
+  useEffect(() => {
+    if (period !== 'day' && period !== 'week' && period !== 'month') return
+    let stopped = false
+    const tick = async (): Promise<void> => {
+      if (stopped || document.hidden) return
+      const chart = chartRef.current
+      if (!chart) return
+      const q = `code=${encodeURIComponent(sym.code)}&market=${market}`
+      let res: LiveBarResponse
+      try {
+        const r = await fetch(`/api/live/bar?${q}`)
+        if (!r.ok) return
+        res = (await r.json()) as LiveBarResponse
+      } catch {
+        return // 서버가 잠깐 없어도 차트는 그대로 둔다
+      }
+      if (stopped || !shouldApply(res) || !res.bar) return
+      chart.updateData(mergeLive(period, liveBaseRef.current, res.bar))
+    }
+    void tick()
+    const id = window.setInterval(() => void tick(), 2000)
+    return () => {
+      stopped = true
+      window.clearInterval(id)
+    }
+  }, [sym.code, period, market])
 
   function pickMarket(m: BarMarket): void {
     marketRef.current = m
