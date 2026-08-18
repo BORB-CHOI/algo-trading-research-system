@@ -280,7 +280,7 @@ def refresh_marks(
     for src in SOURCES:
         step = tick(str(src["label"]))
         if src["key"] == "marcap":
-            last, n = _scan_marcap(Path(marcap_dir))
+            last, n = _scan_marcap(Path(marcap_dir), recent_dir=Path(root) / "recent")
             step()
         else:
             last, n = scan_last_date(Path(root) / src["dir"], src["date_col"], on_file=step)
@@ -293,8 +293,12 @@ def refresh_marks(
     return written
 
 
-def _scan_marcap(marcap_dir: Path) -> tuple[str | None, int]:
-    """marcap 은 연도별 한 파일이다 — 가장 늦은 연도 파일의 날짜 열만 본다."""
+def _scan_marcap(marcap_dir: Path, recent_dir: Path | None = None) -> tuple[str | None, int]:
+    """marcap 은 연도별 한 파일이다 — 가장 늦은 연도 파일의 날짜 열만 본다.
+
+    marcap 뒤쪽 공백을 KRX 로 채운 보충 파일(`recent/YYYY-MM-DD.parquet`)이 있으면 그 날짜가
+    차트 일봉의 실제 오른쪽 끝이다 — 파일 이름이 날짜라 열지 않고도 안다.
+    """
     import pyarrow.parquet as pq
 
     files = sorted(Path(marcap_dir).glob("marcap-*.parquet"))
@@ -306,4 +310,13 @@ def _scan_marcap(marcap_dir: Path) -> tuple[str | None, int]:
         return None, 0
     if len(col) == 0:
         return None, 0
-    return _norm(max(col.to_pylist())), len(files)
+    last = _norm(max(col.to_pylist()))
+    if recent_dir is not None:
+        for f in Path(recent_dir).glob("*.parquet"):
+            try:
+                day = _norm(pd.Timestamp(f.stem))
+            except ValueError:
+                continue
+            if day > last:
+                last = day
+    return last, len(files)
