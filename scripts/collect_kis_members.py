@@ -57,7 +57,7 @@ DAILY_URL = "/uapi/domestic-stock/v1/quotations/inquire-member-daily"
 DAILY_TR = "FHPST04540000"
 
 STATE_PATH = MEMBERS_PATH.parent / "_state.json"
-WORKERS = 3  # 수급 백필과 같은 값 — 5줄기는 거절만 늘었다(실측 2026-08-15)
+WORKERS = 5  # 오너 결정 2026-08-18: 5줄기(초당 10건, 한도 20). 거절은 재시도가 받는다.
 FLOOR = "20250101"  # 이보다 뒤는 어차피 안 준다(260거래일 한도). 넉넉히 잡고 서버가 자르게 둔다
 
 _LOCK = threading.Lock()

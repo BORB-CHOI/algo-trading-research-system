@@ -132,7 +132,8 @@ def collect_code(client: KisClient, code: str, first_date: str, last_date: str) 
     )
 
 
-def make_client() -> tuple[KisClient, object]:
+def make_client_parts() -> tuple[KisCredentials, object]:
+    """실전 자격증명 + 토큰. 다른 호출 정책으로 클라이언트를 만들 때 쓴다(멀티시세 등)."""
     load_dotenv(ROOT / ".env")
     import os
 
@@ -143,7 +144,11 @@ def make_client() -> tuple[KisClient, object]:
     )
     if creds.env != "real":
         raise SystemExit("이 TR 은 실전(real) 전용이다. .env 의 KIS_ENV=real 확인.")
-    token = get_access_token(creds, cache_path=TOKEN_CACHE)
+    return creds, get_access_token(creds, cache_path=TOKEN_CACHE)
+
+
+def make_client() -> tuple[KisClient, object]:
+    creds, token = make_client_parts()
     return KisClient(creds, token, policy=POLICY), token
 
 
