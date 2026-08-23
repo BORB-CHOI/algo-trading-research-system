@@ -242,6 +242,140 @@ def wave_series(df: pd.DataFrame, params: ZigZagParams, *, as_of: AsOf = None) -
     )
 
 
+def find_impulse_origin(
+    df: pd.DataFrame,
+    params: ZigZagParams,
+    *,
+    as_of: AsOf = None,
+    since: pd.Timestamp | None = None,
+) -> WaveLow | None:
+    """이번 상승의 **맨 처음 출발점** — 엘리엇 1파가 시작된 바닥. 없으면 None.
+
+    ## 규칙 (엘리엇 3대 불가침 규칙 1번)
+
+    > 2파는 1파를 100% 넘게 되돌리지 못한다 = **2파 저점은 1파 시작점을 못 깬다.**
+
+    공개 구현이 검증식으로 그대로 쓰는 조건이다 — ElliottWaveAnalyzer 의
+    `lambda wave1, wave2: wave2.low > wave1.low`
+    (https://github.com/btcorgtfo/ElliottWaveAnalyzer).
+
+    그래서 **한 번도 안 깨진 저점**이 출발점이다. 정확히는 **뒤에 더 낮은 저점이 하나도
+    없는 저점 중 가장 이른 것**이다. 그보다 앞선 저점은 나중에 깨졌다는 뜻이라(= 그게
+    1파 시작이었다면 2파가 100% 넘게 되돌린 셈) 이번 상승의 출발일 수 없다.
+
+    **바로 앞 저점만 보고 뒤로 가면 안 된다.** 중간에 깊은 눌림이 하나 있으면 거기서
+    멈춰버린다 — 실측 에스티팜 237690, 기준일 2021-12-24:
+
+        12,300(2019-08-06) → 16,650 → 20,950 → 32,000 → 55,000 → 66,000
+        → 98,200(2021-06-18) → 82,100(2021-10-06)
+
+    마지막 82,100 은 바로 앞 98,200 보다 낮지만 출발점 12,300 은 안 깼다. "앞의 저점이
+    더 낮을 때만 뒤로" 로 짜면 98,200 에서 멈춰 82,100 을 출발점이라고 답한다(실측 오답).
+
+    ## 왜 `find_trend_start` 로는 안 되나 (오너 지적 2026-08-22)
+
+    > "1,2,3,4,5,ABC가 있으면 바닥을 1 시작점으로 잡아야 하는데 너 자꾸 4에다가 걸고
+    >  3에다가 걸고 그러고 있는거야 알아?"
+
+    `find_trend_start` 는 **상승 전환이 확인된 그 순간의 직전 저점**을 쓴다(`_walk` 의
+    `cur_start = cur_low.index`). 그건 보통 2파·4파 눌림 바닥이라, 한 번 하락 전환이
+    나면 출발점이 눌림 자리로 리셋된다.
+
+    실측 LG헬로비전 037560, 기준일 2019-02-08:
+
+    | 저점 | 값 |
+    |---|---|
+    | 2017-11-16 | 6,600 ← 안 깨진 출발점 |
+    | 2018-04-16 | 7,490 ← `find_trend_start` 가 고르던 자리(4파 눌림) |
+    | 2018-08-28 | 7,670 |
+    | 2018-10-30 | 8,550 |
+    | 2018-12-26 | 8,950 |
+
+    6,600 이후 저점이 한 번도 그 아래로 안 내려갔다 = 이번 상승은 거기서 시작했다.
+
+    ## `since` — 언제부터 볼 것인가
+
+    "안 깨진 저점"만 찾으면 30년 이력 종목에서 **1998년 IMF 바닥**까지 거슬러 간다.
+    실측 2026-08-23: 롯데푸드 002270 기준일 2018-08-01 -> 1998-07-07 8,525원,
+    현대차증권 001500 기준일 2026-02-20 -> 1998-07-18 1,050원. 화면에 파동 바닥이
+    안 보인다던 게 이것이다(오너 지적) — 20년 전이라 차트 밖이다.
+
+    `since` 는 그 시작선이다. 호출부가 `impulse_window_start` 로 구해서 넘긴다.
+    """
+    lows = [t for t in find_turns(df, params, as_of=as_of) if not t.is_high]
+    if since is not None:
+        lows = [t for t in lows if t.date >= since]
+    if not lows:
+        return None
+    # 뒤에 자기보다 낮은 저점이 있으면 그 저점은 깨진 것이다. 뒤에서부터 최소값을 쌓아
+    # 두고(suffix min) 앞에서부터 처음으로 "안 깨진" 저점을 고른다.
+    after_min = [float("inf")] * len(lows)
+    for i in range(len(lows) - 2, -1, -1):
+        after_min[i] = min(after_min[i + 1], lows[i + 1].price)
+    for t, floor in zip(lows, after_min, strict=True):
+        if t.price <= floor:  # 뒤에 더 낮은 게 없다 = 안 깨졌다
+            return WaveLow(date=t.date, price=float(t.price), confirmed=True, falling=False)
+    return None
+
+
+def impulse_window_start(df: pd.DataFrame, high_price: float) -> pd.Timestamp | None:
+    """이번 파동을 **어디서부터** 볼 것인가 — 지금 꼭대기를 마지막으로 넘었던 날의 다음 날.
+
+    없으면(사상 최고가) None = 이력 전체를 본다.
+
+    ## 왜 필요한가
+
+    엘리엇 1번 규칙("2파는 1파 시작점을 못 깬다")만으로 출발점을 찾으면 상장 이래
+    최저점이 나온다. 그런데 그 사이에 **지금 값보다 높은 자리**가 있었다면 그건 다른
+    파동(이미 끝난 상승)이다. 지금 꼭대기를 마지막으로 넘었던 그 자리 뒤부터가
+    이번 파동이다.
+
+    실측 2026-08-23:
+
+    | 종목 | 기준일 | 옛 바닥 | 새 바닥 |
+    |---|---|---|---|
+    | 롯데푸드 002270 | 2018-08-01 | 1998-07-07 8,525 | 아래 표 참조 |
+    | 현대차증권 001500 | 2026-02-20 | 1998-07-18 1,050 | 아래 표 참조 |
+
+    꼭대기 봉 자신은 `High == high_price` 라 세지 않는다(**초과**만 센다).
+    기준일까지 잘린 `df` 만 받으므로 미래를 못 본다.
+    """
+    highs = df["High"].to_numpy(dtype=np.float64)
+    over = np.flatnonzero(highs > float(high_price))
+    if over.size == 0:
+        return None
+    j = int(over[-1])
+    if j + 1 >= len(df):
+        return None
+    return pd.Timestamp(df["Date"].iloc[j + 1])
+
+
+def momentum_break_start(df: pd.DataFrame, drop_pct: float) -> pd.Timestamp | None:
+    """**앞선 상승이 죽은 자리** — 그 뒤부터가 이번 파동이다. 없으면 None.
+
+    오너 지시 2026-08-23: "기간이 문제가 아니라, 거래대금, 이전 상승장의 하락이 엄청
+    하락해서 모멘텀이 끝났다 라는 판단이 들면 거기를 바닥으로 봐야지."
+
+    그때까지의 최고 고가 대비 저가가 `drop_pct`% 넘게 빠진 **마지막 날**을 찾는다.
+    거기서 앞선 장은 끝났다 — 그 앞의 저점은 이번 상승과 상관이 없다.
+
+    얼마나 빠져야 끝인지는 **화면에서 정한다**(`wave_break_pct`). 0 이하면 안 쓴다.
+    거래대금은 여기서 안 본다 — 바닥(평평한 구간 돌파) 판정이 이미 거래대금 2배·이후
+    2배를 요구한다. 두 군데서 따로 재면 어긋난다.
+
+    기준일까지 잘린 `df` 만 받으므로 미래를 못 본다.
+    """
+    if drop_pct <= 0 or df.empty:
+        return None
+    high = df["High"].to_numpy(dtype=np.float64)
+    low = df["Low"].to_numpy(dtype=np.float64)
+    peak = np.maximum.accumulate(high)
+    broke = np.flatnonzero((peak > 0) & (low <= peak * (1.0 - drop_pct / 100.0)))
+    if broke.size == 0 or int(broke[-1]) + 1 >= len(df):
+        return None
+    return pd.Timestamp(df["Date"].iloc[int(broke[-1]) + 1])
+
+
 def find_trend_start(df: pd.DataFrame, params: ZigZagParams, *, as_of: AsOf = None) -> WaveLow:
     """되돌림을 그을 **이번 상승장의 출발 바닥** — `wave_series` 의 마지막 날 값.
 
