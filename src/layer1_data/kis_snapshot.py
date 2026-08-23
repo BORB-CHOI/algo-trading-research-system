@@ -29,8 +29,20 @@ MARKET_CODE = {"krx": "J", "unt": "UN", "nxt": "NX"}
 
 # 나무 일봉 파일 열 — 값이 없는 나무 전용 열은 빈 문자열로 둔다(차트·백테스트는 OHLCV·대금만 읽는다)
 NAMUH_DAY_COLS = [
-    "bsop_date", "bsop_time", "stck_sdpr", "stck_oprc", "stck_hgpr", "stck_lwpr", "stck_prpr",
-    "vol", "tr_pbmn", "flng_cls_code", "prtt_rate", "news_cnt", "updownmark", "fcam_mod_cls_code",
+    "bsop_date",
+    "bsop_time",
+    "stck_sdpr",
+    "stck_oprc",
+    "stck_hgpr",
+    "stck_lwpr",
+    "stck_prpr",
+    "vol",
+    "tr_pbmn",
+    "flng_cls_code",
+    "prtt_rate",
+    "news_cnt",
+    "updownmark",
+    "fcam_mod_cls_code",
 ]
 
 

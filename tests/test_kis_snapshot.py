@@ -15,9 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 ITEM = {
-    "inter_shrn_iscd": "005930", "inter2_prpr": "274500", "inter2_oprc": "275000",
-    "inter2_hgpr": "275500", "inter2_lwpr": "266000", "acml_vol": "21669476",
-    "acml_tr_pbmn": "5874450961500", "inter2_prdy_clpr": "268000", "inter2_sdpr": "268000",
+    "inter_shrn_iscd": "005930",
+    "inter2_prpr": "274500",
+    "inter2_oprc": "275000",
+    "inter2_hgpr": "275500",
+    "inter2_lwpr": "266000",
+    "acml_vol": "21669476",
+    "acml_tr_pbmn": "5874450961500",
+    "inter2_prdy_clpr": "268000",
+    "inter2_sdpr": "268000",
 }
 HALTED = {**ITEM, "inter_shrn_iscd": "000001", "inter2_prpr": "0", "acml_vol": "0"}
 
@@ -95,7 +101,9 @@ def test_kis_bars_ready_gate(ud) -> None:
     assert ud.kis_bars_ready("20260818", datetime(2026, 8, 18, 20, 5))
     assert not ud.kis_bars_ready("20260818", datetime(2026, 8, 18, 19, 0))
     assert ud.kis_bars_ready("20260818", datetime(2026, 8, 19, 7, 30))  # 다음날 장 열리기 전
-    assert not ud.kis_bars_ready("20260818", datetime(2026, 8, 19, 10, 0))  # 장중 — 오늘 체결이 섞인다
+    assert not ud.kis_bars_ready(
+        "20260818", datetime(2026, 8, 19, 10, 0)
+    )  # 장중 — 오늘 체결이 섞인다
     assert ud.kis_bars_ready("20260814", datetime(2026, 8, 15, 12, 0))  # 토요일
 
 
@@ -123,4 +131,7 @@ def test_merge_period_save_replaces_same_week(ud, tmp_path) -> None:
     oldm = pd.DataFrame([["202607", "1"], ["202608", "2"]], columns=cols)
     ud.merge_period_save(path, oldm, pd.DataFrame([["202608", "9"]], columns=cols), "month")
     got = pd.read_parquet(path)
-    assert got["bsop_date"].tolist() == ["202607", "202608"] and got["stck_prpr"].tolist() == ["1", "9"]
+    assert got["bsop_date"].tolist() == ["202607", "202608"] and got["stck_prpr"].tolist() == [
+        "1",
+        "9",
+    ]

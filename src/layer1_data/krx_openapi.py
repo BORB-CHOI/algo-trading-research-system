@@ -33,9 +33,23 @@ MARKETS: dict[str, tuple[str, str]] = {
 
 # marcap 과 열 이름·순서를 맞춘다 — 그대로 이어붙일 수 있게.
 MARCAP_COLS = [
-    "Date", "Code", "Name", "Market", "MarketId", "Dept",
-    "Open", "High", "Low", "Close", "Volume", "Amount",
-    "Changes", "ChangesRatio", "Marcap", "Stocks", "Rank",
+    "Date",
+    "Code",
+    "Name",
+    "Market",
+    "MarketId",
+    "Dept",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Amount",
+    "Changes",
+    "ChangesRatio",
+    "Marcap",
+    "Stocks",
+    "Rank",
 ]
 
 
@@ -106,21 +120,26 @@ def to_marcap_frame(rows: list[dict], market: str, bas_dd: str) -> pd.DataFrame:
         o, h, lo = (_num(r.get(k)) for k in ("TDD_OPNPRC", "TDD_HGPRC", "TDD_LWPRC"))
         stocks = _num(r.get("LIST_SHRS")) or 0.0
         dept = str(r.get("SECT_TP_NM") or "").strip() or None
-        out.append({
-            "Date": day,
-            "Code": _short_code(r.get("ISU_CD", "")),
-            "Name": str(r.get("ISU_NM", "")).strip(),
-            "Market": str(r.get("MKT_NM") or market).strip(),
-            "MarketId": market_id,
-            "Dept": dept,
-            "Open": o or close, "High": h or close, "Low": lo or close, "Close": close,
-            "Volume": _num(r.get("ACC_TRDVOL")) or 0.0,
-            "Amount": _num(r.get("ACC_TRDVAL")) or 0.0,
-            "Changes": _num(r.get("CMPPREVDD_PRC")) or 0.0,
-            "ChangesRatio": _num(r.get("FLUC_RT")) or 0.0,
-            "Marcap": _num(r.get("MKTCAP")) or close * stocks,
-            "Stocks": int(stocks),
-        })
+        out.append(
+            {
+                "Date": day,
+                "Code": _short_code(r.get("ISU_CD", "")),
+                "Name": str(r.get("ISU_NM", "")).strip(),
+                "Market": str(r.get("MKT_NM") or market).strip(),
+                "MarketId": market_id,
+                "Dept": dept,
+                "Open": o or close,
+                "High": h or close,
+                "Low": lo or close,
+                "Close": close,
+                "Volume": _num(r.get("ACC_TRDVOL")) or 0.0,
+                "Amount": _num(r.get("ACC_TRDVAL")) or 0.0,
+                "Changes": _num(r.get("CMPPREVDD_PRC")) or 0.0,
+                "ChangesRatio": _num(r.get("FLUC_RT")) or 0.0,
+                "Marcap": _num(r.get("MKTCAP")) or close * stocks,
+                "Stocks": int(stocks),
+            }
+        )
     if not out:
         return pd.DataFrame(columns=MARCAP_COLS)
     df = pd.DataFrame(out)
@@ -130,9 +149,7 @@ def to_marcap_frame(rows: list[dict], market: str, bas_dd: str) -> pd.DataFrame:
 
 def snapshot(bas_dd: str, key: str, session: requests.Session | None = None) -> pd.DataFrame:
     """그 날짜 전 시장 스냅샷(코스피+코스닥+코넥스). 휴장일이면 빈 표. 시총 순위도 매긴다."""
-    frames = [
-        to_marcap_frame(fetch_rows(m, bas_dd, key, session), m, bas_dd) for m in MARKETS
-    ]
+    frames = [to_marcap_frame(fetch_rows(m, bas_dd, key, session), m, bas_dd) for m in MARKETS]
     frames = [f for f in frames if not f.empty]
     if not frames:
         return pd.DataFrame(columns=MARCAP_COLS)
@@ -142,7 +159,9 @@ def snapshot(bas_dd: str, key: str, session: requests.Session | None = None) -> 
 
 
 def last_trading_day(
-    key: str, today: date | None = None, lookback: int = 10,
+    key: str,
+    today: date | None = None,
+    lookback: int = 10,
     session: requests.Session | None = None,
 ) -> str:
     """오늘부터 뒤로 가며 코스피 자료가 있는 첫 날 = 시장의 마지막 거래일(YYYYMMDD).

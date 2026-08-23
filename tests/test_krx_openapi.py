@@ -15,16 +15,31 @@ from src.layer1_data import krx_gapfill
 from src.layer1_data import krx_openapi as krx
 
 ROW = {
-    "BAS_DD": "20260814", "ISU_CD": "005930", "ISU_NM": "삼성전자", "MKT_NM": "KOSPI",
-    "SECT_TP_NM": "", "TDD_CLSPRC": "274,500", "CMPPREVDD_PRC": "6,500", "FLUC_RT": "2.43",
-    "TDD_OPNPRC": "275,000", "TDD_HGPRC": "275,500", "TDD_LWPRC": "266,000",
-    "ACC_TRDVOL": "21,669,476", "ACC_TRDVAL": "5,874,450,961,500",
-    "MKTCAP": "1,604,803,477,896,000", "LIST_SHRS": "5,846,278,608",
+    "BAS_DD": "20260814",
+    "ISU_CD": "005930",
+    "ISU_NM": "삼성전자",
+    "MKT_NM": "KOSPI",
+    "SECT_TP_NM": "",
+    "TDD_CLSPRC": "274,500",
+    "CMPPREVDD_PRC": "6,500",
+    "FLUC_RT": "2.43",
+    "TDD_OPNPRC": "275,000",
+    "TDD_HGPRC": "275,500",
+    "TDD_LWPRC": "266,000",
+    "ACC_TRDVOL": "21,669,476",
+    "ACC_TRDVAL": "5,874,450,961,500",
+    "MKTCAP": "1,604,803,477,896,000",
+    "LIST_SHRS": "5,846,278,608",
 }
 HALTED = {**ROW, "ISU_CD": "KR7000001000", "ISU_NM": "거래정지", "TDD_CLSPRC": "-"}
 KOSDAQ_ROW = {
-    **ROW, "ISU_CD": "035720", "ISU_NM": "카카오", "MKT_NM": "KOSDAQ",
-    "SECT_TP_NM": "관리종목(소속부없음)", "TDD_CLSPRC": "50,000", "MKTCAP": "1,000",
+    **ROW,
+    "ISU_CD": "035720",
+    "ISU_NM": "카카오",
+    "MKT_NM": "KOSDAQ",
+    "SECT_TP_NM": "관리종목(소속부없음)",
+    "TDD_CLSPRC": "50,000",
+    "MKTCAP": "1,000",
     "LIST_SHRS": "10",
 }
 
@@ -106,7 +121,9 @@ def test_fill_gap_saves_new_days_and_drops_superseded(tmp_path, monkeypatch) -> 
 
     # 두 번째 회차 — 이미 받은 8/17 은 다시 부르지 않는다
     calls.clear()
-    krx_gapfill.fill_marcap_gap("k", today=date(2026, 8, 18), out_dir=tmp_path, snapshot=fake_snapshot)
+    krx_gapfill.fill_marcap_gap(
+        "k", today=date(2026, 8, 18), out_dir=tmp_path, snapshot=fake_snapshot
+    )
     assert calls == ["20260818"]
 
 
