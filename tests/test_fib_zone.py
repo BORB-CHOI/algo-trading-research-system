@@ -116,9 +116,10 @@ def test_되돌림_선이_들어간_자리를_쓴다() -> None:
     zones = find_fib_zones(
         FIBS, [lv(195_000, 205_000)], span=200_000, atr=0, band=BAND, round_max_gap_pct=GAP
     )
-    # 0.236·0.382 선은 이 자리 위라 '바로 아래 자리'로 같은 걸 받고, 0.618 은 아래에
-    # 자리가 없어 빠진다.
-    assert [z.ratio for z in zones] == [0.236, 0.382, 0.5]
+    # 0.236·0.382 선은 이 자리 위라 '바로 아래 자리'로 같은 걸 받는다. 0.618 은 아래에
+    # 자리가 없어 **라운드 피겨로** 걸린다(오너 2026-08-22, 아래 시험 참조).
+    assert [z.ratio for z in zones] == [0.236, 0.382, 0.5, 0.618]
+    assert next(z for z in zones if z.ratio == 0.618).pivots == 0  # 라운드 피겨로만 그은 자리
     z = next(z for z in zones if z.ratio == 0.5)
     assert (z.bottom, z.top, z.avg) == (195_000.0, 205_000.0, 200_000.0)
     assert z.inside is True
@@ -141,12 +142,27 @@ def test_자리_사이_빈틈이면_바로_아래_자리를_쓴다() -> None:
     assert z.order_price == 190_000
 
 
-def test_아래에_자리가_없으면_안_준다() -> None:
-    """위쪽 자리를 억지로 주지 않는다 — 신고가 근처를 사는 게 된다."""
+def test_아래에_자리가_없으면_라운드_피겨로_건다() -> None:
+    """위쪽 자리를 억지로 주지는 않는다 — 신고가 근처를 사는 게 되니까.
+
+    대신 **그 되돌림 선 근처의 라운드 피겨**로 건다 (오너 2026-08-22: "신고가라서 참고할
+    지지/저항이 없으면 라운드 피겨로만 그으면 되잖아").
+
+    전에는 그냥 뺐다. 그러면 그 차수가 통째로 사라지고 남은 차수가 저 아래 엉뚱한 자리
+    하나에 몰린다 — 실측 LG헬로비전 2019-02-08 에서 3차수가 전부 10,000 에 붙어
+    파동 바닥(10,080)보다 **아래**에 주문이 걸렸다.
+    """
     zones = find_fib_zones(
         FIBS, [lv(280_000, 290_000)], span=200_000, atr=0, band=BAND, round_max_gap_pct=GAP
     )
-    assert [z.ratio for z in zones] == []
+    assert [z.ratio for z in zones] == [0.236, 0.382, 0.5, 0.618]
+    # 전부 '닿은 적 없음' 표식 — 지지선이 아니라 라운드 피겨로 그은 자리다.
+    assert all(z.pivots == 0 and z.inside is False for z in zones)
+    # 각 선이 **자기 근처** 라운드 피겨를 받는다 (한 자리에 몰리지 않는다).
+    got = {z.ratio: z.order_price for z in zones}
+    assert got[0.236] == 250_000
+    assert got[0.5] == 200_000
+    assert len(set(got.values())) == len(got)
 
 
 def test_한_자리에_여러_되돌림_선이_들어갈_수_있다() -> None:
@@ -169,7 +185,9 @@ def test_최소로_닿아야_하는_횟수에_못_미치면_뺀다() -> None:
         round_max_gap_pct=GAP,
         min_pivots=2,
     )
-    assert zones == []
+    # 그 자리는 빠지지만, 되돌림 선은 라운드 피겨로 걸린다(위 시험과 같은 규칙).
+    assert all(z.pivots == 0 for z in zones)
+    assert next(z for z in zones if z.ratio == 0.5).order_price == 200_000
 
 
 def test_평균이_한가운데와_다르면_평균을_쓴다() -> None:

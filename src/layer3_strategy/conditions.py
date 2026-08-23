@@ -327,9 +327,7 @@ class HistPanel:
         o, h, low, c = self.open, self.high, self.low, self.close
         cols: dict[str, pd.Series] = {}
         for code in c.columns:
-            ohlc = pd.DataFrame(
-                {"o": o[code], "h": h[code], "l": low[code], "c": c[code]}
-            ).dropna()
+            ohlc = pd.DataFrame({"o": o[code], "h": h[code], "l": low[code], "c": c[code]}).dropna()
             # marcap 은 거래정지일을 O=H=L=0, Close=직전가로 채운다(BORB-32 실측).
             # dropna 로는 안 걸러지므로 0 이하 행(가짜 캔들)을 명시적으로 뺀다 —
             # 안 하면 정지 해제 부근에 장대양봉·장악형 허위 패턴이 잡힌다.

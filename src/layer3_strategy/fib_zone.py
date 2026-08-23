@@ -159,6 +159,24 @@ def _round_candidates(z: SRChannel, max_gap_pct: float, kind: InstrumentKind) ->
     return tuple(round_figures_all_between(z.avg * (1 - slack), z.avg * (1 + slack), kind))
 
 
+def _round_near(
+    px: float, half: float, max_gap_pct: float, kind: InstrumentKind
+) -> tuple[tuple[int, ...], int] | None:
+    """되돌림 선 근처의 라운드 가격 후보와 그중 대표값. 후보가 없으면 None.
+
+    먼저 그 선의 **밴드 안**에서 찾고, 비면 `max_gap_pct` 만큼 넓혀 본다
+    (`_round_candidates` 가 지지선에 대해 하는 것과 같은 두 단계).
+    """
+    prices = tuple(round_figures_all_between(px - half, px + half, kind))
+    if not prices:
+        slack = max_gap_pct / 100.0
+        prices = tuple(round_figures_all_between(px * (1 - slack), px * (1 + slack), kind))
+    if not prices:
+        return None
+    order = pick_order_price(prices, px, max_gap_pct=max_gap_pct)
+    return (prices, order) if order is not None else None
+
+
 def _assign(levels: Sequence[SRChannel], fib_price: float) -> tuple[SRChannel, bool] | None:
     """되돌림 선 하나에 지지선·저항선을 배정한다.
 
@@ -210,11 +228,40 @@ def find_fib_zones(
     out: list[FibZone] = []
     for ratio in sorted(fib_prices):
         px = fib_prices[ratio]
+        half = band_half(px, span=span, atr=atr, p=band)
         hit = _assign(usable, px)
         if hit is None:
+            # ── 배정할 지지/저항이 없다 → **그 되돌림 선 근처의 라운드 피겨**로 건다.
+            #
+            # 신고가라 위쪽에 참고할 자리가 아예 없는 경우다(오너 2026-08-22: "신고가라서
+            # 참고할 지지/저항이 없으면 라운드 피겨로만 그으면 되잖아").
+            #
+            # 전에는 그냥 `continue` 라 그 차수가 통째로 사라졌고, 남은 차수들이 저 아래
+            # 엉뚱한 선 하나에 몰렸다. 실측 LG헬로비전 2019-02-08: 3차수가 전부 10,000
+            # 하나에 붙어 파동 바닥(10,080)보다 **아래**에 주문이 걸렸다.
+            #
+            # 기준은 **그 선 자신**이다 — 다른 선을 끌어오지 않으므로 차수 간격이 유지된다.
+            fallback = _round_near(px, half, round_max_gap_pct, kind)
+            if fallback is None:
+                continue
+            prices, order = fallback
+            out.append(
+                FibZone(
+                    ratio=ratio,
+                    fib_price=px,
+                    band_bottom=px - half,
+                    band_top=px + half,
+                    bottom=px - half,
+                    top=px + half,
+                    avg=px,
+                    pivots=0,  # 닿은 적 없다 — 라운드 피겨로만 그은 자리라는 표식
+                    inside=False,
+                    round_prices=prices,
+                    order_price=order,
+                )
+            )
             continue
         z, inside = hit
-        half = band_half(px, span=span, atr=atr, p=band)
         prices = _round_candidates(z, round_max_gap_pct, kind)
         out.append(
             FibZone(
