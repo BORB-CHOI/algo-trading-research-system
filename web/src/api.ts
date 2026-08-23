@@ -56,6 +56,10 @@ export type Symbol = {
   market: string
   kind?: SymbolKind
   kindLabel?: string
+  /** 상장폐지된 종목 — 검색에는 나오되 태그로 알린다 (오너 2026-08-23). */
+  delisted?: boolean
+  /** 마지막으로 거래된 날 (상장폐지 종목이면 그날이 마지막 봉이다). */
+  lastDate?: string
 }
 
 export type SymbolFilter = { market?: string; kind?: SymbolKind | '' }
@@ -72,7 +76,15 @@ export async function searchSymbols(
   if (filter.kind) p.set('kind', filter.kind)
   const r = await getJson<{
     total: number
-    symbols: { ticker: string; name: string; market: string; kind?: SymbolKind; kindLabel?: string }[]
+    symbols: {
+      ticker: string
+      name: string
+      market: string
+      kind?: SymbolKind
+      kindLabel?: string
+      delisted?: boolean
+      lastDate?: string
+    }[]
   }>(`/api/symbols?${p.toString()}`)
   return {
     total: r.total,
@@ -82,6 +94,8 @@ export async function searchSymbols(
       market: s.market,
       kind: s.kind,
       kindLabel: s.kindLabel,
+      delisted: s.delisted,
+      lastDate: s.lastDate,
     })),
   }
 }
@@ -356,6 +370,9 @@ export type StartParams = {
   start_box_bars: number // 평평한 구간으로 볼 봉 수
   start_volume_mult: number // 돌파한 날 거래대금 = 그 구간 평균의 몇 배
   start_keep_mult: number // 돌파 뒤 같은 봉 수 동안의 평균 = 몇 배
+  /** 오른 뒤 거래대금이 한창때의 이 %까지 줄면 그 상승은 끝난 것으로 보고 뺀다.
+   *  0 = 안 씀(오른 구간을 전부 본다). 오너 2026-08-23. */
+  start_cool_pct?: number
 }
 
 export type SimulateRequest = StartParams & {
@@ -364,12 +381,13 @@ export type SimulateRequest = StartParams & {
   end?: string
   /** 이 전략의 검색식 — 끝점을 'N일 신고가'로 둘 때 서버가 여기서 기간을 꺼낸다. */
   conditions?: ScreenCondition[]
-  /** 피보나치 **끝점(최고점)** — '파동 꼭대기'(기본) | 'N일 신고가' (ADR-0020). */
-  fib_high_mode?: string
   /** 계획을 세우는 날 하나. 주면 그날 계획으로 시작한 매매 **한 건만** 그린다
    *  (④ 표의 한 줄 = 라운드 하나). 계획은 이 날까지의 데이터로만 세우고, 체결은
    *  그 다음날부터 `end` 까지 본다. 안 주면 최근 750거래일을 걸으며 여러 건을 낸다. */
   plan_date?: string
+  /** 이 기준일의 파동이 여럿일 때 **어느 파동인가** — 그 파동의 바닥 날짜.
+   *  안 주면 가장 이른(가장 큰) 파동. */
+  wave_low_date?: string
   // 파동(올라간 구간) — TradingView 내장 Auto Fib Retracement 포팅(ADR-0013 5차)
   zz_depth: number // 꼭대기·바닥 판단 — 좌우 zz_depth÷2 봉 창의 극값
   zz_deviation: number // 이만큼은 움직여야 한 파동 (자동이면 배, 고정이면 %)
@@ -438,6 +456,8 @@ export type SimulateResponse = {
     falling: boolean
     is_52w_high: boolean
   }
+  /** 이 기준일에 성립하는 파동 목록 — 큰 파동(이른 바닥)부터. 하나가 아니다. */
+  waves: { low_date: string; low_price: number }[]
   sell_basis_price: number | null // 매도 반등률의 기준가 — 화면에 명시한다(2026-08-06 오해 방지)
   warnings: string[] // 못 건 목표가 등 — 그릴 수 있는 건 다 그리고 이유만 알린다
   computed: Record<string, number> // stage.id → 자동 계산 목표가
@@ -471,9 +491,10 @@ export type BacktestRequest = StartParams & {
   buy: SimStagePayload[]
   sell: SimStagePayload[]
   sell_basis: 'avg_entry' | 'lowest_fill' | 'anchor_high'
-  /** 피보나치 **끝점(최고점)** — '파동 꼭대기'(기본) | 'N일 신고가' (ADR-0020).
-   *  기간은 안 보낸다 — 서버가 `conditions` 에서 꺼낸다(정본 하나). */
-  fib_high_mode?: string
+  /** 매수 타점을 며칠까지 기다릴지 — 모든 전략 공통, 기본 365일.
+   *  그 안에 한 주도 못 사면 그 매매는 '매수 못함'으로 끝난다.
+   *  피보나치 끝점은 안 보낸다 — 서버가 `conditions` 에서 꺼낸다(정본 하나). */
+  buy_wait_days?: number
   buy_tick_offset?: number
   sell_tick_offset?: number
   buy_min_gap_pct?: number
@@ -832,6 +853,16 @@ export type RefreshProgress = {
   total: number
 }
 
+/** 나무 봉 증분 + KIS 수급·신용잔고 — 종목당 호출이 많은 무거운 갱신의 진행 상태. */
+export type HeavyUpdateStatus = {
+  running: boolean
+  phase: string
+  done: number
+  total: number
+  finished_at: string | null
+  result: { ok?: boolean; error?: string; skipped?: string } | null
+}
+
 export type DataFreshness = {
   sources: DataSourceFreshness[]
   worst: 'ok' | 'warn' | 'stale'
@@ -839,7 +870,8 @@ export type DataFreshness = {
   /** 갱신은 파일 16,576개를 훑어 약 27초 걸린다 — 게이지 재료. */
   progress: RefreshProgress
   finished_at: string | null
-  manual_command: string // 무거운 갱신은 사람이 돌린다 — 그 명령
+  manual_command: string // 터미널에서 같은 걸 돌리고 싶으면 이 명령
+  heavy: HeavyUpdateStatus
 }
 
 export async function fetchFreshness(): Promise<DataFreshness> {
@@ -849,4 +881,10 @@ export async function fetchFreshness(): Promise<DataFreshness> {
 /** 차트 일봉만 지금 최신으로 (marcap git pull → 캐시 비우기). 몇 초. */
 export async function refreshData(): Promise<{ started: boolean; message: string }> {
   return postJson('/api/data/refresh', {})
+}
+
+/** 나무 봉·KIS 수급·신용잔고 증분 — 서버 백그라운드로 돈다(브라우저 닫아도 계속).
+ *  `minutes` 는 분봉·신용잔고까지 강제 포함(평소엔 토요일에만 돈다). */
+export async function startHeavyUpdate(minutes = false): Promise<{ started: boolean; message: string }> {
+  return postJson(`/api/data/update?minutes=${minutes ? 'true' : 'false'}`, {})
 }
