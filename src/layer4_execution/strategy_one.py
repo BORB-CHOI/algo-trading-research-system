@@ -48,15 +48,13 @@ from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy.base_breakout import refine_start
 from src.layer3_strategy.entry_levels import SRTarget, buy_targets_sr
 from src.layer3_strategy.fibonacci import (
-    FIB_HIGH_MODES,
     fib_zones_for,
     wave_high_of,
     wave_start_of,
 )
-from src.layer3_strategy.market_structure import wave_series
 from src.layer3_strategy.support_resistance import SRLevel
 from src.layer3_strategy.tick_size import tick_size
-from src.layer3_strategy.zigzag import WaveLow, zigzag_params_from
+from src.layer3_strategy.zigzag import WaveLow
 from src.layer4_execution.backtest import Trade, resolve_period
 from src.layer4_execution.costs import DEFAULT_COST, CostModel
 from src.layer4_execution.fills import (
@@ -67,6 +65,21 @@ from src.layer4_execution.fills import (
 )
 from src.layer4_execution.runner import _aggregate, _select_universe
 from src.layer4_execution.stops import stop_price
+
+# 매수 타점을 며칠까지 기다릴지 — **모든 전략에 공통**. 기본 1년(365일, 오너 결정 2026-08-22).
+# 달력 날짜다(거래일 수가 아니다) — 오너가 "1년(365일)"이라고 말한 그대로 센다.
+DEFAULT_BUY_WAIT_DAYS: int = 365
+
+
+def check_buy_wait(days: int) -> None:
+    """설정이 말이 되는지 — **엔진 입구에서 한 번** 본다(ValueError, 한국어 → API 가 400).
+
+    날마다 도는 루프 안에서만 보면 안 된다. `walk_forward._rounds_for_code` 가 종목·날짜별
+    ValueError 를 "이 날짜로는 계획을 못 세운다"로 삼키기 때문에, 잘못된 값이 오류가 아니라
+    **빈 결과**로 나온다 — 오너는 조건이 나빠서 안 걸린 줄 알게 된다(2026-08-22).
+    """
+    if int(days or 0) < 1:
+        raise ValueError("매수를 기다리는 기간은 1일 이상이어야 합니다.")
 
 
 def _plan_buys(
@@ -132,17 +145,27 @@ def _run_symbol(
     cost: CostModel,
     *,
     cycle: WaveLow | None = None,
-    waves: pd.DataFrame | None = None,
+    waves: pd.DataFrame | None = None,  # 옛 호출부 호환 — 계획을 다시 안 세우므로 안 쓴다
 ) -> tuple[dict, Trade | None]:
-    """한 종목의 라운드 1회 — 날마다 걸어가며 파동이 바뀌면 주문을 정정한다(ADR-0017).
+    """한 종목의 매매 **한 건** — 기준일에 세운 계획을 끝까지 그대로 쓴다.
 
-    반환 (행 요약, Trade | None(매수 미체결)). `waves` = `wave_series(df, ...)` 결과
-    (df 와 행이 1:1). 안 주면 여기서 구한다 — 매일 굴리는 엔진은 미리 구해 넘긴다.
+    **계획은 기준일에 고정이다** (오너 결정 2026-08-22: "그 각각의 매매를 그냥 완전히
+    별개로 보자. 모든 테스트는 독립적이어야지"). 라운드 도중 신고가가 나도 파동을 다시
+    긋지 않고, 매수·매도·손절 자리를 옮기지 않는다. 못 사면 **매수 못함**으로 넘긴다.
+
+    옛 방식(ADR-0017, 파동을 매일 다시 보고 주문 정정)은 폐기했다. 그 방식에서는 기준일에
+    건 값에 안 닿으면 주문이 파동을 따라 위로 밀려 올라가, 실측 60.4%가 계획보다 비싸게
+    체결됐고 한 라운드가 종목을 최장 787일 붙잡아 다른 기준일의 매매를 통째로 가렸다.
+
+    반환 (행 요약, Trade | None(매수 미체결)).
     """
     if p["sell_basis"] not in SELL_BASES:
         raise ValueError(
             f"모르는 매도 기준입니다: {p['sell_basis']!r} (쓸 수 있는 값: {', '.join(SELL_BASES)})"
         )
+    # 값 검증은 엔진 입구(`check_buy_wait`)가 이미 했다 — 여기서는 읽기만 한다.
+    buy_wait_days = int(p.get("buy_wait_days") or DEFAULT_BUY_WAIT_DAYS)
+    wait_until = base_date + pd.Timedelta(days=buy_wait_days)
     left = df.loc[df["Date"] <= base_date]
     cycle, high_price, (_, targets) = _plan_buys(left, p, cycle=cycle)
 
@@ -151,8 +174,6 @@ def _run_symbol(
     if start_i >= end_i:
         raise ValueError("기준일 이후 구간 거래일 없음")
     scan = df.iloc[start_i:end_i]
-    if waves is None:
-        waves = wave_series(df, zigzag_params_from(p))
 
     buys = p["buy"]
     sells = p["sell"]
@@ -202,17 +223,26 @@ def _run_symbol(
         "low_in_span": round(float(scan["Low"].min()), 2),  # 구간 최저가 — 얼마나 모자랐나
     }
 
-    # 파동 열쇠 — 바뀌었는지를 이걸로 잰다. prev_raw 는 어제의 원(가공 전) 바닥.
-    wave_key = (cycle.date, round(float(cycle.price), 4), round(float(high_price), 4))
-    r0 = waves.iloc[start_i - 1] if start_i > 0 else None
-    prev_raw = (r0["low_date"], float(r0["low_price"])) if r0 is not None else None
-    replans = 0
-    wave_traded = wave_key  # 마지막 매수 시점의 파동 (매수가 없으면 계획 시점 파동)
-
-    for j, bar in enumerate(scan.itertuples()):
-        i = start_i + j
+    for bar in scan.itertuples():
         low, high, day = float(bar.Low), float(bar.High), bar.Date
         held = bought - sold
+
+        # ── 기준일 꼭대기를 넘는 신고가가 났나 → **이 매매는 없던 것으로 한다.**
+        #
+        # 오너 결정 2026-08-22: "기준일로 잡힌 신고가보다 더 높은 신고가가 설정한
+        # 매매기간(365) 내에 생겨버리면 그 매매는 그냥 의미 없는 거니까 기록하지 마.
+        # 파동의 끝이 해당 기준일이 아니라는 거잖아. 그리고 그 신고가 날짜에 적절한
+        # 매매 세션이 새로 생기고 그게 기록되어야 겠지."
+        #
+        # 되돌림을 그 기준일 꼭대기에서 쟀는데 더 높은 꼭대기가 나왔다면, 애초에 재는
+        # 자리가 틀렸던 것이다. 그 신고가 날은 검색식에도 걸리므로 거기서 새 매매가
+        # 열린다(`walk_forward` 는 걸린 날마다 하나씩 연다) — 그게 기록될 매매다.
+        #
+        # 이미 다 팔고 끝난 매매는 여기까지 오지 않는다(아래에서 break 로 빠져나간다).
+        if day <= wait_until and high > high_price:
+            row["superseded"] = "더 높은 신고가가 나왔습니다 — 이 기준일은 파동 끝이 아닙니다"
+            row["superseded_date"] = day.strftime("%Y-%m-%d")
+            break
 
         # ── 매도 — 그 봉 시작 시점의 주문(fills.walk 와 같은 규칙). 손절과 같은 날
         #    겹치면 매도 취소 — 하루 안의 앞뒤 순서를 모르니 나쁜 쪽으로(보수).
@@ -257,7 +287,7 @@ def _run_symbol(
             bought += weights[k]
             held += weights[k]
         if hit:  # 평단이 바뀌었다 — 매도·손절 주문을 정정한다(다음 봉부터 적용)
-            wave_traded = wave_key  # 마지막 매수를 넣은 시점의 파동 — 재진입 판단 기준
+            # 파동은 그대로다. 바뀐 건 **평단뿐** — 평단 기준 매도·손절만 따라 움직인다.
             avg_entry = sum(px * w for px, w in filled) / bought
             basis = _basis_of(p["sell_basis"], filled, high_price)
             sell_px = _sell_prices(basis, rebounds, p["sell_tick_offset"], "stock", sell_ov)
@@ -278,58 +308,22 @@ def _run_symbol(
         if bought > 0 and held <= 1e-9:
             break
 
-        # ── 파동 확인(그날 마감 후, ADR-0017) — 바닥이 바뀌었거나 신고가면 다시 긋고,
-        #    안 걸린 매수·매도·손절 주문을 새 선으로 정정한다. 다음 거래일부터 적용 —
-        #    "신호 계산 시점 < 체결 시점"이 유지된다.
-        raw = waves.iloc[i]
-        raw_key = (raw["low_date"], float(raw["low_price"]))
-        if raw_key != prev_raw or high > wave_key[2]:
-            base_w = WaveLow(
-                date=pd.Timestamp(raw["low_date"]),
-                price=float(raw["low_price"]),
-                confirmed=bool(raw["confirmed"]),
-                falling=bool(raw["falling"]),
-            )
-            left2 = df.iloc[: i + 1]
-            try:
-                c2, hi2, key2 = _wave_key_of(left2, p, base_w)
-                if key2 != wave_key:
-                    c2, hi2, (_, targets2) = _plan_buys(left2, p, cycle=c2)
-                    cycle, high_price = c2, hi2
-                    wave_key = key2
-                    replans += 1
-                    for k in range(len(buys)):
-                        if not buy_done[k] and not buy_ov[k]:
-                            buy_px[k] = float(targets2[k].price) if k < len(targets2) else None
-                    basis = _basis_of(p["sell_basis"], filled, high_price)
-                    sell_px = _sell_prices(basis, rebounds, p["sell_tick_offset"], "stock", sell_ov)
-                    stop_px = stop_price(
-                        p.get("stop"),
-                        avg_entry=avg_entry,
-                        cycle_low=cycle.price,
-                        wave_high=high_price,
-                    )
-                prev_raw = raw_key
-            except ValueError:
-                pass  # 새 파동으로 선을 못 긋는다 — 이미 걸린 주문은 그대로 둔다
+        # ── 한 주도 못 샀는데 기다리는 기간이 끝났다 — **매수 못함**으로 넘긴다.
+        #    (오너 결정 2026-08-22: "신고가가 계속 올라서 매수 자체를 못하면 그냥 그 기록은
+        #    매수 못함으로 넘기고".) 파동을 따라 주문을 옮기지 않으므로, 못 사면 못 산 것이다.
+        if not fills and day >= wait_until:
+            row["gave_up"] = f"{buy_wait_days}일 동안 매수 자리에 안 왔습니다"
+            row["gave_up_date"] = day.strftime("%Y-%m-%d")
+            break
 
     row["n_buys"] = len(fills)
-    row["replans"] = replans
-    # 라운드가 끝난(또는 구간이 끝난) 시점의 파동 — 화면 표시용.
+    # 계획을 다시 세우지 않으므로 파동은 기준일 것 하나뿐이다. 옛 화면·보관본이 이 열을
+    # 읽으므로 같은 값으로 채워 둔다(정정 횟수는 늘 0).
+    row["replans"] = 0
     row["wave_end"] = {
         "date": cycle.date.strftime("%Y-%m-%d"),
         "low": round(float(cycle.price), 4),
         "high": round(float(high_price), 4),
-    }
-    # **마지막 매수를 넣은 시점**의 파동 — 매일 굴리는 엔진의 재진입 판단 기준.
-    # "똑같은 파동 재매매 금지"의 '판 파동'은 매수가 이뤄진 파동이다 — 사서 들고 있는
-    # 사이 급등으로 파동이 갱신되고 매도가 나갔다면, 갱신된 새 파동은 아직 매매한 적이
-    # 없으니 재진입할 수 있어야 한다 (오너 2026-08-10: "들고 있는 상태에서 급등해서
-    # 파동 갱신되면 익절하고 새로운 매매로 시작").
-    row["wave_traded"] = {
-        "date": wave_traded[0].strftime("%Y-%m-%d"),
-        "low": wave_traded[1],
-        "high": wave_traded[2],
     }
     if not fills:
         return row, None
@@ -413,7 +407,7 @@ def run_strategy_one(
     buy: list[dict],
     sell: list[dict],
     sell_basis: str = "avg_entry",
-    fib_high_mode: str = FIB_HIGH_MODES[0],
+    buy_wait_days: int = DEFAULT_BUY_WAIT_DAYS,
     buy_tick_offset: int = 0,
     sell_tick_offset: int = 0,
     buy_min_gap_pct: float = 0.0,
@@ -435,6 +429,7 @@ def run_strategy_one(
     buys = [b for b in buy if 0 < b.get("ratio", 0) < 1]
     if not buys:
         raise ValueError("분할 매수 차수가 없습니다 — 되돌림 비율(0~1)을 1개 이상 주세요.")
+    check_buy_wait(buy_wait_days)
 
     split_start, split_end = resolve_period(start, end)
     universe, base_date, names = _select_universe(conditions, logic, split_start, hist, exclusions)
@@ -442,7 +437,7 @@ def run_strategy_one(
     # 검색식이 정한 신고가 기간을 진입이 이어받는다 (ADR-0020).
     fib_high_days = cond_registry.new_high_days(cond_registry.parse_conditions(conditions))
     p = {
-        "fib_high_mode": fib_high_mode,
+        "buy_wait_days": buy_wait_days,
         "fib_high_days": fib_high_days,
         # 파동 파라미터(zz_ 접두 평면 키) — zigzag_params_from 이 읽는다
         **zz,
@@ -479,6 +474,10 @@ def run_strategy_one(
             row, trade = _run_symbol(code, df, base_date, split_end, p, cost)
         except ValueError as e:
             skipped[code] = str(e)
+            continue
+        if row.get("superseded"):
+            # 기간 안에 더 높은 신고가가 났다 — 이 기준일은 파동 끝이 아니었다(2026-08-22).
+            skipped[code] = row["superseded"]
             continue
         row["name"] = names.get(code, "")  # 코드만 보면 어느 회사인지 알 수 없다
         if trade is None:
