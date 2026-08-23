@@ -40,7 +40,17 @@ def test_candles_samsung_shape() -> None:
     j = r.json()
     assert j["name"] == "삼성전자"
     assert j["count"] > 0
-    assert set(j["candles"][0]) == {"time", "open", "high", "low", "close", "volume", "amount"}
+    assert set(j["candles"][0]) == {
+        "time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "marcap",
+    }
+    assert j["candles"][0]["marcap"] > 0
     # 날짜 오름차순이어야 차트가 제대로 그려진다.
     times = [c["time"] for c in j["candles"]]
     assert times == sorted(times)
@@ -327,8 +337,12 @@ def test_simulate_plan_date_draws_fills_after_the_plan_day() -> None:
 
     예전엔 `end=기준일` 이라 데이터가 거기서 잘려, 이 행이 실제로 사고판 것이
     한 건도 안 보였다(오너 2026-08-17: "기준일 이후에 매매가 하나도 없어").
+
+    기준일은 **실제로 눌림이 와서 체결이 난 날**로 잡는다. 계획을 기준일에 고정하게
+    바꾼 뒤로는(2026-08-22) 안 눌린 구간에서 체결이 0건인 게 정상이라, 그런 날짜를
+    쓰면 이 시험이 아무것도 안 지킨다.
     """
-    plan, end = "2026-01-30", "2026-07-16"
+    plan, end = "2024-07-11", "2025-07-16"
     r = client.post("/api/simulate", json={**_ROW_CHART_BODY, "plan_date": plan, "end": end})
     assert r.status_code == 200, r.text
     j = r.json()
@@ -345,7 +359,7 @@ def test_simulate_plan_date_draws_exactly_one_round() -> None:
     매수 차수는 2개, 매도는 1개. 한 라운드면 매수 체결은 많아야 2건, 매도는 1건이다.
     750거래일을 걷던 예전 방식은 같은 종목에 라운드가 여러 개 나와 이 한계를 넘었다.
     """
-    plan, end = "2026-01-30", "2026-07-16"
+    plan, end = "2024-07-11", "2025-07-16"
     r = client.post("/api/simulate", json={**_ROW_CHART_BODY, "plan_date": plan, "end": end})
     assert r.status_code == 200, r.text
     fills = r.json()["fills"]
@@ -369,6 +383,7 @@ def test_simulate_plan_date_plan_ignores_data_after_the_plan_day() -> None:
     assert near.status_code == 200 and far.status_code == 200, (near.text, far.text)
     a, b = near.json(), far.json()
     assert a["cycle"] == b["cycle"]
+
     def plan_lines(j: dict) -> list[tuple]:
         """계획으로 그어진 선만 — 파동·되돌림 선·매수 목표가."""
         return sorted(
@@ -587,6 +602,8 @@ def _fake_daily() -> pd.DataFrame:
             "Close": 105.0,
             "Volume": 1000.0,
             "Amount": 105000.0,
+            # 각 주 마지막 거래일 시총이 주봉에 남아야 한다.
+            "Marcap": [1000.0 + i for i in range(len(dates))],
         }
     )
 
@@ -611,6 +628,7 @@ def test_주봉은_나무_원본을_먼저_쓴다(monkeypatch: pytest.MonkeyPatc
     out = m.period_candles(_fake_daily(), "week")
     # 원본 두 봉 중 마지막은 미완성 취급으로 버려져 첫 봉만 남고, 뒤는 합성이다.
     assert float(out.iloc[0]["Close"]) == 60.0  # 나무 원본 값
+    assert float(out.iloc[0]["Marcap"]) == 1004.0  # 7월 10일(첫 주 마지막 거래일)
     assert float(out.iloc[-1]["Close"]) == 105.0  # 합성 꼬리(일봉 값)
     assert out["Date"].is_monotonic_increasing
 
@@ -624,3 +642,107 @@ def test_나무_원본이_없으면_합성으로_대체(monkeypatch: pytest.Monk
     out = m.period_candles(daily, "week")
     expected = m.resample_candles(daily, "week")
     assert out.reset_index(drop=True).equals(expected.reset_index(drop=True))
+
+
+def test_시뮬레이션과_백테스트_엔진이_같은_체결을_낸다() -> None:
+    """③ 차트와 ④ 백테스트가 **같은 답**을 내야 한다 (CLAUDE.md §0).
+
+    사고 2026-08-22: `/api/simulate` 가 `buy_targets_sr` 를 엔진과 **다른 인자로**
+    불렀다(`allow_partial` 누락). 2차를 못 거는 종목에서 ValueError → 매수 차수를
+    통째로 비움 → 체결을 아예 안 걷었다. 그래서 ④ 표에는 "매수 1건 + 손절"인데
+    ③ 차트에는 매수·매도 화살표가 하나도 안 떴다(오너 지적, LG헬로비전 2019-02-08).
+
+    같은 함수라도 **인자가 다르면 다른 답이 나온다.** 두 경로를 실제로 대조한다.
+    """
+    import pandas as pd
+
+    from src.layer1_data.daily import daily_bars
+    from src.layer1_data.derived import drop_halted
+    from src.layer4_execution.costs import CostModel
+    from src.layer4_execution.strategy_one import _run_symbol
+
+    code, plan, end = "037560", "2019-02-08", "2026-08-21"
+    body = {
+        **_ROW_CHART_BODY,
+        "code": code,
+        "plan_date": plan,
+        "end": end,
+        "buy": [
+            {"id": "a", "ratio": 0.382, "weight": 30},
+            {"id": "b", "ratio": 0.5, "weight": 30},
+            {"id": "c", "ratio": 0.618, "weight": 40},
+        ],
+        "sell": [
+            {"id": "s", "rebound_pct": 5, "weight": 50},
+            {"id": "t", "rebound_pct": 10, "weight": 50},
+        ],
+        "zz_deviation": 4,
+        "sr_prd": 5,
+        "sr_loopback": 120,
+        "buy_tick_offset": 2,
+        "sell_tick_offset": -2,
+        "stop": {
+            "enabled": True,
+            "mode": "fib",
+            "fib_ratio": 0.786,
+            "source": "cycle_low",
+            "tick_offset": 2,
+        },
+    }
+    r = client.post("/api/simulate", json=body)
+    assert r.status_code == 200, r.text
+    sim = [(f["time"], f["side"], round(float(f["price"]))) for f in r.json()["fills"]]
+
+    p = {
+        "zz_depth": 10,
+        "zz_deviation": 4.0,
+        "zz_deviation_mode": "자동",
+        "start_mode": "평평한 구간 돌파",
+        "start_box_bars": 20,
+        "start_volume_mult": 2.0,
+        "start_keep_mult": 2.0,
+        "fib_band_mode": "자동",
+        "fib_band_value": 0.5,
+        "sr_scope": "파동 구간",
+        "sr_source": "고가·저가 전부",
+        "sr_prd": 5,
+        "sr_loopback": 120,
+        "sr_channel_width_pct": 3.0,
+        "sr_min_strength": 1,
+        "sr_round_max_gap_pct": 5.0,
+        "buy": [
+            {"ratio": 0.382, "weight": 30.0},
+            {"ratio": 0.5, "weight": 30.0},
+            {"ratio": 0.618, "weight": 40.0},
+        ],
+        "sell": [
+            {"rebound_pct": 5.0, "weight": 50.0},
+            {"rebound_pct": 10.0, "weight": 50.0},
+        ],
+        "sell_basis": "avg_entry",
+        "buy_tick_offset": 2,
+        "sell_tick_offset": -2,
+        "buy_min_gap_pct": 0.0,
+        "stop": {
+            "enabled": True,
+            "mode": "fib",
+            "fib_ratio": 0.786,
+            "source": "cycle_low",
+            "tick_offset": 2,
+            "pct": None,
+            "custom_price": None,
+        },
+        "buy_wait_days": 365,
+    }
+    df = drop_halted(daily_bars(code)).sort_values("Date").reset_index(drop=True)
+    row, _ = _run_symbol(
+        code, df, pd.Timestamp(plan), pd.Timestamp(end), p, CostModel(round_trip_rate=0.0)
+    )
+    engine = [
+        (f["time"], f["side"], round(float(f["price"])))
+        for f in row.get("fills", [])
+        if not f.get("eval")
+    ]
+
+    assert engine, "엔진이 체결을 못 냈다 — 시험이 아무것도 안 지킨다"
+    assert sorted(sim) == sorted(engine), f"③ {sorted(sim)} != ④ {sorted(engine)}"

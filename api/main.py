@@ -44,6 +44,7 @@ from src.layer1_data.daily import NAMUH, daily_bars, daily_source
 from src.layer1_data.dart import load_financials
 from src.layer1_data.derived import (
     MINUTE_SPANS,
+    NAMUH_BARS_DIR,
     drop_halted,
     load_adjusted,
     load_namuh_bars,
@@ -52,7 +53,7 @@ from src.layer1_data.derived import (
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.industry import industry_map
 from src.layer1_data.krx_gapfill import fill_marcap_gap
-from src.layer1_data.marcap_loader import available_years, load_years
+from src.layer1_data.marcap_loader import available_years, load_years, symbol_master
 from src.layer1_data.market import index_boards, market_snapshot
 from src.layer1_data.namuh_live import LIVE, is_market_hours
 from src.layer1_data.news import market_news, stock_news
@@ -80,10 +81,12 @@ from src.layer4_execution.costs import CostModel
 from src.layer4_execution.fills import _basis_of, _sell_prices
 from src.layer4_execution.runner import aggregate_returns
 from src.layer4_execution.stops import DEFAULT_FIB_STOP_RATIO
-from src.layer4_execution.strategy_one import run_strategy_one
+from src.layer4_execution.strategy_one import DEFAULT_BUY_WAIT_DAYS, run_strategy_one
 from src.layer4_execution.walk_forward import Progress, _rounds_for_code, run_walk_forward
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")  # KRX_AUTH_KEY 등 — 빠른 갱신이 marcap 공백을 KRX 로 채울 때 쓴다
+load_dotenv(
+    Path(__file__).resolve().parents[1] / ".env"
+)  # KRX_AUTH_KEY 등 — 빠른 갱신이 marcap 공백을 KRX 로 채울 때 쓴다
 
 # 차트에 필요한 최소 컬럼만 캐시에 담는다(메모리 절약).
 # Amount(거래대금)는 KLineChart 의 turnover 로. Stocks(상장주식수)는 액면분할 감지용(ADR-0006).
@@ -97,6 +100,7 @@ _CANDLE_COLS = [
     "Close",
     "Volume",
     "Amount",
+    "Marcap",
     "Stocks",
 ]
 
@@ -228,7 +232,52 @@ def _load_code_history(code: str, start_year: int, end_year: int, years: list[in
     return df.reset_index(drop=True)
 
 
-_FULL_COLS = ["Date", "Open", "High", "Low", "Close", "Volume", "Amount", "Stocks"]
+_FULL_COLS = ["Date", "Open", "High", "Low", "Close", "Volume", "Amount", "Marcap", "Stocks"]
+
+
+def attach_marcap(bars: pd.DataFrame, code: str) -> pd.DataFrame:
+    """봉 날짜에 해당하는 marcap 시총을 붙인다. 없는 날짜는 추정하지 않는다.
+
+    일·주·월봉은 마지막 거래일 날짜가 그대로 들어오고, 분봉은 같은 날짜의 일별
+    시총을 반복해서 쓴다. 가격과 거래량은 ``bars`` 원본을 건드리지 않는다.
+    """
+    if bars.empty:
+        return bars
+    if "Marcap" in bars and bars["Marcap"].notna().all():
+        return bars
+    dates = pd.to_datetime(bars["Date"])
+    years = available_years()
+    if not years:
+        return bars.assign(Marcap=pd.NA)
+    start_year = max(int(dates.min().year), years[0])
+    end_year = min(int(dates.max().year), years[-1])
+    if start_year > end_year:
+        return bars.assign(Marcap=pd.NA)
+    normalized = code.strip().zfill(6)
+    history = load_adjusted(normalized)
+    if history is not None and not history.empty:
+        history = history[["Date", "Marcap"]]
+        last = pd.Timestamp(history["Date"].max())
+        if dates.max() > last:
+            tail = _load_code_history(normalized, max(start_year, last.year), end_year, years)
+            tail = tail.loc[tail["Date"] > last, ["Date", "Marcap"]]
+            history = pd.concat([history, tail], ignore_index=True)
+    else:
+        history = _load_code_history(normalized, start_year, end_year, years)
+    if history.empty or "Marcap" not in history:
+        return bars.assign(Marcap=pd.NA)
+    caps = (
+        history.assign(_day=pd.to_datetime(history["Date"]).dt.normalize())
+        .drop_duplicates("_day", keep="last")
+        .set_index("_day")["Marcap"]
+    )
+    found = dates.dt.normalize().map(caps)
+    out = bars.copy()
+    if "Marcap" in out:
+        out["Marcap"] = pd.to_numeric(out["Marcap"], errors="coerce").combine_first(found)
+    else:
+        out["Marcap"] = found
+    return out
 
 
 @lru_cache(maxsize=16)
@@ -290,7 +339,7 @@ def get_candles(code: str, start: str | None, end: str | None, adjust: bool = Tr
                 out = out[out["Date"] >= pd.Timestamp(start)]
             if end:
                 out = out[out["Date"] <= pd.Timestamp(end)]
-            return drop_halted(out.reset_index(drop=True))
+            return attach_marcap(drop_halted(out.reset_index(drop=True)), code)
 
     years = available_years()
     if not years:
@@ -312,7 +361,7 @@ def get_candles(code: str, start: str | None, end: str | None, adjust: bool = Tr
         df = df[df["Date"] >= pd.Timestamp(start)]
     if end:
         df = df[df["Date"] <= pd.Timestamp(end)]
-    return drop_halted(df)
+    return attach_marcap(drop_halted(df), code)
 
 
 def market_daily(daily: pd.DataFrame, market: str, adjust: bool) -> pd.DataFrame:
@@ -331,7 +380,7 @@ def market_daily(daily: pd.DataFrame, market: str, adjust: bool) -> pd.DataFrame
     if raw.empty:
         return daily
     raw = raw.assign(Code=daily["Code"].iloc[0], Name=daily["Name"].iloc[-1])
-    return drop_halted(raw).reset_index(drop=True)
+    return attach_marcap(drop_halted(raw).reset_index(drop=True), str(daily["Code"].iloc[0]))
 
 
 def minute_candles(
@@ -354,7 +403,8 @@ def minute_candles(
         df = df[df["Date"] < pd.Timestamp(end) + pd.Timedelta(days=1)]
     if df.empty:
         return df
-    return df.assign(Code=code, Name=_name_of(code)).reset_index(drop=True)
+    bars = df.assign(Code=code, Name=_name_of(code)).reset_index(drop=True)
+    return attach_marcap(bars, code)
 
 
 def _name_of(code: str) -> str:
@@ -391,8 +441,20 @@ def period_candles(
     if raw.empty:
         return synth
     raw = raw.assign(Code=daily["Code"].iloc[0], Name=daily["Name"].iloc[-1])
+    raw = raw.merge(synth[["Date", "Marcap"]], on="Date", how="left")
     tail = synth[synth["Date"] > raw["Date"].max()]
-    cols = ["Date", "Code", "Name", "Open", "High", "Low", "Close", "Volume", "Amount"]
+    cols = [
+        "Date",
+        "Code",
+        "Name",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "Amount",
+        "Marcap",
+    ]
     return pd.concat([raw[cols], tail[cols]], ignore_index=True)
 
 
@@ -400,7 +462,8 @@ def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
     """일봉 → 주봉/월봉 합성. 봉 날짜는 그 기간의 마지막 실제 거래일."""
     if timespan == "day" or df.empty:
         return df
-    d = df.assign(TradeDate=df["Date"]).set_index("Date")
+    marcap = df["Marcap"] if "Marcap" in df else pd.Series(pd.NA, index=df.index)
+    d = df.assign(TradeDate=df["Date"], Marcap=marcap).set_index("Date")
     agg = (
         d.resample(_RESAMPLE_RULES[timespan])
         .agg(
@@ -412,6 +475,7 @@ def resample_candles(df: pd.DataFrame, timespan: str) -> pd.DataFrame:
             Close=("Close", "last"),
             Volume=("Volume", "sum"),
             Amount=("Amount", "sum"),
+            Marcap=("Marcap", "last"),
             TradeDate=("TradeDate", "last"),
         )
         .dropna(subset=["Close"])  # 거래일이 없던 주/월 버킷 제거
@@ -447,13 +511,40 @@ def _load_year_screen(year: int) -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def _symbol_master() -> pd.DataFrame:
-    """종목 검색용 마스터 — 가장 최근 연도에서 종목별 최신 이름·시장."""
-    years = available_years()
-    if not years:
-        return pd.DataFrame(columns=["Code", "Name", "Market"])
-    df = load_years(years[-1], years[-1])
-    df = df.sort_values("Date").drop_duplicates("Code", keep="last")
-    return df[["Code", "Name", "Market"]].reset_index(drop=True)
+    """종목 검색용 마스터 — **상장폐지 종목까지 전부** (정본은 layer1 `symbol_master`)."""
+    return symbol_master()
+
+
+@lru_cache(maxsize=512)
+def _stored_last_day_cached(code: str, market: str, minute: int) -> str | None:
+    """파일의 마지막 날짜만 — 2초마다 부르는 자리라 파일을 통째로 열지 않고 날짜 열만 읽고 1분 캐시."""
+    import pyarrow.parquet as pq
+
+    path = NAMUH_BARS_DIR / market / "day" / f"{code}.parquet"
+    if not path.exists():
+        return None
+    try:
+        col = pq.read_table(path, columns=["bsop_date"])["bsop_date"].to_pylist()
+    except (OSError, ValueError, KeyError):
+        return None
+    days = [str(d) for d in col if d]
+    if not days:
+        return None
+    last = max(days)
+    return f"{last[:4]}-{last[4:6]}-{last[6:8]}" if len(last) == 8 else None
+
+
+def _stored_last_day(code: str, market: str) -> str | None:
+    return _stored_last_day_cached(code, market, int(datetime.now().timestamp() // 60))
+
+
+@app.delete("/api/live/bar")
+def api_live_bar_release(
+    code: str = Query(..., description="종목코드 6자리"),
+    market: str = Query("unt", pattern="^(krx|unt|nxt)$"),
+) -> dict:
+    """차트를 닫았다(또는 종목·시장을 바꿨다) — 그 종목 실시간 구독을 바로 푼다."""
+    return {"released": LIVE.release(market, code.strip().zfill(6)), **LIVE.status()}
 
 
 @app.get("/api/live/bar")
@@ -470,8 +561,7 @@ def api_live_bar(
     화면은 실시간 봉을 덧붙이지 않는다(같은 날이 두 번 나온다).
     """
     code = code.strip().zfill(6)
-    raw = load_namuh_bars(code, "day", market)
-    stored_last = str(raw["Date"].max().date()) if raw is not None and not raw.empty else None
+    stored_last = _stored_last_day(code, market)
     open_now = is_market_hours()
     bar = LIVE.bar(market, code) if open_now else None
     return {
@@ -608,13 +698,31 @@ def api_symbols(
     hit.loc[by_code.reindex(hit.index, fill_value=False), "_pos"] = -1  # 코드 일치가 최우선
     hit["_marcap"] = hit["Code"].map(_latest_marcap()).fillna(0.0)
     total = len(hit)
-    hit = hit.sort_values(["_pos", "_marcap"], ascending=[True, False]).head(limit)
+    # 지금 거래되는 종목이 먼저, 상장폐지된 종목은 그 뒤 — 찾던 게 뒤로 밀리면 안 된다.
+    hit = hit.sort_values(["Delisted", "_pos", "_marcap"], ascending=[True, True, False]).head(
+        limit
+    )
     return {
         "total": total,
         "symbols": [
-            {"ticker": c, "name": n, "market": mk, "kind": k, "kindLabel": _KIND_RULES[k]}
-            for c, n, mk, k in zip(
-                hit["Code"], hit["Name"], hit["Market"], hit["_kind"], strict=True
+            {
+                "ticker": c,
+                "name": n,
+                "market": mk,
+                "kind": k,
+                "kindLabel": _KIND_RULES[k],
+                # 상장폐지 종목도 검색된다 (오너 2026-08-23). 화면은 태그로 알린다.
+                "delisted": bool(dl),
+                "lastDate": pd.Timestamp(ld).strftime("%Y-%m-%d"),
+            }
+            for c, n, mk, k, dl, ld in zip(
+                hit["Code"],
+                hit["Name"],
+                hit["Market"],
+                hit["_kind"],
+                hit["Delisted"],
+                hit["LastDate"],
+                strict=True,
             )
         ],
     }
@@ -655,8 +763,10 @@ def api_candles(
             "close": float(c),
             "volume": float(v),
             "amount": float(a),  # 거래대금(원)
+            # 원자료에 없는 날짜는 종가×현재 주식수로 꾸며 내지 않는다.
+            "marcap": None if pd.isna(mc) else float(mc),
         }
-        for t, o, h, low, c, v, a in zip(
+        for t, o, h, low, c, v, a, mc in zip(
             times,
             df["Open"],
             df["High"],
@@ -664,6 +774,7 @@ def api_candles(
             df["Close"],
             df["Volume"],
             df["Amount"],
+            df["Marcap"],
             strict=True,
         )
     ]
@@ -835,8 +946,17 @@ def api_data_freshness() -> dict:
             "total": int(_REFRESH_STATE["total"]),
         },
         "finished_at": _REFRESH_STATE["finished_at"],
-        # 무거운 갱신은 서버가 안 한다 — 사람이 돌릴 명령을 화면에 그대로 보여 준다.
+        # 무거운 갱신(나무 봉·수급·신용잔고)도 이제 버튼으로 된다 — /api/data/update 참조.
+        # 터미널로 직접 돌리고 싶으면 이 명령도 그대로 쓸 수 있다(같은 잠금 파일을 본다).
         "manual_command": ".venv/Scripts/python scripts/update_data.py",
+        "heavy": {
+            "running": bool(_UPDATE_STATE["running"]),
+            "phase": _UPDATE_STATE["phase"],
+            "done": int(_UPDATE_STATE["done"]),
+            "total": int(_UPDATE_STATE["total"]),
+            "finished_at": _UPDATE_STATE["finished_at"],
+            "result": _UPDATE_STATE["result"],
+        },
     }
 
 
@@ -848,13 +968,78 @@ def api_data_refresh() -> dict:
     화면은 그대로 쓸 수 있다 — 갱신 중 차트 응답 147ms → 149ms(1.0배, 실측).
     파일 읽기는 GIL 을 놓기 때문이다.
 
-    나무 봉·KIS 수급 증분은 **여기서 하지 않는다** — 호출 한도를 크게 태우는 일이라
-    화면 버튼 하나로 시작할 것이 아니다(`manual_command` 참조).
+    나무 봉·KIS 수급·신용잔고 증분(호출 한도를 크게 태우는 무거운 갱신)은 여기서 하지
+    않는다 — 그건 `/api/data/update` 다.
     """
     if _REFRESH_STATE["running"]:
         return {"started": False, "message": "이미 갱신 중입니다."}
     threading.Thread(target=lambda: _run_refresh(rescan=True), daemon=True).start()
-    return {"started": True, "message": "갱신을 시작했습니다 — 약 30초, 그동안 화면은 그대로 쓰셔도 됩니다."}
+    return {
+        "started": True,
+        "message": "갱신을 시작했습니다 — 약 30초, 그동안 화면은 그대로 쓰셔도 됩니다.",
+    }
+
+
+_UPDATE_LOCK = threading.Lock()
+_UPDATE_STATE: dict[str, Any] = {
+    "running": False,
+    "phase": "",
+    "done": 0,
+    "total": 0,
+    "finished_at": None,
+    "result": None,
+}
+
+
+def _run_heavy_update(*, force_minutes: bool) -> None:
+    """나무 봉 증분 + KIS 수급·신용잔고 — `scripts/update_data.py` 를 뒤에서 그대로 돌린다.
+
+    브라우저를 닫거나 새로고침해도 이 스레드는 서버 프로세스가 살아 있는 한 계속 돈다
+    (오너 요청 2026-08-22: "웹상에서 다 갱신 가능하도록, 끊겨도 문제없도록"). 겹침 방지는
+    `scripts/update_data.py` 의 잠금 파일(`_update.lock`)이 그대로 한다 — 터미널에서
+    같은 스크립트를 돌려도 서로 못 겹친다.
+    """
+    with _UPDATE_LOCK:
+        if _UPDATE_STATE["running"]:
+            return
+        _UPDATE_STATE["running"] = True
+    _UPDATE_STATE.update(phase="시작", done=0, total=0, result=None)
+
+    def progress(label: str, done: int, total: int) -> None:
+        _UPDATE_STATE.update(phase=label, done=done, total=total)
+
+    try:
+        import scripts.update_data as update_data  # 무거운 임포트라 여기서만 — 서버 뜨는 속도에 안 영향
+
+        result = update_data.run_update(force_minutes=force_minutes, progress=progress)
+    except Exception as e:  # 스레드가 이것 때문에 조용히 죽으면 안 된다 — 실패도 값으로 남긴다
+        result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        _clear_data_caches()
+        _UPDATE_STATE.update(
+            running=False,
+            phase="",
+            finished_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            result=result,
+        )
+
+
+@app.post("/api/data/update")
+def api_data_update(
+    minutes: bool = Query(False, description="분봉·신용잔고까지 강제 포함"),
+) -> dict:
+    """나무 봉·KIS 수급·신용잔고 증분 — 종목당 호출이 많은(수천 건) **무거운** 갱신.
+
+    조회만 한다. 주문 없음. 서버 백그라운드 스레드로 돌아서 브라우저를 닫아도 계속
+    진행된다 — 다시 열면 `/api/data/freshness` 의 `heavy` 필드로 진행 상황을 이어서 본다.
+    """
+    if _UPDATE_STATE["running"]:
+        return {"started": False, "message": "이미 갱신 중입니다."}
+    threading.Thread(target=lambda: _run_heavy_update(force_minutes=minutes), daemon=True).start()
+    return {
+        "started": True,
+        "message": "무거운 갱신을 시작했습니다 — 수 분~수십 분 걸립니다. 창을 닫아도 계속 됩니다.",
+    }
 
 
 def _load_history_panel(
@@ -1617,6 +1802,12 @@ class SimulateRequest(BaseModel):
     start_box_bars: int = 20
     start_volume_mult: float = 2.0
     start_keep_mult: float = 2.0
+    # 오른 뒤 거래대금이 **한창때의 이 %** 까지 줄면 그 상승은 끝난 것으로 보고 그 파동을
+    # 뺀다. 0 = 안 씀 (오너 2026-08-23).
+    start_cool_pct: float = 0.0
+    # 이 기준일에 파동이 여럿이면 **어느 파동인가** — 그 파동의 바닥 날짜.
+    # 안 주면 가장 이른(가장 큰) 파동. ④ 표의 한 줄을 그림으로 볼 때 그 줄의 파동을 준다.
+    wave_low_date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     # 파동(올라간 구간) — TradingView 내장 Auto Fib Retracement 포팅(ADR-0013 5차)
     zz_depth: int  # 꼭대기·바닥 판단 — 좌우 zz_depth÷2 봉 창의 극값
     zz_deviation: float  # 이만큼은 움직여야 한 파동 (배 또는 %)
@@ -1635,10 +1826,6 @@ class SimulateRequest(BaseModel):
     buy: list[SimStage] = Field(default_factory=list)
     sell: list[SimStage] = Field(default_factory=list)
     sell_basis: str = "avg_entry"  # avg_entry | lowest_fill | anchor_high(파동 꼭대기)
-    # 피보나치 **끝점(최고점)** 을 어디로 잡을지 (ADR-0020).
-    # '파동 꼭대기'(기본) = 바닥 이후 최고 고가 — 안 고르면 예전과 결과가 같다.
-    # 'N일 신고가' = 검색식이 정한 신고가 기간을 그대로 쓴다(서버가 conditions 에서 꺼낸다).
-    fib_high_mode: str = fibonacci.FIB_HIGH_MODES[0]
     # 이 전략의 검색식. 끝점을 'N일 신고가'로 둘 때 **기간을 여기서 꺼낸다** —
     # 화면이 기간을 따로 계산해 보내면 검색식과 어긋날 수 있다(정본 하나).
     conditions: list[dict] = Field(default_factory=list)
@@ -1699,10 +1886,26 @@ def api_simulate(req: SimulateRequest) -> dict:
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+    # 이 기준일에 성립하는 파동 **전부**. 하나가 아니다 (오너 2026-08-23).
     try:
-        cycle = fibonacci.wave_start_of(plan_df, sim_p)
+        waves = [w for w, _ in fibonacci.wave_starts_detail(plan_df, sim_p)]
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if not waves:
+        waves = [fibonacci.wave_start_of(plan_df, sim_p)]
+    cycle = waves[0]
+    if req.wave_low_date:
+        want = pd.Timestamp(req.wave_low_date)
+        picked = next((w for w in waves if w.date == want), None)
+        if picked is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"{req.wave_low_date} 바닥인 파동이 없습니다 — 이 기준일의 파동: "
+                    + ", ".join(w.date.strftime("%Y-%m-%d") for w in waves)
+                ),
+            )
+        cycle = picked
     # 끝점(최고점)은 layer3 정본 하나가 정한다 — ③·④·오버레이가 같은 답을 내야 한다(ADR-0020).
     try:
         high_price, high_date = fibonacci.wave_high_of(plan_df, cycle, sim_p)
@@ -1718,7 +1921,9 @@ def api_simulate(req: SimulateRequest) -> dict:
             ),
         )
     # 참고 정보 — 파동 꼭대기가 52주 신고가인가 (시장 표준, 전략 판단은 호출부/오너 몫)
-    _, w52_price = find_52w_high(plan_df)
+    # as_of=high_date 필수 — 안 주면 "오늘" 기준 52주 창으로 계산돼, 과거 파동 꼭대기를
+    # 훨씬 뒤(오늘) 시점의 최고가와 비교하게 된다(디알텍 2023-03-03·06-05 미탐지 재현, 2026-08-21).
+    _, w52_price = find_52w_high(plan_df, as_of=high_date)
     is_52w = abs(high_price - w52_price) < 1e-9
 
     warnings: list[str] = []
@@ -1798,6 +2003,12 @@ def api_simulate(req: SimulateRequest) -> dict:
 
     # 목표가를 못 걸어도 전체를 실패시키지 않는다 — 그릴 수 있는 것(파동·피보·지지저항)은
     # 다 그리고, 못 건 쪽만 경고로 알린다 (오너 지적 2026-08-06: "오류만 띄우면 뭘 고칠지 몰라").
+    #
+    # **`allow_partial=True` 는 엔진(`strategy_one._plan_buys`)과 반드시 같아야 한다.**
+    # 전에는 여기만 기본값(False)이라, 2차를 못 거는 종목에서 ValueError → `buys=[]` →
+    # 체결을 아예 안 걸었다. 그래서 ④ 백테스트는 "매수 1건 + 손절"인데 ③ 차트는 체결 0건이라
+    # 매수·매도 화살표가 안 떴다(오너 지적 2026-08-22, LG헬로비전 2019-02-08 실측).
+    # 같은 함수라도 **인자가 다르면 다른 답이 나온다** — 두 곳을 함께 본다(CLAUDE.md §0).
     try:
         blevels = (
             buy_targets_sr(
@@ -1807,6 +2018,7 @@ def api_simulate(req: SimulateRequest) -> dict:
                 levels=sr,
                 min_gap_pct=req.buy_min_gap_pct,
                 tick_offset=req.buy_tick_offset,
+                allow_partial=True,
             )
             if buys
             else []
@@ -1814,18 +2026,23 @@ def api_simulate(req: SimulateRequest) -> dict:
     except ValueError as e:
         warnings.append(f"매수 목표가를 못 걸었습니다 — {e}")
         buys, blevels = [], []
+    if buys and len(blevels) < len(buys):
+        # 걸 수 있는 데까지만 걸었다 — 엔진도 같은 판단을 한다(row['unplaced']).
+        warnings.append(
+            f"매수 {len(blevels) + 1}차부터는 걸 지지/저항선이 없어 주문을 못 걸었습니다 "
+            f"({len(blevels)}/{len(buys)}차만 걸림)."
+        )
+        buys = buys[: len(blevels)]
 
-    # 주문 표식을 **기준일 봉**에 매단다 — 오른쪽 끝에 몰아 놓으면 어느 날 건 건지 안 보인다
-    # (오너 2026-08-10: "오른쪽 끝 표식 말고 캔들 봉 위 아래로 하라고").
-    plan_day = plan_df["Date"].iloc[-1].strftime("%Y-%m-%d")
     buy_px: list[float] = []
     for stage, level in zip(buys, blevels, strict=True):
         computed[stage.id] = level.price
         eff = float(stage.price_override if stage.price_override is not None else level.price)
         buy_px.append(eff)
-        lines.append(
-            {"price": eff, "label": f"매수 {level.tranche}차", "kind": "buy", "start": plan_day}
-        )
+        # 주문가 **가로선은 안 보낸다** (오너 2026-08-22: "이 표시 필요 없다 지워라. 봉 바로
+        # 밑에 매수/매도 1차, 2차, 3차가 쌓이는 식의 표시만 필요한 거다").
+        # 실제로 산 자리는 `fills` 의 봉 아래 표식으로 보인다. `computed` 는 ② 화면이
+        # "얼마에 걸리나"를 숫자로 보여주는 데 계속 쓴다.
 
     # ── 체결 재현 = ④ 백테스트와 **같은 엔진**(walk_forward._rounds_for_code) ──
     # 그날그날의 계획으로 하루씩 걷고, 파동이 바뀌면 주문을 정정하며(ADR-0017), 다 팔면
@@ -1841,6 +2058,7 @@ def api_simulate(req: SimulateRequest) -> dict:
         "start_box_bars": req.start_box_bars,
         "start_volume_mult": req.start_volume_mult,
         "start_keep_mult": req.start_keep_mult,
+        "start_cool_pct": req.start_cool_pct,
         "fib_band_mode": req.fib_band_mode,
         "fib_band_value": req.fib_band_value,
         "sr_scope": req.sr_scope,
@@ -1862,7 +2080,6 @@ def api_simulate(req: SimulateRequest) -> dict:
             }
             for s_ in sells
         ],
-        "fib_high_mode": req.fib_high_mode,
         "fib_high_days": sim_p.get("fib_high_days"),
         "sell_basis": req.sell_basis,
         "buy_tick_offset": req.buy_tick_offset,
@@ -1887,8 +2104,13 @@ def api_simulate(req: SimulateRequest) -> dict:
                     f"{req.plan_date} 은 이 종목의 거래일이 아닙니다 — 체결을 그리지 못했습니다."
                 )
         else:
-            # ③ 시뮬레이션 — 검색식 없이 최근 750거래일 전부가 계획일 후보다.
-            plan_days = list(walk_df["Date"].iloc[-750:])
+            # ③ 시뮬레이션 — 검색식 없이 **최근 120거래일**(약 반 년)이 계획일 후보다.
+            #
+            # 전에는 750일이었다. 파동 바닥을 엘리엇 1파 시작점으로 고치면서(2026-08-22)
+            # 파동이 수년 길이가 됐고, `sr_scope='파동 구간'` 이라 지지저항을 그 구간 전체
+            # (삼성전자 실측 7,992봉)에서 찾는다. 계획 한 번이 0.92초라 750일이면 11분이다.
+            # ④ 백테스트는 걸린 날만 계산하므로 영향이 없다 — 여기만 줄인다.
+            plan_days = list(walk_df["Date"].iloc[-120:])
         for rnd, _trade in _rounds_for_code(
             code,
             walk_df,
@@ -1941,8 +2163,7 @@ def api_simulate(req: SimulateRequest) -> dict:
         px = sell_px_now.get(k + 1)
         if px is None:
             continue  # 아직 못 거는 차수(보유 없음 등 기준가 미확정) — 선도 안 그린다
-        computed[stage.id] = px
-        lines.append({"price": px, "label": f"매도 {k + 1}차", "kind": "sell", "start": plan_day})
+        computed[stage.id] = px  # 매도도 가로선은 안 보낸다 — 봉 위 표식으로 본다
 
     # ── 손절선 — 공식은 ④ 와 같은 함수(layer4.stops). 되돌림 선 기준(fib)은 파동만
     #    정해지면 자리가 정해지므로 매수 전에도 그린다(오너 2026-08-10). 평단 기준(pct)은
@@ -2054,6 +2275,11 @@ def api_simulate(req: SimulateRequest) -> dict:
             "falling": cycle.falling,
             "is_52w_high": is_52w,
         },
+        # 이 기준일에 성립하는 파동 목록 — 큰 파동부터. 화면이 골라 볼 수 있게 준다.
+        "waves": [
+            {"low_date": w.date.strftime("%Y-%m-%d"), "low_price": round(float(w.price), 2)}
+            for w in waves
+        ],
         "sell_basis_price": sell_basis_price,
         "warnings": warnings,  # 못 건 목표가 등 — 그릴 수 있는 건 다 그리고 이유만 알린다
         "computed": computed,
@@ -2077,6 +2303,7 @@ class BacktestRequest(BaseModel):
     start_box_bars: int = 20
     start_volume_mult: float = 2.0
     start_keep_mult: float = 2.0
+    start_cool_pct: float = 0.0
     # 파동 파라미터 — SimulateRequest 와 동일(ADR-0013 5차)
     zz_depth: int
     zz_deviation: float
@@ -2097,7 +2324,9 @@ class BacktestRequest(BaseModel):
     # 피보나치 **끝점(최고점)** 을 어디로 잡을지 (ADR-0020).
     # '파동 꼭대기'(기본) = 바닥 이후 최고 고가 — 안 고르면 예전과 결과가 같다.
     # 'N일 신고가' = 검색식이 정한 신고가 기간을 그대로 쓴다(서버가 conditions 에서 꺼낸다).
-    fib_high_mode: str = fibonacci.FIB_HIGH_MODES[0]
+    # 매수 타점을 며칠까지 기다릴지 — 모든 전략 공통, 기본 1년(오너 결정 2026-08-22).
+    # 그 안에 한 주도 못 사면 그 매매는 '매수 못함'으로 끝난다.
+    buy_wait_days: int = DEFAULT_BUY_WAIT_DAYS
     buy_tick_offset: int = 0
     sell_tick_offset: int = 0
     buy_min_gap_pct: float = 0.0
@@ -2135,8 +2364,9 @@ def _strategy_kwargs(req: BacktestRequest) -> dict:
             "start_box_bars": req.start_box_bars,
             "start_volume_mult": req.start_volume_mult,
             "start_keep_mult": req.start_keep_mult,
+            "start_cool_pct": req.start_cool_pct,
         },
-        "fib_high_mode": req.fib_high_mode,
+        "buy_wait_days": req.buy_wait_days,
         "sr": {
             "fib_band_mode": req.fib_band_mode,
             "fib_band_value": req.fib_band_value,
@@ -2193,12 +2423,18 @@ def api_backtest(req: BacktestRequest) -> dict:
 
 
 def _archive(result: dict, req: BacktestRequest) -> dict:
-    """결과를 보관함에 남긴다. **저장 실패가 결과를 못 보게 만들면 안 된다** — 경고만."""
+    """결과를 보관함에 남긴다. **저장 실패가 결과를 못 보게 만들면 안 된다** — 경고만.
+
+    검색 조건(`conditions`)도 **같이 남긴다.** 전에는 이름(`screen`)만 남기고 조건 자체를
+    빼 놨는데, 그러면 몇 달 뒤 "이 결과가 무슨 조건으로 나온 거냐"를 되짚을 방법이 없다.
+    검색식은 이름이 같아도 내용이 바뀔 수 있어서 이름만으로는 재현이 안 된다
+    (오너 지적 2026-08-22 — 피씨엘 기준일을 다시 확인하려는데 조건이 안 남아 있었다).
+    """
     try:
         result["run_id"] = run_store.save_run(
             result,
             ran_at=datetime.now(UTC).isoformat(timespec="seconds"),
-            params=req.model_dump(exclude={"conditions"}),
+            params=req.model_dump(),
             label=req.label,
             screen=req.screen_name,
         )
