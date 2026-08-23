@@ -11,6 +11,11 @@ import {
 } from 'klinecharts'
 import { mergeLive, shouldApply, todayStart, type LiveBarResponse } from './liveBar'
 import { registerKoreanLocale } from './locales'
+
+// 장중 실시간 오늘 봉 폴링 간격. 장 밖·탭 숨김·화면 밖이면 느리게.
+const LIVE_POLL_MS = 2000
+const LIVE_POLL_IDLE_MS = 10_000
+const LIVE_POLL_CLOSED_MS = 60_000
 import { allVisible, type OverlayVisibility } from './simVisibility'
 import {
   fetchPriceZones,
@@ -247,12 +252,12 @@ const TOOL_LAYERS: readonly (readonly [ToolLayer, string])[] = [
 const VWAP_COLOR = '#7c3aed' // 앵커 VWAP — 피보나치/매매선과 겹치지 않는 보라
 
 /** 차트 위에 얹는 겹치기 — 라벨은 쉬운 말로. 정본 타입은 simVisibility.OverlayVisibility. */
+// 매수·매도 주문가 가로선을 없앴으므로(오너 2026-08-22) 그 칸도 뺀다 — 눌러도 바뀌는 게
+// 없는 버튼이 남아 있으면 "안 먹는다"로 읽힌다. 산·판 자리는 '사고판 자리'로 켜고 끈다.
 const OVERLAY_LAYERS: readonly (readonly [keyof OverlayVisibility, string])[] = [
   ['fib', '되돌림'],
   ['sr', '지지저항'],
   ['anchor', '파동'],
-  ['buy', '매수 건 값'],
-  ['sell', '매도 건 값'],
   ['stop', '손절'],
   ['fills', '사고판 자리'],
 ] as const
@@ -316,32 +321,6 @@ function drawSeries(c: DrawCtx, list: SeriesDraw[]): void {
 const PRICE_LABEL_KINDS = new Set<OverlayLine['kind']>(['stop', 'anchor', 'fib'])
 
 /** 아직 안 걸린 매수·매도 목표가 — 오른쪽 끝에 화살표 하나와 가격만. */
-/** 걸어 둔 주문 표식 — **주문을 낸 그 봉 자리**에, 그 가격 높이로 찍는다.
- *
- *  오너 2026-08-10: "오른쪽 끝 표식 말고 캔들 봉 위 아래로 하라고."
- *  오른쪽 끝에 몰아 놓으면 (1) 어느 날 건 주문인지 안 보이고 (2) 여러 차수가 세로로
- *  쌓여 읽히지도 않았다. 이제 기준일 봉에 매달아, 매수는 봉 **아래쪽**(가격이 내려와야
- *  체결되니까), 매도는 봉 **위쪽**에 놓는다 — 방향이 그림으로 읽힌다.
- *
- *  가로선은 긋지 않는다. 선은 되돌림·지지저항·손절만 긋는다. */
-function drawTargets(c: DrawCtx, list: OverlayLine[]): void {
-  const { ctx, bounding, yAxis } = c
-  for (const ln of list) {
-    const y = Math.round(yAxis.convertToPixel(ln.price))
-    if (y < 8 || y > bounding.height - 8) continue
-    const color = OVERLAY_COLORS[ln.kind]
-    // 주문을 낸 봉. 화면 밖(왼쪽)이면 왼쪽 끝에 붙여 둔다 — 아예 안 그리면
-    // "얼마에 걸었는데 안 왔다"를 못 본다(오너 2026-08-10).
-    const x = startX(c, ln.start)
-    const text = `${ln.label} ${ln.price.toLocaleString('ko-KR')}`
-    ctx.fillStyle = color
-    // ▷◁ = "이 값에 주문이 걸려 있다"(빈 화살표). 체결(▲▼ 꽉 찬 화살표)과 모양을 달리해
-    // 걸어만 둔 것과 실제로 사고판 것이 헷갈리지 않게 한다.
-    ctx.textAlign = 'left'
-    ctx.fillText('▷', x + 2, y + 4)
-    ctx.fillText(text, x + 14, y + 4)
-  }
-}
 
 /** 수평선 + 우측 라벨. y축 범위 밖 레벨은 건너뛴다.
  *
@@ -415,7 +394,77 @@ function drawLines(c: DrawCtx, list: OverlayLine[]): void {
   }
 }
 
-/** 봉마다 찍히는 마커를 공통으로 순회한다 (터치 ◆ / 체결 ▲▼). */
+// 체결 마커 색 — 증권사 앱(나무)과 같게 맞춘다 (오너 2026-08-22: "디자인은 이거랑 똑같게 해라").
+// 매수는 주황 동그라미에 흰 ↑, 매도는 남색 동그라미에 흰 ↓.
+const MARK_FILL = { buy: '#f5821f', sell: '#3b5ba9', stop: '#111827' } as const
+const MARK_R = 8 // 동그라미 반지름
+const MARK_GAP = 5 // 봉 끝에서 띄우는 간격
+const MARK_STEP = MARK_R * 2 + 13 // 한 봉에 여러 건이면 이만큼씩 쌓는다
+
+/** 체결 표식 하나 — 동그라미 + 흰 화살표, 그 바깥에 차수·가격. */
+function drawMark(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  color: string,
+  up: boolean,
+  label: string,
+  price: number,
+): void {
+  ctx.beginPath()
+  ctx.arc(x, y, MARK_R, 0, Math.PI * 2)
+  ctx.fillStyle = color
+  ctx.fill()
+
+  ctx.fillStyle = '#ffffff'
+  ctx.font = 'bold 11px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(up ? '↑' : '↓', x, y + 0.5)
+
+  ctx.textBaseline = 'alphabetic'
+  ctx.fillStyle = color
+  ctx.font = 'bold 10px sans-serif'
+  // 글자는 화살표가 가리키는 **바깥쪽**으로 — 캔들을 안 가린다.
+  ctx.fillText(`${label} ${price.toLocaleString('ko-KR')}`, x, up ? y + MARK_R + 11 : y - MARK_R - 4)
+  ctx.font = '11px sans-serif'
+}
+
+/** 체결 표식 — **매수는 봉 아래, 매도는 봉 위**. 한 봉에 여러 건이면 쌓는다.
+ *
+ *  오너 2026-08-22: "매수는 봉 아래, 매도는 봉 위에다", "봉 바로 밑에 매수/매도
+ *  1차, 2차, 3차가 쌓이는 식의 표시만 필요한 거다."
+ *
+ *  전에는 **체결가 자리**에 그려서 캔들 몸통 위에 겹쳤고, 같은 봉에 두 건이면 포개졌다.
+ *  이제 봉의 저가/고가를 기준으로 바깥에 붙이고 차수 순서대로 쌓는다.
+ */
+function drawFillMarks(c: DrawCtx, fillsByTime: Map<number, OverlayFill[]>): void {
+  const { ctx, kLineDataList, visibleRange, xAxis, yAxis } = c
+  for (let i = visibleRange.from; i < visibleRange.to; i++) {
+    const bar = kLineDataList[i]
+    if (!bar) continue
+    const marks = fillsByTime.get(bar.timestamp)
+    if (!marks) continue
+    const x = xAxis.convertToPixel(i)
+    const byStage = [...marks].sort((a, b) => (a.stage ?? 0) - (b.stage ?? 0))
+
+    let yb = yAxis.convertToPixel(bar.low) + MARK_R + MARK_GAP
+    let ys = yAxis.convertToPixel(bar.high) - MARK_R - MARK_GAP
+    for (const m of byStage) {
+      if (m.side === 'buy') {
+        drawMark(ctx, x, yb, MARK_FILL.buy, true, `${m.stage}차`, m.price)
+        yb += MARK_STEP // 아래로 쌓는다
+      } else {
+        const isStop = m.stage === 0 // stage 0 = 손절 체결
+        drawMark(ctx, x, ys, isStop ? MARK_FILL.stop : MARK_FILL.sell, false,
+          isStop ? '손절' : `${m.stage}차`, m.price)
+        ys -= MARK_STEP // 위로 쌓는다
+      }
+    }
+  }
+}
+
+/** 봉마다 찍히는 마커를 공통으로 순회한다 (터치 ◆). */
 function forEachBarMark<T>(
   c: DrawCtx,
   byTime: Map<number, T[]>,
@@ -464,8 +513,10 @@ function createOverlayIndicator(): OverlayStore {
       drawSeries(c, seriesList) // 곡선을 먼저 — 수평선 아래에 깔린다 (현재 시뮬은 곡선 없음)
       const tools = [...toolLines.values()].flat()
       const shown = [...tools, ...lines].filter((ln) => visOf[ln.kind] ?? true)
+      // 매수·매도 **주문가 가로선은 안 그린다** (오너 2026-08-22: "이 표시 필요 없다
+      // 지워라. 봉 바로 밑에 매수/매도 1차, 2차, 3차가 쌓이는 식의 표시만 필요한 거다").
+      // 서버도 그 선을 안 보낸다 — 여기 거르는 건 옛 응답·보관본 대비다.
       drawLines(c, shown.filter((ln) => !ARROW_KINDS.has(ln.kind)))
-      drawTargets(c, shown.filter((ln) => ARROW_KINDS.has(ln.kind)))
 
       ctx.textAlign = 'center'
       ctx.fillStyle = TOUCH_COLOR
@@ -473,23 +524,7 @@ function createOverlayIndicator(): OverlayStore {
         ctx.fillText('◆', x, yAxis.convertToPixel(t.price) + 4)
       })
 
-      // 체결 마커 = 화살표 + 얼마에 샀나/팔았나 (오너 2026-08-09). 매수는 봉 아래,
-      // 매도는 봉 위 — 화살표가 가리키는 방향으로 숫자가 이어져 읽힌다.
-      if (vis.fills) forEachBarMark(c, fillsByTime, (f, x) => {
-        const y = yAxis.convertToPixel(f.price)
-        const buy = f.side === 'buy'
-        const isStop = !buy && f.stage === 0 // stage 0 = 손절 체결
-        const price = f.price.toLocaleString('ko-KR')
-        ctx.fillStyle = isStop ? OVERLAY_COLORS.stop : OVERLAY_COLORS[f.side]
-        ctx.fillText(buy ? '▲' : '▼', x, buy ? y + 14 : y - 6)
-        ctx.font = 'bold 10px sans-serif'
-        // 흰 바탕 없이 글자만 — 박스가 캔들을 가렸다(오너 2026-08-10).
-        const ty = buy ? y + 26 : y - 17
-        ctx.fillText(price, x, ty)
-        ctx.font = 'bold 9px sans-serif'
-        ctx.fillText(isStop ? '손절' : `${f.stage}차`, x, buy ? y + 36 : y - 27)
-        ctx.font = '11px sans-serif'
-      })
+      if (vis.fills) drawFillMarks(c, fillsByTime)
 
       ctx.restore()
       return true
@@ -686,6 +721,7 @@ async function fetchCandles(
       close: number
       volume: number
       amount: number
+      marcap: number | null
     }[]
   }
   const rows = candles.map((c) => ({
@@ -697,8 +733,39 @@ async function fetchCandles(
     close: c.close,
     volume: c.volume,
     turnover: c.amount,
+    marcap: c.marcap,
   }))
   return { bars: rows, source: source ?? 'none' }
+}
+
+// 이동평균 기간과 색 — 증권사 앱(나무) 범례와 같게 맞춘다 (오너 2026-08-22).
+// 5 녹색 · 20 빨강 · 60 파랑 · 120 주황 · 200 보라.
+export const MA_PERIODS = [5, 20, 60, 120, 200] as const
+const MA_COLORS = ['#22a06b', '#e03131', '#1971c2', '#f08c00', '#7048e8'] as const
+
+type PickedCandle = {
+  bar: KLineData
+  previous?: KLineData
+  averages: Partial<Record<(typeof MA_PERIODS)[number], number>>
+}
+
+type CandleClick = { dataIndex?: number; data?: KLineData }
+
+function signedPct(value: number | undefined, base: number | undefined): string {
+  if (value == null || base == null || base === 0) return ''
+  const pct = ((value / base) - 1) * 100
+  return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`
+}
+
+function compactWon(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '받아온 게 없습니다'
+  const eok = value / 100_000_000
+  if (eok >= 10_000) return `${(eok / 10_000).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}조원`
+  return `${eok.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}억원`
+}
+
+function compactCount(value: number | undefined): string {
+  return value == null ? '—' : Math.round(value).toLocaleString('ko-KR')
 }
 
 const KOREAN_STYLES = {
@@ -716,6 +783,9 @@ const KOREAN_STYLES = {
   // 상승이 초록으로 나와 캔들과 색이 어긋난다(Pro 는 자기 테마로 덮어주고 있었다).
   indicator: {
     bars: [{ upColor: RED, downColor: BLUE, noChangeColor: '#9aa4b2' }],
+    // 이평선 색 — 증권사 앱(나무)과 같게 (오너 2026-08-22: "이평선 색상도").
+    // 5 녹색 · 20 빨강 · 60 파랑 · 120 주황 · 200 보라. 순서가 곧 MA_PERIODS 순서다.
+    lines: MA_COLORS.map((color) => ({ color })),
   },
 }
 
@@ -831,6 +901,23 @@ function fitBars(chart: Chart, el: HTMLElement, want: number): void {
   chart.scrollToDataIndex(total - 1)
 }
 
+/** `showUntil` 의 스크롤 핵심만 떼어낸 것 — 리사이즈로 다시 맞출 때도 같은 계산을 쓴다. */
+function scrollToDate(chart: Chart, date: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return
+  const ts = dayTs(date)
+  const list = chart.getDataList()
+  let i = -1
+  for (let k = list.length - 1; k >= 0; k--) {
+    if (list[k].timestamp <= ts) {
+      i = k
+      break
+    }
+  }
+  if (i < 0) return
+  chart.scrollToDataIndex(i)
+  chart.scrollByDistance(chart.getBarSpace() * 0.01)
+}
+
 export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProChart(props, ref) {
   const elRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<Chart | null>(null)
@@ -848,6 +935,16 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   const barsRef = useRef<BarCount>(props.initialBars ?? 500)
   // 늦게 온 이전 종목 응답이 새 종목을 덮지 않게 하는 순번 (Pro 데이터피드가 하던 일).
   const loadSeq = useRef(0)
+  // 이 종목의 과거 이력이 실제로 들어왔는가 — reload() 가 끝나야 true. 장중 실시간 폴링이
+  // 이보다 먼저 응답하면 빈 차트에 오늘 봉 하나만 올라가고, 그 한 봉으로 emitBase 가
+  // 발화해 행 차트(RowChart)의 1회성 그리기 잠금이 소진돼 버린다 — 진짜 이력이 뒤늦게
+  // 들어와도 다시 안 그려져 "엉뚱한 화면"으로 굳는다(오너 지적 2026-08-21).
+  const historyLoadedRef = useRef(false)
+  // showUntil 이 마지막으로 맞춘 날짜 — 리사이즈(모달 레이아웃 확정 등)로 `fitBars` 가
+  // 다시 불려도 이 자리로 되돌린다. `fitBars` 는 항상 맨 오른쪽(최신 봉)으로 스크롤하므로,
+  // 안 그러면 showSpan 으로 맞춰 둔 매매 구간이 리사이즈 한 번에 최신 화면으로 튄다
+  // (오너 지적 2026-08-21 — 차트로 보기가 자꾸 엉뚱한 화면으로 이동).
+  const pinDateRef = useRef<string | null>(null)
   // 지금 받아둔 데이터가 감당하는 봉 수. 0 = 전체 이력. 이보다 많이 보려 하면 다시 받는다.
   // 앞쪽(과거)으로 넓혀 받은 시작일. 기준일을 과거로 옮겼을 때만 채워진다.
   const minStartRef = useRef<string | undefined>(undefined)
@@ -886,6 +983,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   // 변수가 들고 있다(그리기 도구 등록이 전역 1회라서). 여기는 버튼 표시용이다.
   const [showLinePrice, setShowLinePrice] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [picked, setPicked] = useState<PickedCandle | null>(null)
   // 차트가 스스로 들고 있는 겹치기 상태 — `layerToggles` 를 켠 화면에서만 쓴다.
   // 바깥에서 setOverlayVisibility 로 덮어써도 되지만, 그건 사이드 패널이 있는 ③ 얘기다.
   const [layerVis, setLayerVis] = useState<OverlayVisibility>(allVisible)
@@ -902,6 +1000,9 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     const el = elRef.current
     if (!chart || !el) return
     const seq = ++loadSeq.current
+    historyLoadedRef.current = false // 새로 받는 중 — 실시간 폴링을 멈춰 둔다
+    pinDateRef.current = null // 데이터가 통째로 바뀐다 — 옛 고정 자리는 더 이상 안 맞는다
+    setPicked(null)
     setBusy(true)
     try {
       const want = barsRef.current
@@ -922,6 +1023,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       const last = data.length ? data[data.length - 1] : null
       liveBaseRef.current = last && last.timestamp < todayStart() ? last : null
       fitBars(chart, el, barsRef.current)
+      historyLoadedRef.current = true // 이제부터 실시간 폴링이 이 데이터 위에 얹어도 안전하다
     } finally {
       if (seq === loadSeq.current) setBusy(false)
     }
@@ -1010,6 +1112,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   function applyBars(n: BarCount): void {
     barsRef.current = n
     setBarsState(n)
+    pinDateRef.current = null // 봉 수를 직접 바꾸면 고정 자리를 버리고 새로 맞춘다(최신 봉 기준)
     // 봉 수는 **화면 배율**일 뿐이다 — 받아올 범위가 아니다. 모자라면 왼쪽으로 밀 때
     // 엔진이 알아서 더 받아온다(setLoadDataCallback). 예전엔 여기서 다시 받아오느라
     // 봉 수가 곧 데이터 범위가 됐고, 그 앞은 밀어도 안 나왔다(오너 지적 2026-08-18).
@@ -1090,22 +1193,11 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
         await reload()
       }
       // 그 날짜 **이하** 중 가장 마지막 봉 = 그 시점의 오른쪽 끝. 휴장일을 넣으면
-      // 자동으로 직전 거래일이 된다(서버 기준일 규칙과 같다).
-      const list = chart.getDataList()
-      let i = -1
-      for (let k = list.length - 1; k >= 0; k--) {
-        if (list[k].timestamp <= ts) {
-          i = k
-          break
-        }
-      }
-      if (i < 0) return
-      chart.scrollToDataIndex(i)
-      // 반 봉의 1/50 만큼 더 민다. 엔진이 "보이는 마지막 봉"을 셀 때 딱 떨어지는 위치에서만
-      // 한 봉을 더 세기 때문이다(klinecharts `adjustVisibleRange`: round(위치 + 0.5) —
-      // 위치가 정수면 올림돼 한 칸 넘어간다). scrollToDataIndex 는 항상 딱 떨어지게 세운다.
-      // 눈으로는 차이가 없고(봉 폭의 1%), 이게 없으면 기준일이 하루 뒤로 밀린다.
-      chart.scrollByDistance(chart.getBarSpace() * 0.01)
+      // 자동으로 직전 거래일이 된다(서버 기준일 규칙과 같다). 반 봉의 1/50 만큼 더 미는 건
+      // klinecharts `adjustVisibleRange`(round(위치+0.5))가 정수 위치에서만 한 칸 더
+      // 세기 때문 — 없으면 기준일이 하루 뒤로 밀린다.
+      scrollToDate(chart, date)
+      pinDateRef.current = date // 리사이즈로 다시 맞출 때 이 자리로 되돌아온다
     },
   }))
 
@@ -1119,15 +1211,35 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     if (!chart) return
     chartRef.current = chart
     // 메인 창: 이평선 + 이 차트 전용 전략 신호 마커·오버레이 수평선(데이터 없으면 안 그림)
-    chart.createIndicator('MA', true, { id: 'candle_pane' })
+    chart.createIndicator(
+      { name: 'MA', calcParams: [...MA_PERIODS] },
+      true,
+      { id: 'candle_pane' },
+    )
     chart.createIndicator(signalsRef.current!.indicatorName, true, { id: 'candle_pane' })
     chart.createIndicator(overlayRef.current!.indicatorName, true, { id: 'candle_pane' })
     chart.createIndicator('VOL', false, { id: 'pane_VOL' })
+    const pickCandle = (clicked?: CandleClick) => {
+      const list = chart.getDataList()
+      const index = clicked?.dataIndex
+      if (index == null || index < 0 || index >= list.length) return
+      const bar = clicked?.data ?? list[index]
+      const averages: PickedCandle['averages'] = {}
+      for (const days of MA_PERIODS) {
+        const from = index - days + 1
+        if (from < 0) continue
+        let total = 0
+        for (let i = from; i <= index; i += 1) total += list[i].close
+        averages[days] = total / days
+      }
+      setPicked({ bar, previous: list[index - 1], averages })
+    }
     // 화면 오른쪽 끝이 바뀔 때마다(스크롤·확대·데이터 교체) 기준일을 올려 보낸다.
     // 줌은 `OnVisibleRangeChange` 를 안 쏜다(실측 2026-08-09: 휠로 확대해도 요청이 안
     // 나갔다) — `OnZoom` 을 따로 구독해야 "딱 줌한 부분만" 다시 계산된다.
     chart.subscribeAction(ActionType.OnVisibleRangeChange, emitBase)
     chart.subscribeAction(ActionType.OnZoom, emitBase)
+    chart.subscribeAction(ActionType.OnCandleBarClick, pickCandle)
     // 왼쪽 끝까지 밀면 **그 앞 구간을 이어 받는다** — 증권사 차트와 같은 동작이고,
     // 엔진에 이미 있는 기능이다. 예전엔 봉 수(=화면 배율)가 받아올 범위까지 정해서,
     // 500봉을 고르면 그 앞이 아예 없어 아무리 밀어도 안 나왔다
@@ -1166,6 +1278,9 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
         if (r.width < 2 || r.height < 2) return
         chart.resize()
         fitBars(chart, el, barsRef.current)
+        // fitBars 는 항상 맨 오른쪽(최신 봉)으로 되돌린다 — showSpan/showUntil 로 맞춰 둔
+        // 자리(예: 행 차트의 매매 구간)가 있으면 리사이즈 한 번에 날아간다. 되돌린다.
+        if (pinDateRef.current) scrollToDate(chart, pinDateRef.current)
       })
     })
     ro.observe(el)
@@ -1177,6 +1292,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       window.clearTimeout(toolTimer.current)
       chart.unsubscribeAction(ActionType.OnVisibleRangeChange, emitBase)
       chart.unsubscribeAction(ActionType.OnZoom, emitBase)
+      chart.unsubscribeAction(ActionType.OnCandleBarClick, pickCandle)
       disposeKLineChart(el)
       chartRef.current = null
     }
@@ -1190,27 +1306,48 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   useEffect(() => {
     if (period !== 'day' && period !== 'week' && period !== 'month') return
     let stopped = false
+    let timer = 0
+    let lastBarKey = '' // 같은 값이면 다시 안 그린다 — 2초마다 그리면 화면이 밀린다
+    const q = `code=${encodeURIComponent(sym.code)}&market=${market}`
+    const schedule = (ms: number): void => {
+      if (stopped) return
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => void tick(), ms)
+    }
     const tick = async (): Promise<void> => {
-      if (stopped || document.hidden) return
+      if (stopped) return
       const chart = chartRef.current
-      if (!chart) return
-      const q = `code=${encodeURIComponent(sym.code)}&market=${market}`
+      // 탭이 뒤로 갔거나 차트가 화면 밖이면 부르지 않는다 — 구독은 서버 TTL 이 풀어 준다
+      const el = elRef.current
+      const onScreen = !!el && el.getClientRects().length > 0
+      if (document.hidden || !chart || !onScreen) return schedule(LIVE_POLL_IDLE_MS)
+      // 과거 이력이 아직 안 들어왔으면 건너뛴다 — reload() 와의 경합 방지(위 historyLoadedRef 참고).
+      if (!historyLoadedRef.current) return schedule(LIVE_POLL_IDLE_MS)
       let res: LiveBarResponse
       try {
         const r = await fetch(`/api/live/bar?${q}`)
-        if (!r.ok) return
+        if (!r.ok) return schedule(LIVE_POLL_IDLE_MS)
         res = (await r.json()) as LiveBarResponse
       } catch {
-        return // 서버가 잠깐 없어도 차트는 그대로 둔다
+        return schedule(LIVE_POLL_IDLE_MS) // 서버가 잠깐 없어도 차트는 그대로 둔다
       }
-      if (stopped || !shouldApply(res) || !res.bar) return
-      chart.updateData(mergeLive(period, liveBaseRef.current, res.bar))
+      if (stopped) return
+      if (!res.market_open) return schedule(LIVE_POLL_CLOSED_MS) // 장 밖 — 드물게만 확인
+      if (shouldApply(res) && res.bar) {
+        const key = `${res.bar.time}:${res.bar.close}:${res.bar.volume}`
+        if (key !== lastBarKey) {
+          lastBarKey = key
+          chart.updateData(mergeLive(period, liveBaseRef.current, res.bar))
+        }
+      }
+      schedule(LIVE_POLL_MS)
     }
     void tick()
-    const id = window.setInterval(() => void tick(), 2000)
     return () => {
       stopped = true
-      window.clearInterval(id)
+      window.clearTimeout(timer)
+      // 차트를 닫았거나 종목·시장을 바꿨다 — 서버 구독을 바로 푼다(TTL 을 기다리지 않는다)
+      void fetch(`/api/live/bar?${q}`, { method: 'DELETE', keepalive: true }).catch(() => undefined)
     }
   }, [sym.code, period, market])
 
@@ -1475,6 +1612,69 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
                 {label}
               </button>
             ))}
+          </div>
+        )}
+        {picked && (
+          <div className="candle-card" role="dialog" aria-label="고른 봉 상세 정보">
+            <button
+              type="button"
+              className="candle-card-close"
+              aria-label="봉 상세 정보 닫기"
+              onClick={() => setPicked(null)}
+            >
+              ×
+            </button>
+            <strong>
+              {new Date(picked.bar.timestamp).toLocaleDateString('ko-KR', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+              })}
+            </strong>
+            {(
+              [
+                ['시가', picked.bar.open],
+                ['고가', picked.bar.high],
+                ['저가', picked.bar.low],
+                ['종가', picked.bar.close],
+              ] as const
+            ).map(([label, value]) => (
+              <div className="candle-card-row" key={label}>
+                <span>{label}</span>
+                <b>{value.toLocaleString('ko-KR')}</b>
+                <small>{signedPct(value, picked.previous?.close)}</small>
+              </div>
+            ))}
+            <div className="candle-card-row">
+              <span>거래량</span>
+              <b>{compactCount(picked.bar.volume)}</b>
+              <small>{signedPct(picked.bar.volume, picked.previous?.volume)}</small>
+            </div>
+            <div className="candle-card-row">
+              <span>거래대금</span>
+              <b>{compactWon(picked.bar.turnover)}</b>
+              <small>{signedPct(picked.bar.turnover, picked.previous?.turnover)}</small>
+            </div>
+            <div className="candle-card-row marcap">
+              <span>시가총액</span>
+              <b>{compactWon(picked.bar.marcap as number | null | undefined)}</b>
+              <small>
+                {signedPct(
+                  picked.bar.marcap as number | undefined,
+                  picked.previous?.marcap as number | undefined,
+                )}
+              </small>
+            </div>
+            {MA_PERIODS.map((days, index) => {
+              const average = picked.averages[days]
+              return (
+                <div className="candle-card-row" key={days} style={{ color: MA_COLORS[index] }}>
+                  <span>이평 {days}</span>
+                  <b>{average == null ? '—' : average.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}</b>
+                  <small>{signedPct(average, picked.bar.close)}</small>
+                </div>
+              )
+            })}
           </div>
         )}
       </div>
