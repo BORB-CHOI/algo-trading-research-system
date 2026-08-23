@@ -12,8 +12,9 @@
 
 조회 전용이다 — 주문·계좌 채널(d2·d3)은 구독하지 않는다(CLAUDE.md MCP·매매 경로 규칙).
 
-연결은 프로세스에 하나. 종목은 화면이 물어볼 때 구독하고 `TTL` 초 동안 아무도 안 물으면
-해제한다 — 차트를 닫으면 자연히 끊긴다. 장 시간(평일 08:00~20:10, NXT 프리·애프터 포함)
+연결은 프로세스에 하나. 종목은 화면이 물어볼 때 구독하고, 차트를 닫으면 화면이 `release` 로
+바로 푼다(DELETE /api/live/bar). `TTL` 초 동안 아무도 안 물으면 해제하는 건 닫힘 신호를 못 받은
+경우의 안전망이다. 장 시간(평일 08:00~20:10, NXT 프리·애프터 포함)
 밖에서는 접속하지 않는다.
 """
 
@@ -104,6 +105,30 @@ class LiveBars:
             self._ensure_thread()
             return self._bars.get(key)
 
+    def release(self, market: str, code: str) -> bool:
+        """화면이 차트를 닫았다 — 기다리지 않고 바로 구독을 푼다(TTL 은 닫힘 신호를 못 받았을 때의 안전망)."""
+        ch = CHANNELS.get(market)
+        if ch is None:
+            return False
+        key = (ch, str(code).zfill(6))
+        with self._lock:
+            had = key in self._wanted
+            self._wanted.pop(key, None)
+            if key in self._subscribed:
+                self._cmds.put(("2", *key))
+            else:
+                self._bars.pop(key, None)
+        return had
+
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "connected": self.connected,
+                "wanted": len(self._wanted),
+                "subscribed": len(self._subscribed),
+                "bars": len(self._bars),
+            }
+
     # ── 연결 줄기 ────────────────────────────────────────────
     def _ensure_thread(self) -> None:
         if self._thread is None or not self._thread.is_alive():
@@ -128,7 +153,9 @@ class LiveBars:
             except Exception as e:  # noqa: BLE001 — 연결 오류는 전부 재접속 대상
                 self.connected = False
                 self.last_error = f"{type(e).__name__}: {e}"
-                logger.warning("나무 실시간 연결 끊김 — %s초 후 재접속: %s", backoff, self.last_error)
+                logger.warning(
+                    "나무 실시간 연결 끊김 — %s초 후 재접속: %s", backoff, self.last_error
+                )
                 with self._lock:
                     self._subscribed.clear()
                 time.sleep(backoff)
@@ -142,7 +169,9 @@ class LiveBars:
         token = get_token()
         # 경로는 /websocket — SDK 의 ws_url() 은 호스트:포트만 준다(그대로 접속하면 악수가
         # 안 끝난다, 실측 2026-08-18). openapi.json protocol.connection: "URI 는 /websocket".
-        ws = websocket.create_connection(ws_url().rstrip("/") + "/websocket", timeout=CONNECT_TIMEOUT)
+        ws = websocket.create_connection(
+            ws_url().rstrip("/") + "/websocket", timeout=CONNECT_TIMEOUT
+        )
         ws.settimeout(RECV_TIMEOUT)
         self.connected = True
         try:
@@ -183,8 +212,14 @@ class LiveBars:
                 tr_type, ch, code = self._cmds.get_nowait()
             except queue.Empty:
                 return
-            ws.send(json.dumps({"header": {"token": token, "tr_type": tr_type},
-                                "body": {"tr_cd": ch, "tr_key": code}}))
+            ws.send(
+                json.dumps(
+                    {
+                        "header": {"token": token, "tr_type": tr_type},
+                        "body": {"tr_cd": ch, "tr_key": code},
+                    }
+                )
+            )
             with self._lock:
                 if tr_type == "1":
                     self._subscribed.add((ch, code))

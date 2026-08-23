@@ -9,8 +9,14 @@ from src.layer1_data import namuh_live as nl
 PUSH = {
     "header": {"tr_cd": "mc", "tr_key": "005930"},
     "body": {
-        "code": "005930", "time": "13:58:26", "price": "31700", "high": "32200", "low": "29600",
-        "open": "29800", "volume": "660224", "value_won": "20867545950",
+        "code": "005930",
+        "time": "13:58:26",
+        "price": "31700",
+        "high": "32200",
+        "low": "29600",
+        "open": "29800",
+        "volume": "660224",
+        "value_won": "20867545950",
     },
 }
 
@@ -24,7 +30,10 @@ def test_parse_push_gives_today_bar() -> None:
 
 
 def test_parse_push_ignores_ack_and_other_channels() -> None:
-    ack = {"header": {"tr_type": "1", "tr_cd": "mc", "rsp_cd": "00000"}, "body": {"tr_key": ["005930"]}}
+    ack = {
+        "header": {"tr_type": "1", "tr_cd": "mc", "rsp_cd": "00000"},
+        "body": {"tr_key": ["005930"]},
+    }
     assert nl.parse_push(ack) is None
     hoga = {"header": {"tr_cd": "ob", "tr_key": "005930"}, "body": {"offer": "1"}}
     assert nl.parse_push(hoga) is None
@@ -53,3 +62,19 @@ def test_bar_queues_subscribe_once_and_returns_cached(monkeypatch) -> None:
     assert live.bar("unt", "005930") == {"close": 1.0}
     assert live._cmds.empty()  # 이미 구독 중이면 다시 안 건다
     assert live.bar("모름", "005930") is None
+
+
+def test_release_unsubscribes_immediately() -> None:
+    """차트를 닫으면 TTL 을 기다리지 않고 바로 해제 명령이 큐에 들어간다."""
+    from src.layer1_data.namuh_live import LiveBars
+
+    lb = LiveBars()
+    lb._ensure_thread = lambda: None  # 실제 접속 없이
+    lb.bar("unt", "005930")
+    lb._subscribed.add(("mc", "005930"))
+    assert lb.release("unt", "5930") is True
+    assert ("mc", "005930") not in lb._wanted
+    assert lb._cmds.get_nowait() == ("1", "mc", "005930")  # 구독
+    assert lb._cmds.get_nowait() == ("2", "mc", "005930")  # 해제
+    assert lb.release("unt", "005930") is False  # 두 번 풀어도 안 터진다
+    assert lb.release("xx", "005930") is False
