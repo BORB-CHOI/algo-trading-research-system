@@ -46,6 +46,11 @@ export function SymbolResults(props: {
               <span>{s.code}</span>
               <span>{s.market}</span>
               {s.kindLabel && s.kind !== 'common' && <span className="kind">{s.kindLabel}</span>}
+              {s.delisted && (
+                <span className="gone" title={`${s.lastDate ?? ''} 까지 거래됐습니다`}>
+                  상장폐지
+                </span>
+              )}
             </span>
           </button>
           {props.trailing?.(s)}

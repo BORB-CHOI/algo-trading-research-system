@@ -542,14 +542,19 @@ html ::-webkit-scrollbar-thumb:hover,
 .kv > .k {
   flex: none;
   min-width: 68px;
-  max-width: 96px;
+  /* 긴 이름표는 잘리지 말고 두 줄로 접힌다 — 96px + nowrap 이라 "매수를 언제까지
+     기다리나" 같은 이름표가 입력칸에 가려 끝이 안 보였다(오너 지적 2026-08-23). */
+  max-width: 180px;
   color: var(--hts-text-2);
   font-weight: 500;
-  white-space: nowrap;
+  white-space: normal;
+  line-height: 1.35;
 }
 .kv > .v { flex: 1; display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-width: 0; }
 .kv > .v input, .kv > .v select { flex: 1; min-width: 0; }
 .kv > .v .unit { flex: none; color: var(--hts-text-3); font-size: 12px; }
+/* 고르는 값이 아니라 **알려주는 값** — 검색식이 정해서 화면은 보여주기만 한다. */
+.kv > .v .ro { flex: 1; text-align: right; color: var(--hts-text-2); font-size: 12px; }
 /* 입력칸 아래 흐린 설명 — 한 줄을 통째로 차지해 입력칸 옆에 끼지 않게 한다. */
 .kv > .v { flex-wrap: wrap; }
 .kv > .v .kv-desc {
@@ -969,6 +974,14 @@ html ::-webkit-scrollbar-thumb:hover,
   font-variant-numeric: tabular-nums;
 }
 .sym-row .meta .kind { color: var(--hts-accent-down); }
+/* 상장폐지 종목 — 검색에는 나오되 한눈에 구별되게 (오너 2026-08-23). */
+.sym-row .meta .gone {
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  color: var(--hts-dim);
+  font-size: 11px;
+}
 .hts .sym-row .add { flex: none; height: 24px; padding: 0 9px; margin-right: 6px; font-size: 11px; }
 .omni-pop .empty, .search-results .empty { padding: 14px 10px; font-size: 12px; color: var(--hts-text-3); }
 .hts .omni-pop .more {
@@ -1503,6 +1516,54 @@ table.grid.tight td {
 /* ── 차트 위에 얹는 겹치기 켜고끄기 (오너 2026-08-10) ────────────────
    차트 왼쪽 위에 떠 있다. 사이드 패널이 없는 화면에서도 선을 끌 수 있어야 한다. */
 .pro-canvas { position: relative; }
+.candle-card {
+  position: absolute;
+  z-index: 12;
+  top: 12px;
+  left: 54px;
+  width: 228px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 7px;
+  background: rgba(43, 46, 51, 0.92);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  color: #f5f5f5;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  backdrop-filter: blur(3px);
+}
+.candle-card > strong { display: block; margin-bottom: 7px; font-size: 12.5px; }
+.candle-card-close {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-size: 17px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.candle-card-row {
+  display: grid;
+  grid-template-columns: 58px minmax(78px, 1fr) 58px;
+  align-items: baseline;
+  gap: 4px;
+  min-height: 21px;
+}
+.candle-card-row > span { color: rgba(255, 255, 255, 0.72); }
+.candle-card-row > b { text-align: right; font-weight: 600; }
+.candle-card-row > small { text-align: right; color: inherit; font-size: 10.5px; }
+.candle-card-row.marcap {
+  margin: 3px -3px 4px;
+  padding: 4px 3px;
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+}
 .pro-layers {
   position: absolute;
   z-index: 5;
@@ -1659,6 +1720,8 @@ table.grid.tight td {
 
 .fresh-act { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--hts-line); }
 .fresh-act button { width: 100%; }
+.fresh-heavy { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--hts-line); }
+.fresh-heavy button { width: 100%; }
 .fresh-cmd {
   display: block; margin-top: 4px; padding: 6px 8px;
   background: var(--hts-elev); border: 1px solid var(--hts-line); border-radius: 6px;
@@ -1691,3 +1754,37 @@ table.grid.tight td {
   transition: width .3s ease-out;
 }
 .fresh-gauge .hint { margin: 6px 0 0; }
+
+
+/* ④ 백테스팅 — 고른 전략에 뭐가 걸려 있나 (펼쳐 보기). 보여주기 전용. */
+.strat-sum {
+  margin: 10px 0 4px;
+  border: 1px solid var(--hts-line);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+.strat-sum > summary {
+  cursor: pointer;
+  padding: 6px 0;
+  font-weight: 600;
+  color: var(--hts-text-2);
+}
+.strat-sum-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 8px 0;
+  border-top: 1px solid var(--hts-line);
+  font-size: 13px;
+}
+.strat-sum-row > .k { flex: none; width: 168px; color: var(--hts-text-3); }
+.strat-sum-row > .v { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.strat-sum-row > .v > ul { flex-basis: 100%; margin: 4px 0 0; padding-left: 18px; color: var(--hts-text-2); }
+.strat-sum-row > .v > .dim { flex-basis: 100%; color: var(--hts-dim, #6b7280); }
+.strat-sum-row > .v > .chip {
+  padding: 1px 8px;
+  border: 1px solid var(--hts-line);
+  border-radius: 999px;
+  background: var(--hts-bg-2, transparent);
+}
+.strat-sum > .hint { margin: 8px 0 4px; }
