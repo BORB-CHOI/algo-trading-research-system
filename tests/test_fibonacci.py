@@ -188,11 +188,19 @@ def test_지지저항은_되돌림_선_아래_자리에_붙는다() -> None:
         assert ln["bottom"] < ln["price"] < ln["top"]
 
 
-def test_되돌림_선_아래에_자리가_없으면_안_그린다() -> None:
-    """쭉 오르기만 한 종목은 되돌림 선 아래에 받쳐 줄 자리가 없다 — 억지로 안 만든다."""
+def test_되돌림_선_아래에_자리가_없으면_라운드_피겨로_그린다() -> None:
+    """쭉 오르기만 한 종목은 되돌림 선 아래에 받쳐 줄 자리가 없다.
+
+    그래도 **그 선 근처 라운드 피겨**로는 그린다 (오너 2026-08-22: "신고가라서 참고할
+    지지/저항이 없으면 라운드 피겨로만 그으면 되잖아"). 전에는 아무것도 안 그렸는데,
+    그러면 그 차수가 사라지고 남은 차수가 엉뚱한 한 자리에 몰린다.
+    """
     rising = [rally_bar(10_000 + 1_000 * i, 11_000 + 1_000 * i) for i in range(6)]
     out = compute_overlay(make_ohlc(rising), P)
-    assert [ln for ln in out["lines"] if ln["kind"] == "sr"] == []
+    sr = [ln for ln in out["lines"] if ln["kind"] == "sr"]
+    assert sr, "라운드 피겨로라도 그려야 한다"
+    # 되돌림 선마다 **자기 근처** 값을 받는다 — 한 자리에 몰리지 않는다.
+    assert len({ln["price"] for ln in sr}) > 1
 
 
 def test_line_kinds_and_no_touches() -> None:

@@ -29,7 +29,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.layer3_strategy.base_breakout import BoxStart, refine_start
+from src.layer3_strategy.base_breakout import BoxStart, refine_starts
 from src.layer3_strategy.fib_zone import (
     SR_SCOPES,
     FibZone,
@@ -37,7 +37,7 @@ from src.layer3_strategy.fib_zone import (
     band_params_from,
     find_fib_zones,
 )
-from src.layer3_strategy.market_structure import find_trend_start
+from src.layer3_strategy.market_structure import find_trend_start, impulse_window_start
 from src.layer3_strategy.price_zones import (
     ORDER_BLOCK,
     find_fair_value_gaps,
@@ -63,8 +63,42 @@ def wave_start_of(df: pd.DataFrame, p: dict) -> WaveLow:
 
 def wave_start_detail(df: pd.DataFrame, p: dict) -> tuple[WaveLow, BoxStart | None]:
     """`wave_start_of` + 평평한 구간 정보(화면 설명용). 못 찾았으면 두 번째가 None."""
+    hits = wave_starts_detail(df, p, limit=1)
+    return hits[0] if hits else (find_trend_start(df, zigzag_params_from(p)), None)
+
+
+def wave_starts_detail(
+    df: pd.DataFrame, p: dict, *, limit: int = 0
+) -> list[tuple[WaveLow, BoxStart | None]]:
+    """이 기준일에 성립하는 **파동 전부** — 이른 순서(큰 파동 → 작은 파동).
+
+    파동 하나 = 살아 있는 모멘텀 하나. 오너 2026-08-23: "한 종목 안에서 해당 기준일
+    가격(고점)에 대한 여러 파동도 있는 게 맞아."
+    """
     base = find_trend_start(df, zigzag_params_from(p))
-    return refine_start(df, base, p)
+    return refine_starts(df, base, p, not_before=wave_window_start(df, p, base.date), limit=limit)
+
+
+def wave_window_start(d: pd.DataFrame, p: dict, base_date: pd.Timestamp) -> pd.Timestamp | None:
+    """이번 파동을 **어디서부터** 볼 것인가 — 지금 꼭대기를 마지막으로 넘었던 날 다음 날.
+
+    꼭대기는 **`wave_high_of` 가 쓸 수 있는 값 중 제일 높은 것**으로 잡는다.
+
+    - 상승 전환 바닥(`base_date`) 이후의 최고 고가 — 검색식이 없어도 늘 있다.
+    - 검색식에 신고가 기간이 있으면 그 창(마지막 N봉)의 최고 고가도 같이 본다.
+
+    둘 중 높은 쪽을 쓰는 이유: 창이 좁게 잡히면 정작 되돌림을 그을 꼭대기가 창 밖으로
+    밀려난다. 넓게 잡는 쪽은 손해가 없다(그 앞은 어차피 더 높은 자리라 잘린다).
+
+    없으면(사상 최고가) None = 이력 전체를 본다.
+    """
+    if d.empty:
+        return None
+    top = float(d.loc[d["Date"] >= base_date, "High"].max())
+    days = p.get("fib_high_days")
+    if days and int(days) >= 1:
+        top = max(top, float(d.tail(int(days))["High"].max()))
+    return impulse_window_start(d, top)
 
 
 def levels_for(d: pd.DataFrame, p: dict, *, wave_start: pd.Timestamp) -> list[SRChannel]:
@@ -92,20 +126,31 @@ def levels_for(d: pd.DataFrame, p: dict, *, wave_start: pd.Timestamp) -> list[SR
     base = d.loc[d["Date"] >= wave_start].reset_index(drop=True) if scope == "파동 구간" else d
     if base.empty:
         return []
+
+    def channels(frame: pd.DataFrame, look: int) -> list[SRChannel]:
+        return find_channels(
+            frame,
+            SRParams(
+                prd=int(p["sr_prd"]),
+                channel_width_pct=float(p["sr_channel_width_pct"]),
+                loopback=min(look, len(frame)),
+                # 약한 선까지 다 만들어 두고, 몇 번은 닿아야 하는지는 find_fib_zones 가 거른다 —
+                # 거르는 자리를 두 군데 두면 어느 쪽이 뺀 건지 알 수 없다.
+                min_strength=1,
+                max_channels=None,
+                source=str(p.get("sr_source", SEED_ALL)),
+            ),
+        )
+
     look = int(p["sr_loopback"]) if scope == "최근 N봉" else len(base)
-    return find_channels(
-        base,
-        SRParams(
-            prd=int(p["sr_prd"]),
-            channel_width_pct=float(p["sr_channel_width_pct"]),
-            loopback=min(look, len(base)),
-            # 약한 선까지 다 만들어 두고, 몇 번은 닿아야 하는지는 find_fib_zones 가 거른다 —
-            # 거르는 자리를 두 군데 두면 어느 쪽이 뺀 건지 알 수 없다.
-            min_strength=1,
-            max_channels=None,
-            source=str(p.get("sr_source", SEED_ALL)),
-        ),
-    )
+    found = channels(base, look)
+    # 파동 구간에 그을 게 없으면 **더 과거까지 본다** (오너 2026-08-22: "지지저항 가까운
+    # 과거에 볼게 없으면 더 과거로 가면 보이잖아", "더 과거를 보면 차트가 매물대가 산처럼
+    # 쌓여있고 지지 저항이 다 보이는구만"). 파동이 짧으면 그 안엔 고점·저점이 안 생겨서
+    # 지지선이 0개가 되고, 그러면 주문이 엉뚱한 라운드 피겨 하나로 몰린다.
+    if not found and scope == "파동 구간":
+        found = channels(d, len(d))
+    return found
 
 
 def fib_zones_for(
@@ -219,44 +264,29 @@ def zone_label(z: FibZone) -> str:
     return f"{z.ratio * 100:.1f}% 지지저항 · {turns}{place} · {where}"
 
 
-# 피보나치 **끝점(최고점)** 을 어디로 잡을지 (ADR-0020). 화면이 고른다.
-FIB_HIGH_MODES = ("파동 꼭대기", "N일 신고가")
-
-
 def wave_high_of(d: pd.DataFrame, cycle: WaveLow, p: dict) -> tuple[float, pd.Timestamp]:
     """피보나치 끝점 — **정본은 여기 하나다.** 반환 (가격, 날짜).
 
     `d` 는 기준일까지 잘린 일봉(오름차순). 호출부가 자른다 — 여기서는 안 자른다.
 
-    - **파동 꼭대기**(기본): 바닥 이후 최고 고가. 지금까지의 방식이라 안 고르면 결과가 안 바뀐다.
-    - **N일 신고가**: 마지막 N거래일 중 최고 고가. N 은 **검색식이 정한다**(`fib_high_days`).
+    **검색식이 정한다. 고르는 옵션은 없다** (오너 결정 2026-08-22: "그럼 피보나치 끝점
+    이런 필터도 없어져야 겠지?", "내가 52주라는 검색식을 넣었으면 (250일) 그거대로 계속
+    갱신되게 해").
 
-    ## 왜 옵션인가 (ADR-0020)
+    - 검색식에 신고가 조건이 있으면 → 그 기간(`fib_high_days`) 안의 최고 고가.
+      250일(52주) 신고가로 골라 놓고 3년짜리 파동에서 되돌림을 긋던 어긋남을 막는다
+      (실측 이스트소프트 047560: 2023-01-09 8,480 → 49,800).
+    - 없으면 → 파동 바닥 이후 최고 고가. 기간을 가져올 데가 없을 때의 유일한 답이라
+      옵션이 아니라 자동이다.
 
-    250일(52주) 신고가로 종목을 골라 놓고, 되돌림은 3년 7개월짜리 파동에서 그었다
-    (실측 이스트소프트 047560: 2023-01-09 8,480 → 49,800). 검색식이 잡은 사이클과
-    피보나치가 그리는 사이클이 서로 달라, "52주 신고가 눌림"을 확인하려던 게 아니게 됐다.
-
-    그렇다고 못 박지는 않는다 — 피보나치는 신고가 전용 도구가 아니다
-    (오너 2026-08-18: "애초에 피보나치라는 게 신고가에만 적용하는 게 아니잖아").
+    옛 `fib_high_mode` 3지선다(ADR-0020)는 폐기했다 — 화면에서 고르게 두면 검색식과
+    어긋난 조합을 만들 수 있고, 경로가 둘로 갈린다.
 
     동률이면 **가장 이른 날**을 고른다(결정론 — 같은 입력에 같은 답).
     """
-    mode = str(p.get("fib_high_mode") or FIB_HIGH_MODES[0])
-    if mode not in FIB_HIGH_MODES:
-        raise ValueError(
-            f"모르는 피보나치 끝점 방식입니다: {mode!r} (쓸 수 있는 값: {', '.join(FIB_HIGH_MODES)})"
-        )
-    if mode == FIB_HIGH_MODES[0]:
-        seg = d.loc[d["Date"] >= cycle.date]
-    else:
-        days = p.get("fib_high_days")
-        if not days or int(days) < 1:
-            raise ValueError(
-                "끝점을 'N일 신고가'로 두려면 검색식에 'N일신고가돌파'(또는 신고가+거래대금) "
-                "조건이 있어야 합니다 — 거기서 기간을 가져옵니다."
-            )
-        seg = d.tail(int(days))
+    days = p.get("fib_high_days")
+    windowed = bool(days) and int(days or 0) >= 1
+    seg = d.tail(int(days)) if windowed else d.loc[d["Date"] >= cycle.date]
     seg = seg.reset_index(drop=True)
     if seg.empty:
         raise ValueError("끝점을 잡을 봉이 없습니다.")
