@@ -51,6 +51,53 @@ def normalize_code(code: pd.Series) -> pd.Series:
     return code.str.zfill(6)
 
 
+SYMBOL_MASTER_CACHE = Path("data/derived/_symbol_master.parquet")
+
+
+def symbol_master(
+    marcap_dir: Path = MARCAP_DIR, cache: Path | None = SYMBOL_MASTER_CACHE
+) -> pd.DataFrame:
+    """검색용 종목 목록 — **상장폐지 종목까지 전부**. (Code, Name, Market, LastDate, Delisted)
+
+    오너 지시 2026-08-23: "검색은 상장폐지까지 다 볼 수 있게 해야지. 그냥 상장폐지 태그만
+    붙어도 될 거 같은데."
+
+    가장 최근 연도 한 해만 보면 지금 살아 있는 종목밖에 안 나온다 — 롯데푸드 002270
+    (2022-07-19 상폐)이 검색에 안 잡히던 게 그것이다. 데이터는 1995년부터 다 있는데
+    목록에서만 빠져 있었다.
+
+    이름·시장은 그 종목이 **마지막으로 거래된 날** 기준이다(사명이 바뀐 종목은 마지막 이름).
+    `Delisted` = 마지막 거래일이 데이터 전체의 마지막 거래일보다 이르다.
+
+    32개 연도를 다 훑어 4.6초 걸리므로(실측 2026-08-23, 5,481종목) 결과를 parquet 로
+    남긴다. 새 연도 파일이 들어오면(가장 최근 연도 파일이 캐시보다 새로우면) 다시 만든다.
+    """
+    years = available_years(marcap_dir)
+    if not years:
+        return pd.DataFrame(columns=["Code", "Name", "Market", "LastDate", "Delisted"])
+    newest = marcap_dir / f"marcap-{years[-1]}.parquet"
+    if cache is not None and cache.exists() and cache.stat().st_mtime >= newest.stat().st_mtime:
+        return pd.read_parquet(cache)
+
+    frames = []
+    for year in years:
+        path = marcap_dir / f"marcap-{year}.parquet"
+        if not path.exists():
+            continue
+        d = pd.read_parquet(path, columns=["Date", "Code", "Name", "Market"])
+        d["Code"] = normalize_code(d["Code"])
+        # 연도 안에서 먼저 줄인다 — 32년치를 통째로 concat 하면 수천만 행이 된다.
+        frames.append(d.sort_values("Date").drop_duplicates("Code", keep="last"))
+    m = pd.concat(frames, ignore_index=True).sort_values("Date")
+    m = m.drop_duplicates("Code", keep="last").reset_index(drop=True)
+    m = m.rename(columns={"Date": "LastDate"})
+    m["Delisted"] = m["LastDate"] < m["LastDate"].max()
+    if cache is not None:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        m.to_parquet(cache, index=False)
+    return m
+
+
 def available_years(marcap_dir: Path = MARCAP_DIR) -> list[int]:
     return sorted(int(p.stem.split("-")[1]) for p in marcap_dir.glob("marcap-*.parquet"))
 
