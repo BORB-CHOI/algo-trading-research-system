@@ -103,7 +103,9 @@ def test_분할이_낀_종목도_같다() -> None:
         assert np.allclose(got.to_numpy(float), want.to_numpy(float), equal_nan=True, rtol=1e-12)
         # 계수가 실제로 1이 아니어야 시험이 뜻을 갖는다
         if d > days[70]:
-            assert float(view.close["000002"].iloc[0]) < float(hist.loc[hist["Code"] == "000002", "Close"].iloc[0])
+            assert float(view.close["000002"].iloc[0]) < float(
+                hist.loc[hist["Code"] == "000002", "Close"].iloc[0]
+            )
 
 
 def test_보정할_수_없는_패널도_돈다() -> None:

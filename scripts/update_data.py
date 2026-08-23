@@ -47,6 +47,7 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -75,6 +76,11 @@ from src.layer4_execution.brokers.kis.client import CallPolicy, KisApiError, Kis
 
 LOCK_PATH = ROOT / "data" / "derived" / "_update.lock"
 LOG_PATH = ROOT / "data" / "derived" / "_update_log.jsonl"
+
+# (단계 이름, 완료 개수, 전체 개수) — 웹 화면이 진행률을 보여줄 수 있게(2026-08-22).
+# CLI 는 그냥 무시하고 print 만 본다. 종목 수천 개짜리 단계에서 아무 표시가 없으면
+# 멈춘 것처럼 보인다(오너 지적 — Ctrl+C 로 끈 실행이 사실은 네트워크 재시도 대기 중이었다).
+ProgressFn = Callable[[str, int, int], None]
 
 # 일·주·월봉은 **매일** 맞춘다 (오너 결정 2026-08-17).
 # 한때 월봉을 토요일로 미뤘다가 되돌렸다 — 화면이 합성으로 가려주더라도 수집본 자체가
@@ -171,6 +177,9 @@ def update_bars(
     intervals: list[tuple[str, str, str | None]],
     last_day: str,
     done: set[tuple[str, str, str]] | None = None,
+    *,
+    progress: ProgressFn | None = None,
+    label: str = "나무 봉 증분",
 ) -> dict:
     """나무 봉 증분 — 저장된 마지막 날짜 이후만 받아 이어붙인다. 파일이 없으면 전체 수집.
 
@@ -184,6 +193,7 @@ def update_bars(
     ]
     totals = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
     lock = threading.Lock()
+    done_n = 0
 
     def work(job: tuple[str, list[str]]) -> None:
         code, markets = job
@@ -212,13 +222,20 @@ def update_bars(
                 if folder in ("week", "month"):
                     added += merge_period_save(path, old, new, folder)  # 같은 주·달 두 봉 금지
                 else:
-                    keys = [c for c in ("bsop_date", "bsop_time") if c in new.columns] or ["bsop_date"]
+                    keys = [c for c in ("bsop_date", "bsop_time") if c in new.columns] or [
+                        "bsop_date"
+                    ]
                     added += merge_save(path, old, new, keys)
+        nonlocal done_n
         with lock:
             totals["added"] += added
             totals["errors"] += errors
             totals["skipped"] += skipped
             totals["called"] += called
+            done_n += 1
+            n = done_n
+        if progress and (n % 20 == 0 or n == len(jobs)):
+            progress(label, n, len(jobs))
 
     with ThreadPoolExecutor(max_workers=bars.WORKERS) as pool:
         list(pool.map(work, jobs))
@@ -278,7 +295,13 @@ def update_day_bars_kis(last_day: str) -> dict:
         str(r.sCode): ["krx"] + (["unt", "nxt"] if str(r.nxt_yn) == "Y" else [])
         for r in master.itertuples()
     }
-    out: dict = {"added": 0, "called": 0, "recollected": 0, "left_to_namuh": 0, "prev_day": prev_day}
+    out: dict = {
+        "added": 0,
+        "called": 0,
+        "recollected": 0,
+        "left_to_namuh": 0,
+        "prev_day": prev_day,
+    }
     recollect: set[str] = set()
     appended: list[tuple[str, str]] = []
     for market in ("krx", "unt", "nxt"):
@@ -287,7 +310,8 @@ def update_day_bars_kis(last_day: str) -> dict:
             for code, markets in jobs.items()
             if market in markets
             and code not in recollect
-            and last_date_of(bars.OUT_DIR / market / "day" / f"{code}.parquet", "bsop_date") == prev_day
+            and last_date_of(bars.OUT_DIR / market / "day" / f"{code}.parquet", "bsop_date")
+            == prev_day
         ]
         try:
             snap = kis_snapshot.fetch_snapshot(client, market, targets, last_day)
@@ -376,7 +400,9 @@ def _check_kis_against_namuh(appended: list[tuple[str, str]], since: str, day: s
 KIS_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 KIS_CHART_TR = "FHKST03010100"
 KIS_PERIOD_WORKERS = 5
-KIS_PERIOD_POLICY = CallPolicy(min_interval_sec=0.3, max_attempts=5, backoff_base_sec=2.0)  # 5줄기 → 초당 ~16 (20이면 EGW00201 거절이 섞인다, 실측)
+KIS_PERIOD_POLICY = CallPolicy(
+    min_interval_sec=0.3, max_attempts=5, backoff_base_sec=2.0
+)  # 5줄기 → 초당 ~16 (20이면 EGW00201 거절이 섞인다, 실측)
 _KIS_LOCAL = threading.local()
 
 
@@ -426,7 +452,9 @@ def _week_label(day_path: Path, monday: date) -> str:
     return max(days) if days else ""
 
 
-def _kis_period_rows(client: KisClient, market: str, code: str, period: str, start: str, end: str) -> list[dict]:
+def _kis_period_rows(
+    client: KisClient, market: str, code: str, period: str, start: str, end: str
+) -> list[dict]:
     body = client.get(
         KIS_CHART_PATH,
         KIS_CHART_TR,
@@ -439,7 +467,9 @@ def _kis_period_rows(client: KisClient, market: str, code: str, period: str, sta
             "FID_ORG_ADJ_PRC": "0",  # 수정주가 — 나무 봉과 같은 기준
         },
     ).body
-    return [r for r in (body.get("output2") or []) if isinstance(r, dict) and r.get("stck_bsop_date")]
+    return [
+        r for r in (body.get("output2") or []) if isinstance(r, dict) and r.get("stck_bsop_date")
+    ]
 
 
 def _kis_row_to_namuh(r: dict, label: str) -> dict:
@@ -478,7 +508,9 @@ def merge_period_save(path: Path, old: pd.DataFrame | None, new: pd.DataFrame, f
         return 0
     if old is not None and not old.empty:
         fresh_keys = {_period_key(folder, str(d)) for d in new["bsop_date"]}
-        old = old[~old["bsop_date"].astype(str).map(lambda d: _period_key(folder, d)).isin(fresh_keys)]
+        old = old[
+            ~old["bsop_date"].astype(str).map(lambda d: _period_key(folder, d)).isin(fresh_keys)
+        ]
     return merge_save(path, old, new, ["bsop_date"])
 
 
@@ -523,7 +555,9 @@ def update_period_bars_kis(last_day: str) -> tuple[dict, set[tuple[str, str, str
             start = f"{since}01"
         client = _kis_period_client(creds, token)
         try:
-            rows = _kis_period_rows(client, market, code, "W" if folder == "week" else "M", start, last_day)
+            rows = _kis_period_rows(
+                client, market, code, "W" if folder == "week" else "M", start, last_day
+            )
         except (KisApiError, OSError):
             return "error"
         out = []
@@ -546,7 +580,9 @@ def update_period_bars_kis(last_day: str) -> tuple[dict, set[tuple[str, str, str
         if not out:
             return "namuh"
         old = pd.read_parquet(path)
-        added = merge_period_save(path, old, pd.DataFrame(out, columns=kis_snapshot.NAMUH_DAY_COLS), folder)
+        added = merge_period_save(
+            path, old, pd.DataFrame(out, columns=kis_snapshot.NAMUH_DAY_COLS), folder
+        )
         with lock:
             totals["added"] += added
         return "done"
@@ -595,7 +631,15 @@ def _bars_since(market: str, code: str, gubun: str, xtick: str | None, since: st
 KIS_UPDATE_WORKERS = 5  # 오너 결정 2026-08-18: 5줄기(초당 10건, 한도 20). 거절은 재시도가 받는다.
 
 
-def update_kis(module, out_dir: Path, date_col: str, label: str, last_day: str) -> dict:
+def update_kis(
+    module,
+    out_dir: Path,
+    date_col: str,
+    label: str,
+    last_day: str,
+    *,
+    progress: ProgressFn | None = None,
+) -> dict:
     """KIS 일별 데이터(수급·신용잔고) 증분 — 상장 종목만, 저장된 마지막 날짜 이후를 받는다.
 
     종목 단위 병렬. 줄기마다 클라이언트를 따로 쓴다(`_thread_client`).
@@ -605,10 +649,22 @@ def update_kis(module, out_dir: Path, date_col: str, label: str, last_day: str) 
     codes = sorted({str(r.sCode) for r in master.itertuples()})
     totals: dict = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
     lock = threading.Lock()
+    done_n = 0
 
     stop = threading.Event()  # 시간 제한을 만나면 전 종목 헛호출을 멈춘다
 
     def work(code: str) -> None:
+        try:
+            _do(code)
+        finally:
+            nonlocal done_n
+            with lock:
+                done_n += 1
+                n = done_n
+            if progress and (n % 50 == 0 or n == len(codes)):
+                progress(label, n, len(codes))
+
+    def _do(code: str) -> None:
         if stop.is_set():
             return
         path = out_dir / f"{code}.parquet"
@@ -700,53 +756,73 @@ def update_disclosures() -> dict:
     return {"added_rows": added, "errors": errors}
 
 
-def main() -> int:
-    force_minutes = "--minutes" in sys.argv
+def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = None) -> dict:
+    """갱신 전체 한 회차 — CLI(`main`)와 API(`/api/data/update`)가 **같은 함수**를 쓴다.
+
+    잠금 파일(`LOCK_PATH`)로 겹침을 막는다 — 터미널에서 돌리든 웹 버튼으로 돌리든 같은
+    파일을 보므로 둘이 동시에 못 돈다. `progress` 는 단계 이름과 (완료/전체)를 받는다 —
+    CLI는 그냥 print, 웹은 이걸로 진행 게이지를 채운다(오너 요청 2026-08-22: "웹상에서
+    다 갱신 가능하도록, 끊겨도 문제없도록").
+
+    실패해도 `summary`에 담아 로그로 남기고 **위로 다시 던진다** — 호출부(CLI/API)가
+    각자 방식으로 사람에게 알린다.
+    """
     weekday = datetime.now().weekday()  # 월=0 … 일=6
 
     if weekday == 6 and not force_minutes:
-        print("일요일 — 갱신할 게 없다.")
-        return 0
+        return {"skipped": "일요일 — 갱신할 게 없다."}
     if LOCK_PATH.exists():
         age_h = (time.time() - LOCK_PATH.stat().st_mtime) / 3600
         if age_h < 12:
-            print(f"이전 갱신이 아직 도는 중({age_h:.1f}시간 전 시작) — 이번 회차는 건너뛴다.")
-            return 0
+            return {
+                "skipped": f"이전 갱신이 아직 도는 중({age_h:.1f}시간 전 시작) — 이번 회차는 건너뛴다."
+            }
         # 12시간 넘은 잠금은 죽은 실행의 흔적으로 보고 지운다
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     LOCK_PATH.write_text(datetime.now().isoformat(), encoding="utf-8")
+
+    def step(msg: str, done: int = 0, total: int = 0) -> None:
+        print(msg, flush=True)
+        if progress:
+            progress(msg, done, total)
 
     do_minutes = force_minutes or weekday == 5  # 토요일
     summary: dict = {"minutes_included": do_minutes}
     try:
         last_day = market_last_trading_day()
-        print(f"⓪ 시장 마지막 거래일: {last_day or '(판정 실패 — 전부 확인한다)'}", flush=True)
+        step(f"⓪ 시장 마지막 거래일: {last_day or '(판정 실패 — 전부 확인한다)'}")
         summary["last_trading_day"] = last_day
-        print("⓪-2 marcap 뒤쪽 공백 (KRX)...", flush=True)
+        step("⓪-2 marcap 뒤쪽 공백 (KRX)...")
         summary["recent"] = krx_gapfill.fill_marcap_gap()
 
-        print("①-0 오늘 일봉 (KIS 멀티시세, 30종목/콜)...", flush=True)
+        step("①-0 오늘 일봉 (KIS 멀티시세, 30종목/콜)...")
         summary["bars_day_kis"] = update_day_bars_kis(last_day)
-        print("①-1 주·월봉 (KIS 기간별시세, 5줄기)...", flush=True)
+        step("①-1 주·월봉 (KIS 기간별시세, 5줄기)...")
         summary["bars_period_kis"], kis_done = update_period_bars_kis(last_day)
         intervals = DAILY_INTERVALS
-        print(f"① 나무 봉 증분 ({', '.join(i[0] for i in intervals)}) — KIS 가 못 채운 것만...", flush=True)
-        summary["bars_daily"] = update_bars(intervals, last_day, kis_done)
+        step(f"① 나무 봉 증분 ({', '.join(i[0] for i in intervals)}) — KIS 가 못 채운 것만...")
+        summary["bars_daily"] = update_bars(
+            intervals, last_day, kis_done, progress=progress, label="① 나무 봉 증분"
+        )
         if do_minutes:
-            print("② 나무 분봉 증분...", flush=True)
-            summary["bars_minutes"] = update_bars(MINUTE_INTERVALS, last_day)
-        print("③ KIS 수급 증분...", flush=True)
-        summary["supply"] = update_kis(supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day)
-        print("③-2 거래원 당일 상위5 (전 종목)...", flush=True)
+            step("② 나무 분봉 증분...")
+            summary["bars_minutes"] = update_bars(
+                MINUTE_INTERVALS, last_day, progress=progress, label="② 나무 분봉 증분"
+            )
+        step("③ KIS 수급 증분...")
+        summary["supply"] = update_kis(
+            supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day, progress=progress
+        )
+        step("③-2 거래원 당일 상위5 (전 종목)...")
         summary["members"] = {"rows": members.snapshot_all()}
-        print("③-3 DART 공시 증분...", flush=True)
+        step("③-3 DART 공시 증분...")
         summary["disclosures"] = update_disclosures()
         if do_minutes:
-            print("④ KIS 신용잔고 증분...", flush=True)
+            step("④ KIS 신용잔고 증분...")
             summary["credit"] = update_kis(
-                credit, credit.OUT_DIR, "deal_date", "신용잔고", last_day
+                credit, credit.OUT_DIR, "deal_date", "신용잔고", last_day, progress=progress
             )
-        print("⑤ 워터마크 갱신...", flush=True)
+        step("⑤ 워터마크 갱신...")
         summary["freshness"] = freshness.refresh_marks()
         summary["ok"] = True
     except Exception as e:  # 요약 로그에 실패도 남긴다 — 조용히 죽으면 공백을 모른다
@@ -757,7 +833,18 @@ def main() -> int:
         log_line(**summary)
         LOCK_PATH.unlink(missing_ok=True)
 
-    print("갱신 끝:", json.dumps(summary, ensure_ascii=False))
+    step("갱신 끝: " + json.dumps(summary, ensure_ascii=False))
+    return summary
+
+
+def main() -> int:
+    force_minutes = "--minutes" in sys.argv
+    try:
+        summary = run_update(force_minutes=force_minutes)
+    except Exception:
+        return 1
+    if summary.get("skipped"):
+        print(summary["skipped"])
     return 0
 
 
