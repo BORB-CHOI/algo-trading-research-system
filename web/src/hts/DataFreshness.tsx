@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchFreshness, refreshData, type DataFreshness as Fresh } from '../api'
+import { fetchFreshness, refreshData, startHeavyUpdate, type DataFreshness as Fresh } from '../api'
 
 // 헤더의 데이터 상태 알약. 누르면 소스별로 펼쳐진다.
 //
@@ -46,11 +46,14 @@ export function DataFreshness() {
   }, [load])
 
   // 갱신이 도는 동안엔 자주 확인한다 — 몇 초짜리라 1분 주기로는 끝난 걸 못 본다.
+  // 무거운 갱신(나무 봉·수급·신용잔고)은 수 분~수십 분이라 2초 주기로 본다 — 창을
+  // 닫았다 열어도 서버가 계속 돌고 있으면 여기서 이어서 보인다(오너 요청 2026-08-22).
   useEffect(() => {
-    if (!data?.refreshing) return
-    const t = setInterval(() => void load(), 1000)
+    if (!data?.refreshing && !data?.heavy.running) return
+    const ms = data.heavy.running ? 2000 : 1000
+    const t = setInterval(() => void load(), ms)
     return () => clearInterval(t)
-  }, [data?.refreshing, load])
+  }, [data?.refreshing, data?.heavy.running, load])
 
   useEffect(() => {
     if (!open) return
@@ -74,6 +77,17 @@ export function DataFreshness() {
     setMsg('')
     try {
       const r = await refreshData()
+      setMsg(r.message)
+      await load()
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : '갱신 실패')
+    }
+  }
+
+  async function onHeavyUpdate(minutes: boolean) {
+    setMsg('')
+    try {
+      const r = await startHeavyUpdate(minutes)
       setMsg(r.message)
       await load()
     } catch (e) {
@@ -153,12 +167,57 @@ export function DataFreshness() {
                 </p>
               </div>
             )}
-            <p className="hint">
-              차트 일봉은 서버를 켤 때마다 자동으로 최신이 됩니다. 수급·신용잔고처럼 종목마다
-              따로 받아야 하는 것은 호출 한도가 커서 버튼으로 시작하지 않습니다 — 아래 명령을
-              직접 돌리세요.
-            </p>
-            <code className="fresh-cmd">{data.manual_command}</code>
+            <p className="hint">차트 일봉은 서버를 켤 때마다 자동으로 최신이 됩니다.</p>
+
+            <div className="fresh-heavy">
+              <button
+                type="button"
+                disabled={data.heavy.running}
+                onClick={() => void onHeavyUpdate(false)}
+              >
+                {data.heavy.running ? '무거운 갱신 도는 중…' : '나무 봉·수급·신용잔고 갱신'}
+              </button>
+              <p className="hint">
+                종목마다 따로 호출하는 무거운 갱신입니다(수천 건) — 수 분~수십 분 걸리지만
+                서버 백그라운드로 돌아서 창을 닫아도 계속됩니다. 다시 열면 여기서 이어서 보입니다.
+              </p>
+
+              {data.heavy.running && (
+                <div className="fresh-gauge">
+                  <div className="fresh-gauge-head">
+                    <span>{data.heavy.phase || '시작하는 중'}</span>
+                    <span className="mono">
+                      {data.heavy.total > 0
+                        ? `${data.heavy.done.toLocaleString()} / ${data.heavy.total.toLocaleString()}`
+                        : '준비 중…'}
+                    </span>
+                  </div>
+                  <div className="fresh-gauge-track">
+                    <div
+                      className="fresh-gauge-fill"
+                      style={{
+                        width:
+                          data.heavy.total > 0
+                            ? `${Math.min(100, (data.heavy.done / data.heavy.total) * 100)}%`
+                            : '0%',
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {!data.heavy.running && data.heavy.result?.error != null && (
+                <p className="hint warn">지난 회차 오류: {data.heavy.result.error}</p>
+              )}
+              {!data.heavy.running && data.heavy.result?.skipped != null && (
+                <p className="hint">지난 회차: {data.heavy.result.skipped}</p>
+              )}
+
+              <p className="hint">
+                터미널에서 직접 돌리고 싶으면(같은 잠금을 봐서 서로 안 겹칩니다):
+              </p>
+              <code className="fresh-cmd">{data.manual_command}</code>
+            </div>
             {msg && <p className="hint">{msg}</p>}
           </div>
         </div>
