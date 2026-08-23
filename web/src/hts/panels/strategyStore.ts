@@ -69,9 +69,12 @@ export type Strategy = {
   screen: { name?: string; logic: ScreenLogic; conditions: SavedCondition[] }
   /** 진입 기법(케이스 검사기 오버레이용). 전략 1호 시뮬레이션은 안 쓴다 — 선택 사항. */
   entry?: { key: string; params: Record<string, number | string> }
-  /** 피보나치 **끝점(최고점)** — '파동 꼭대기'(기본) | 'N일 신고가' (ADR-0020).
-   *  없으면(옛 저장본) 기본값이라 성적이 안 바뀐다. 기간은 검색식이 정한다. */
-  fibHighMode?: string
+  /** 매수 타점을 며칠까지 기다릴지 (모든 전략 공통, 기본 365일).
+   *  없으면(옛 저장본) 기본값을 쓴다. */
+  buyWaitDays?: number
+  /** 오른 뒤 거래가 한창때의 이 %까지 줄면 끝난 상승으로 보고 뺀다.
+   *  0(또는 없음) = 안 씀. 오너 2026-08-23: "가격만 보지 말고 거래대금을 좀 봐라". */
+  waveCoolPct?: number
   /** 분할 매수·매도 설계. 가격은 여기 없다 — 기법 파라미터와 종목에서 계산된다.
    *  목표가 = 각 레벨에서 가장 가까운 지지/저항선 ± 호가 오프셋(ADR-0014).
    *  roundTolerancePct 는 라운드 피겨 방식 폐기로 옛 저장본 호환용으로만 남는다. */
@@ -141,10 +144,13 @@ export type StrategyDraft = {
   logic: ScreenLogic
   conditions: SavedCondition[]
   entryKey: string
-  /** 피보나치 **끝점(최고점)**을 어디로 잡을지 (ADR-0020).
-   *  '파동 꼭대기' = 바닥 이후 최고 고가(기본, 예전과 같음)
-   *  'N일 신고가'  = 검색식이 정한 신고가 기간 — 기간은 **서버가 검색식에서 꺼낸다** */
-  fibHighMode: string
+  /** 매수 타점을 며칠까지 기다릴지 — 모든 전략 공통(오너 결정 2026-08-22).
+   *  그 안에 한 주도 못 사면 그 매매는 '매수 못함'으로 끝난다. 기본 1년(365일).
+   *  피보나치 끝점은 **검색식이 정한다** — 고르는 값이 아니라서 여기 없다. */
+  buyWaitDays: string
+  /** 끝난 상승을 뺄 기준 — 오른 뒤 거래가 한창때의 이 %까지 줄면 뺀다.
+   *  '0' = 안 씀(오른 구간을 다 본다). */
+  waveCoolPct: string
   entryParams: Record<string, string>
   buy: BuyStage[]
   sell: SellStage[]
@@ -187,7 +193,8 @@ export function emptyDraft(): StrategyDraft {
     logic: 'and',
     conditions: [],
     entryKey: '',
-    fibHighMode: '파동 꼭대기',
+    buyWaitDays: '365',
+    waveCoolPct: '0',
     entryParams: {},
     buy: [],
     sell: [],
@@ -217,7 +224,8 @@ export function toDraft(s: Strategy): StrategyDraft {
     logic: s.screen.logic,
     conditions: (s.screen.conditions ?? []).map((c) => ({ key: c.key, params: { ...c.params } })),
     entryKey: s.entry?.key ?? '',
-    fibHighMode: s.fibHighMode ?? '파동 꼭대기',
+    buyWaitDays: String(s.buyWaitDays ?? 365),
+    waveCoolPct: String(s.waveCoolPct ?? 0),
     entryParams,
     // split 이 없는 옛 저장본도 열려야 한다 — 빈 배열로 받는다.
     buy: (s.split?.buy ?? []).map((b) => ({ ...b })),
@@ -391,7 +399,8 @@ export function toStrategy(d: StrategyDraft, entryDefs: ConditionParamDef[]): Pa
         conditions: d.conditions,
       },
       ...(entry ? { entry } : {}),
-      ...(d.fibHighMode ? { fibHighMode: d.fibHighMode } : {}),
+      ...(d.buyWaitDays ? { buyWaitDays: Number(d.buyWaitDays) || 0 } : {}),
+      ...(d.waveCoolPct ? { waveCoolPct: Number(d.waveCoolPct) || 0 } : {}),
       ...(stop ? { stop } : {}),
       split: {
         buy: d.buy.map((b) => ({ ...b })),

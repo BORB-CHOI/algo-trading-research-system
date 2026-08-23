@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Dispatch, ReactNode, SetStateAction } from 'react'
 import {
+  type ConditionDef,
   deleteRun,
   fetchBacktestAll,
   fetchRunResult,
@@ -22,6 +23,7 @@ import { newBuyStage, toDraft, type Strategies, type StrategyDraft } from '../st
 import { SIM_EXAMPLE, stopPayload, todayStr } from './common'
 import { BacktestScore } from './BacktestScore'
 import { BacktestTable } from './BacktestTable'
+import { StrategySummary } from './StrategySummary'
 
 // ④ 백테스팅 — 전수 검사 (layer4 strategy_one). 전략 값은 ②의 현재 값(draft)을 쓴다.
 // StrategyPanel.tsx 분할(구조 리팩토링 2026-08-06)로 옮겨온 스텝.
@@ -62,10 +64,10 @@ function RowChart(props: {
   const readyRef = useRef(false)
   const simRef = useRef<SimulateResponse | null>(null)
   const drawnRef = useRef(false)
-  // 무엇을 보여줄 범위인가. 기본은 **이 매매 구간** — 행을 눌러 연 차트인데 전 기간을
-  // 펼쳐 놓으면 정작 이 매매가 화면에서 점 하나가 된다(오너 2026-08-18:
-  // "매매 기록 클릭하면 차트가 해당 구간으로 화면 포커싱 되야지").
-  const [range, setRange] = useState<'trade' | 'all' | 'plan'>('trade')
+  // 무엇을 보여줄 범위인가. 기본은 **기준일 보기** (오너 지시 2026-08-22).
+  // 기준일까지의 500봉 — "왜 이 날 걸렸나"를 보는 자리다. 체결은 전부 기준일 다음날부터라
+  // 이 화면에는 매수·매도 표식이 안 나온다. 산 자리를 보려면 '산 뒤 흐름'으로 바꾼다.
+  const [range, setRange] = useState<'trade' | 'all' | 'plan'>('plan')
 
   /** 이 매매가 벌어진 구간의 끝 — 마지막 청산. 안 팔렸으면 검사 끝까지. */
   const tradeEnd = r.last_exit ?? (r.open ? endDate : (r.first_fill ?? planDate))
@@ -108,7 +110,11 @@ function RowChart(props: {
       // 상관없는 옛 라운드 수십 건이 찍히고 정작 이 행의 체결은 하나도 안 보였다.
       plan_date: planDate,
       end: endDate,
+      // ④ 표의 이 줄이 쓴 **그 파동**을 그린다 — 한 기준일에 파동이 여럿이라,
+      // 안 주면 가장 큰 파동이 그려져 표의 숫자와 그림이 어긋난다 (오너 2026-08-23).
+      wave_low_date: r.wave_low_date,
       ...START_PAYLOAD,
+      start_cool_pct: Number(draft.waveCoolPct || '0') || 0,
       ...ZZ_PAYLOAD,
       ...BAND_PAYLOAD,
       ...SR_PAYLOAD,
@@ -117,7 +123,6 @@ function RowChart(props: {
         id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled,
       })),
       sell_basis: draft.sellBasis,
-      fib_high_mode: draft.fibHighMode,
       conditions: draft.conditions,
       buy_tick_offset: Number(draft.buyTickOffset || '0') || 0,
       sell_tick_offset: Number(draft.sellTickOffset || '0') || 0,
@@ -200,7 +205,7 @@ function RowChart(props: {
                 void fit('trade')
               }}
             />
-            이 매매
+            산 뒤 흐름
           </label>
           <label>
             <input
@@ -211,7 +216,7 @@ function RowChart(props: {
                 void fit('all')
               }}
             />
-            전 기간
+            처음부터 끝까지
           </label>
           <label>
             <input
@@ -222,7 +227,7 @@ function RowChart(props: {
                 void fit('plan')
               }}
             />
-            고른 날까지
+            기준일 보기
           </label>
         </span>
       </div>
@@ -233,6 +238,7 @@ function RowChart(props: {
 export function BacktestStep(props: {
   active: boolean
   catErrNode: ReactNode
+  condMap: Map<string, ConditionDef>
   saved: Strategies
   name: string
   setName: Dispatch<SetStateAction<string>>
@@ -240,7 +246,7 @@ export function BacktestStep(props: {
   setDraft: Dispatch<SetStateAction<StrategyDraft>>
   onGoStrategy: () => void
 }) {
-  const { active, catErrNode, saved, name, setName, draft, setDraft, onGoStrategy } = props
+  const { active, catErrNode, condMap, saved, name, setName, draft, setDraft, onGoStrategy } = props
   // 행에서 연 차트 — 이 화면 위에 뜬다(탭 이동 ❌).
   const [chartFor, setChartFor] = useState<{ row: BacktestRow; date: string } | null>(null)
   // 표의 거르기·정렬·쪽 나누기는 BacktestTable 이 스스로 들고 있다 — 여기서는 안 만진다.
@@ -321,6 +327,7 @@ export function BacktestStep(props: {
         conditions: draft.conditions,
         logic: draft.logic,
         ...START_PAYLOAD,
+        start_cool_pct: Number(draft.waveCoolPct || '0') || 0,
         ...ZZ_PAYLOAD,
         ...BAND_PAYLOAD,
         ...SR_PAYLOAD,
@@ -329,7 +336,7 @@ export function BacktestStep(props: {
           id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled,
         })),
         sell_basis: draft.sellBasis,
-        fib_high_mode: draft.fibHighMode,
+        buy_wait_days: Number(draft.buyWaitDays) || 0,
         buy_tick_offset: Number.isInteger(buyOff) ? buyOff : 0,
         sell_tick_offset: Number.isInteger(sellOff) ? sellOff : 0,
         buy_min_gap_pct: Number.isFinite(minGap) && minGap >= 0 ? minGap : 0,
@@ -436,21 +443,15 @@ export function BacktestStep(props: {
           </select>
           <button type="button" onClick={onGoStrategy}>전략 편집</button>
         </KV>
-        {/* 이 전략이 무엇을 검사하는지 — 검색식이 안 붙어 있으면 검사할 종목이 없다. */}
-        {draft.conditions.length > 0 ? (
-          <p className="hint">
-            검사할 종목: <b>{draft.screenName || '이름 없는 검색식'}</b> (조건{' '}
-            {draft.conditions.length}개, {draft.logic === 'and' ? '모두 만족' : '하나라도 만족'}) ·
-            분할 매수 {draft.buy.filter((b) => b.enabled).length}차 · 매도{' '}
-            {draft.sell.filter((s) => s.enabled).length}차 ·{' '}
-            {draft.stopEnabled ? '손절 있음' : '손절 없음'}
-          </p>
-        ) : (
+        {/* 지금 고른 전략에 뭐가 걸려 있는지 — ②로 건너가지 않고 여기서 펼쳐 본다
+            (오너 2026-08-23). */}
+        {draft.conditions.length === 0 && (
           <p className="hint warn">
             이 전략에 검색식이 안 붙어 있습니다 — 검사할 종목을 정할 수 없습니다.{' '}
             <button type="button" onClick={onGoStrategy}>②에서 붙이기</button>
           </p>
         )}
+        <StrategySummary draft={draft} condMap={condMap} />
         {/* 구간은 **오너가 날짜로 정한다.** 예전엔 여기 '값 맞추기용/확인용/채점용' 라디오가
             있었으나 없앴다 — 오너 결정 2026-08-16 "2007~ 나누지 않고 전체". */}
         <KV label="검사 기간">
@@ -460,7 +461,8 @@ export function BacktestStep(props: {
         </KV>
         <p className="hint">
           거래일마다 검색식을 다시 돌려, 그날 걸린 종목을 그날 기준으로 사고팝니다.
-          같은 종목이라도 파동이 바뀌면 다시 걸고, 매매 중이면 새로 시작하지 않습니다.
+          매매는 서로 별개라 앞 매매가 진행 중이어도 새로 엽니다. 한 기준일에 오른 구간이
+          여러 개면 그만큼 매매가 열리고, 바닥과 신고가가 똑같으면 한 건으로 칩니다.
           돈은 무한이라 동시 보유 제한이 없습니다 — 이 숫자는 계좌 수익률이 아니라
           "한 종목에 들어갔을 때 평균 어땠나"입니다. 몇 분 걸립니다.
         </p>

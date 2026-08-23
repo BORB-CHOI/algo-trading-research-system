@@ -157,7 +157,7 @@ export function SimSymbolPicker({ value, onPick }: Readonly<{ value: Symbol; onP
 // 동안 기준점이 뭔지 안 보여 "평단 +10%가 왜 사이클 고점 값이냐"가 재발한다(2026-08-06).
 export function SellBasisPicker({ value, onChange }: { value: SellBasis; onChange: (b: SellBasis) => void }) {
   return (
-    <KV label="매도 기준점">
+    <KV label="무엇을 기준으로 파나">
       <span className="radios" style={{ marginLeft: 'auto' }}>
         {(Object.entries(SELL_BASIS_LABEL) as [SellBasis, string][]).map(([k, label]) => (
           <label key={k}>

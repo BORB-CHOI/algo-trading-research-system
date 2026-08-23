@@ -211,38 +211,64 @@ export function StrategyStep(props: {
                   onChange={(k, v) => set('entryParams', { ...draft.entryParams, [k]: v })}
                 />
               )}
-              {/* 피보나치 **끝점(최고점)** — ADR-0020. 피보나치는 신고가 전용 도구가
-                  아니라서 못 박지 않고 고르게 둔다(오너 2026-08-18). 기간은 여기서 안 받는다 —
-                  검색식이 정한 값을 서버가 그대로 이어받는다(두 곳에 적으면 어긋난다). */}
+              {/* 피보나치 끝점은 **검색식이 정한다** — 고르는 칸이 없다(오너 결정 2026-08-22:
+                  "그럼 피보나치 끝점 이런 필터도 없어져야 겠지?"). 검색식에 신고가 조건이
+                  있으면 그 기간으로, 없으면 파동 바닥 이후 최고 고가로 잰다. */}
               {isFixedDefinition(entryDef.key) && (
                 <>
-                  <KV label="피보나치 끝점">
-                    <select
-                      style={{ flex: 1 }}
-                      value={draft.fibHighMode}
-                      onChange={(e) => set('fibHighMode', e.target.value)}
-                    >
-                      <option value="파동 꼭대기">파동 꼭대기 — 바닥 이후 최고 고가</option>
-                      <option value="N일 신고가">N일 신고가 — 검색식이 정한 기간</option>
-                    </select>
+                  <KV label="되돌림을 어디서 재나">
+                    <span className="ro">
+                      {newHighDays == null
+                        ? '파동 바닥부터 그 뒤 가장 높았던 고가까지'
+                        : `최근 ${newHighDays}거래일 중 가장 높았던 고가까지`}
+                    </span>
                   </KV>
                   <p className="hint">
-                    {draft.fibHighMode === 'N일 신고가' ? (
-                      newHighDays == null ? (
-                        <span className="warn">
-                          검색식에 <b>N일신고가돌파</b>(또는 신고가+거래대금)가 없습니다 —
-                          기간을 가져올 데가 없어 검사가 오류로 끝납니다. ①에서 붙이거나
-                          '파동 꼭대기'로 되돌리세요.
-                        </span>
-                      ) : (
-                        <>
-                          검색식이 정한 <b>{newHighDays}거래일</b>을 그대로 씁니다. 검색식을
-                          고치면 여기도 같이 바뀝니다.
-                        </>
-                      )
-                    ) : (
-                      '바닥 이후 가장 높았던 고가를 끝점으로 씁니다. 검색식이 52주 신고가로 골라도 파동이 더 옛날까지 거슬러 갈 수 있습니다.'
-                    )}
+                    {newHighDays == null
+                      ? '검색식에 신고가 조건이 없어서 파동 바닥 이후 최고 고가로 잽니다. ①에서 신고가 조건을 붙이면 그 기간으로 바뀝니다.'
+                      : '①에서 고른 검색식이 정한 기간입니다. 검색식을 고치면 여기도 같이 바뀝니다.'}
+                  </p>
+
+                  {/* 매수 타점을 언제까지 기다릴지 — 모든 전략 공통(오너 결정 2026-08-22).
+                      각 매매는 기준일 계획을 그대로 쓰고, 이 기간 안에 못 사면 접는다.
+                      전에는 못 사면 주문이 파동을 따라 위로 밀려 올라가 계획보다 비싸게
+                      샀고(실측 60.4%), 한 매매가 종목을 최장 787일 붙잡았다. */}
+                  <KV label="매수를 언제까지 기다리나">
+                    <input
+                      type="number"
+                      min={1}
+                      style={{ width: 90 }}
+                      value={draft.buyWaitDays}
+                      onChange={(e) => set('buyWaitDays', e.target.value)}
+                    />
+                    <span className="unit">일</span>
+                  </KV>
+                  <p className="hint">
+                    기준일에 건 값에 이 기간 안에 안 닿으면 <b>못 삼</b>으로 넘깁니다. 각 매매는
+                    서로 별개라, 그 사이 검색식에 또 걸리면 그날 기준으로 새 매매가 열립니다.
+                  </p>
+                  {/* 한 기준일에 오른 구간(파동)은 여럿이다 (오너 2026-08-23).
+                      그중 거래가 끊겨 이미 끝난 상승을 뺄지 정하는 값. 0 이면 전부 본다. */}
+                  <KV label="거래가 한창때의">
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={5}
+                      style={{ width: 90 }}
+                      value={draft.waveCoolPct}
+                      onChange={(e) => set('waveCoolPct', e.target.value)}
+                    />
+                    <span className="unit">% 까지 줄면 끝난 상승</span>
+                  </KV>
+                  <p className="hint">
+                    한 종목이라도 <b>오른 구간은 여러 개가 겹쳐</b> 있습니다. 크게 오른 것 안에
+                    작게 오른 것이 들어 있고, 바닥이 다르면 살 자리도 달라집니다.
+                  </p>
+                  <p className="hint">
+                    20을 넣으면 <b>거래가 한창때의 20%까지 줄어든 구간</b>은 이미 끝난 상승으로
+                    보고 뺍니다. 값이 <b>클수록 조금만 줄어도 끝난 것으로 봅니다.</b>
+                    <b> 0을 넣으면 전부 봅니다.</b>
                   </p>
                 </>
               )}
@@ -254,50 +280,54 @@ export function StrategyStep(props: {
           )}
         </Card>
 
-        <Card title="분할 매수" sub="되돌림 레벨에서 가장 가까운 지지/저항선에 건다 (ADR-0014)">
+        <Card title="분할 매수" sub="되돌림 선에 가장 가까운 지지·저항 자리에 걸어 둡니다">
           <BuyStages stages={draft.buy} computed={computed} onChange={(b) => set('buy', b)} />
-          <KV label="차수 사이 최소 간격" style={{ marginTop: 8 }}>
+          <KV label="차수끼리 적어도" style={{ marginTop: 8 }}>
             <input
               className="amt"
               placeholder="10"
               value={draft.buyMinGapPct}
               onChange={(e) => set('buyMinGapPct', e.target.value)}
             />
-            <span className="unit">%</span>
+            <span className="unit">% 는 벌어지게</span>
           </KV>
           <p className="hint">
-            다음 차수는 앞 차수보다 최소 이만큼 아래여야 한다. 0 = 안 쓴다. 안 쓰면 200,000 과
-            220,000 처럼 9% 밖에 안 벌어진 두 차수가 나올 수 있다.
+            다음 차수는 앞 차수보다 이만큼 아래에 걸립니다. 0을 넣으면 안 씁니다. 안 쓰면
+            200,000원과 220,000원처럼 9%밖에 안 벌어진 두 차수가 나올 수 있습니다.
           </p>
-          <KV label="호가 오프셋" style={{ marginTop: 8 }}>
+          <KV label="걸어 둔 선에서" style={{ marginTop: 8 }}>
             <input
               className="amt"
               placeholder="0"
               value={draft.buyTickOffset}
               onChange={(e) => set('buyTickOffset', e.target.value)}
             />
-            <span className="unit">호가</span>
+            <span className="unit">호가 옮겨서</span>
           </KV>
-          <p className="hint">선택된 지지/저항선에서 몇 호가 위(+)/아래(−)에 걸지. 0 = 선 그대로.</p>
+          <p className="hint">
+            고른 지지·저항 자리에서 몇 호가 올려(+)/내려(−) 걸지 정합니다. 0이면 그 자리 그대로입니다.
+          </p>
         </Card>
 
-        <Card title="분할 매도" sub="기준점 대비 반등률">
+        <Card title="분할 매도" sub="무엇을 기준으로 몇 % 오르면 팔지 정합니다">
           <SellBasisPicker value={draft.sellBasis} onChange={(b) => set('sellBasis', b)} />
           <SellStages stages={draft.sell} computed={computed} onChange={(s) => set('sell', s)} />
-          <KV label="호가 오프셋" style={{ marginTop: 8 }}>
+          <KV label="걸어 둔 선에서" style={{ marginTop: 8 }}>
             <input
               className="amt"
               placeholder="0"
               value={draft.sellTickOffset}
               onChange={(e) => set('sellTickOffset', e.target.value)}
             />
-            <span className="unit">호가</span>
+            <span className="unit">호가 옮겨서</span>
           </KV>
-          <p className="hint">반등 목표가에서 가장 가까운 기준가 위 지지/저항선 ± 오프셋에 건다.</p>
+          <p className="hint">
+            팔 값 위쪽에서 가장 가까운 지지·저항 자리를 찾아, 거기서 몇 호가 옮겨 겁니다.
+          </p>
         </Card>
 
-        <Card title="손절" sub="평단 -% · 되돌림 선 · 지지저항 ±N호가">
-          <KV label="사용">
+        <Card title="손절" sub="평단에서 몇 % · 되돌림 선 · 지지·저항 자리 중에 고릅니다">
+          <KV label="손절을">
             <span className="radios" style={{ marginLeft: 'auto' }}>
               <label>
                 <input type="checkbox" checked={draft.stopEnabled} onChange={(e) => set('stopEnabled', e.target.checked)} />
@@ -307,7 +337,7 @@ export function StrategyStep(props: {
           </KV>
           {draft.stopEnabled && (
             <>
-              <KV label="방식">
+              <KV label="어떻게 정하나">
                 <span className="radios" style={{ marginLeft: 'auto' }}>
                   <label>
                     <input type="radio" checked={draft.stopMode === 'pct'} onChange={() => set('stopMode', 'pct')} />
@@ -330,7 +360,7 @@ export function StrategyStep(props: {
                 </KV>
               ) : draft.stopMode === 'fib' ? (
                 <>
-                  <KV label="어느 선">
+                  <KV label="어느 선까지 밀리면">
                     <select
                       style={{ flex: 1 }}
                       value={draft.stopFibRatio}
@@ -361,33 +391,33 @@ export function StrategyStep(props: {
                 </>
               ) : (
                 <>
-                  <KV label="기준선">
+                  <KV label="어디를 기준으로">
                     <select
                       style={{ flex: 1 }}
                       value={draft.stopSource}
                       onChange={(e) => set('stopSource', e.target.value as 'cycle_low' | 'custom')}
                     >
-                      <option value="cycle_low">사이클 저점 (피보 시작점)</option>
-                      <option value="custom">직접 가격</option>
+                      <option value="cycle_low">파동 바닥</option>
+                      <option value="custom">값을 직접 넣기</option>
                     </select>
                   </KV>
                   {draft.stopSource === 'custom' && (
-                    <KV label="기준 가격">
+                    <KV label="그 값은">
                       <input className="amt" value={draft.stopCustom} onChange={(e) => set('stopCustom', e.target.value)} />
                       <span className="unit">원</span>
                     </KV>
                   )}
-                  <KV label="기준선에서">
+                  <KV label="그 자리에서">
                     <input
                       className="amt"
                       placeholder="-2"
                       value={draft.stopTicks}
                       onChange={(e) => set('stopTicks', e.target.value)}
                     />
-                    <span className="unit">호가</span>
+                    <span className="unit">호가 옮겨서</span>
                   </KV>
                   <p className="hint">
-                    기준선에서 몇 호가 아래(−)/위(+)에 걸지. 예: -2 = 2호가 아래.
+                    그 자리에서 몇 호가 내려(−)/올려(+) 걸지 정합니다. -2를 넣으면 두 칸 아래입니다.
                     호가 = 그 가격대의 최소 단위(2천원대 1원, 60만원대 1,000원)라 어느
                     가격대든 "두 칸 아래"로 뜻이 같습니다.
                   </p>
@@ -395,7 +425,7 @@ export function StrategyStep(props: {
               )}
             </>
           )}
-          <p className="hint">목표가·손절선·체결 마커는 ③ 시뮬레이션 탭에서 본다.</p>
+          <p className="hint">살 값·팔 값·손절선이 차트에 어떻게 찍히는지는 ③ 시뮬레이션에서 봅니다.</p>
         </Card>
 
         {/* "다 팔고 난 뒤(다시 매수)" 카드는 삭제했다 (오너 2026-08-10) — 전 기간 검사가

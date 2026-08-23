@@ -142,6 +142,7 @@ export function StrategyPanel() {
       <BacktestStep
         active={step === 'backtest'}
         catErrNode={catErrNode}
+        condMap={condMap}
         saved={saved}
         name={name}
         setName={setName}

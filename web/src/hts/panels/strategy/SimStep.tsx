@@ -23,14 +23,14 @@ import { SIM_EXAMPLE, SIM_SYM, SimSymbolPicker, stopPayload, todayStr } from './
 // 빈 값은 예시값으로 채워서 실행이 절대 막히지 않게 한다 — 채운 값은 화면에 보인다.
 
 // ③ 차트 요소별 표시 필터 — 겹칠 때 하나씩 끄고 본다 (오너 지시 2026-08-06).
+// 매수·매도 주문가 가로선을 없앴으므로(오너 2026-08-22) 그 칸도 뺀다 — 산·판 자리는
+// '사고판 자리'가 켜고 끈다(봉 아래 매수, 봉 위 매도 표식).
 const SIM_LAYERS: readonly (readonly [keyof OverlayVisibility, string])[] = [
-  ['anchor', '앵커'],
-  ['fib', '피보나치'],
+  ['anchor', '파동'],
+  ['fib', '되돌림'],
   ['sr', '지지저항'],
-  ['buy', '매수'],
-  ['sell', '매도'],
   ['stop', '손절'],
-  ['fills', '체결'],
+  ['fills', '사고판 자리'],
 ] as const
 
 // 결과 요약 문단(SimFoot)은 삭제했다 — 오너 2026-08-09: "잡설 없애라고. 그냥 차트 보면 알게."
@@ -155,6 +155,7 @@ export function SimStep(props: {
         // 지지저항 값은 ③에서 안 만진다 — 전략 1호 고정 정의 그대로 나간다
         // (오너 2026-08-09). 돌려보는 자리는 차트 패널의 전략 값이다.
         ...START_PAYLOAD,
+        start_cool_pct: Number(draft.waveCoolPct || '0') || 0,
         ...BAND_PAYLOAD,
         ...SR_PAYLOAD,
         buy: buy.map((b) => ({
@@ -164,7 +165,6 @@ export function SimStep(props: {
           id: s.id, rebound_pct: s.reboundPct, weight: s.weight, enabled: s.enabled, price_override: s.priceOverride,
         })),
         sell_basis: draft.sellBasis,
-      fib_high_mode: draft.fibHighMode,
       conditions: draft.conditions,
         buy_tick_offset: Number.isInteger(buyOff) ? buyOff : 0,
         sell_tick_offset: Number.isInteger(sellOff) ? sellOff : 0,
@@ -242,11 +242,11 @@ export function SimStep(props: {
             {/* ③ 입력은 **파동 잡는 값 둘**뿐이다. 지지저항 값은 여기 없다
                 (오너 2026-08-09: "시뮬레이션 화면에서 지지저항 관련된 커스텀은 다 지우고").
                 설명문도 없앴다 — "잡설 부분 싹다 지우라고". */}
-            <KV label="꼭대기·바닥 판단">
+            <KV label="꼭대기·바닥은 좌우">
               <input className="amt" value={depth} onChange={(e) => setDepth(e.target.value)} />
-              <span className="unit">봉</span>
+              <span className="unit">봉을 보고</span>
             </KV>
-            <KV label="잔파동 거르는 기준">
+            <KV label="작은 흔들림은 어떻게 거르나">
               <span className="radios" style={{ marginLeft: 'auto' }}>
                 {(['자동', '고정'] as const).map((m) => (
                   <label key={m}>
@@ -256,9 +256,9 @@ export function SimStep(props: {
                 ))}
               </span>
             </KV>
-            <KV label="이만큼은 움직여야 한 파동">
+            <KV label="한 파동으로 치려면 적어도">
               <input className="amt" value={deviation} onChange={(e) => setDeviation(e.target.value)} />
-              <span className="unit">{devMode === '자동' ? '배' : '%'}</span>
+              <span className="unit">{devMode === '자동' ? '배는 움직여야' : '% 는 움직여야'}</span>
             </KV>
             <div className="form-row" style={{ marginTop: 8 }}>
               <button className="primary" style={{ flex: 1 }} disabled={simRunning} onClick={() => void runSimulation()}>
