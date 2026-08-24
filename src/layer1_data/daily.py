@@ -26,6 +26,8 @@ marcap 보정본으로 간다. 날짜별 시가총액·상장주식수도 marcap
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import pandas as pd
@@ -79,3 +81,12 @@ def daily_source(
         return NAMUH
     adj = load_adjusted(code, adjusted_dir=adjusted_dir)
     return MARCAP if adj is not None and not adj.empty else NONE
+
+
+def bar_loader(market: str = "krx") -> Callable[[str], pd.DataFrame | None]:
+    """종목코드 하나만 받는 일봉 읽개 — 러너가 종목마다 부른다.
+
+    KRX 면 `daily_bars` 를 **그대로** 돌려준다. 러너가 "기본 읽개인가"를 `is` 로 보고
+    프로세스를 나눌지 정하기 때문에, 감싸 버리면 여러 코어로 못 돈다.
+    """
+    return daily_bars if market == "krx" else partial(daily_bars, market=market)
