@@ -8,11 +8,17 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from api.candles import candle_map, change_vs_prev, load_year_screen, load_year_slim
+from api.candles import (
+    candle_map,
+    change_vs_prev,
+    load_year_screen_market,
+    load_year_slim,
+)
 from api.notes import data_notes
 from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
 from src.layer1_data.marcap_loader import available_years
 from src.layer1_data.themes import theme_map
+from src.layer1_data.unified import apply_unified, is_unified, unified_last_day
 from src.layer3_strategy import conditions as cond_registry
 
 load_dotenv(
@@ -44,6 +50,9 @@ class ScreenRunRequest(BaseModel):
     logic: Literal["and", "or"] = "and"
     conditions: list[ConditionSpec] = Field(default_factory=list)
     limit: int = Field(100, ge=1, le=200)
+    # 어느 거래소 체결로 거를지. krx = marcap 그대로, unt = 넥스트레이드까지 합친 값
+    # (거래량·거래대금만 바뀐다 — src/layer1_data/unified.py). 기본은 지금까지와 같은 KRX.
+    market: Literal["krx", "unt"] = "krx"
 
 
 @router.get("/api/conditions")
@@ -59,7 +68,12 @@ def api_conditions() -> dict:
 
 
 def _load_history_panel(
-    year: int, years: list[int], base_date: pd.Timestamp, lookback: int, codes: set[str]
+    year: int,
+    years: list[int],
+    base_date: pd.Timestamp,
+    lookback: int,
+    codes: set[str],
+    market: str = "krx",
 ) -> pd.DataFrame:
     """기준일 이하 최근 (lookback+1) 거래일의 일봉 패널(long 형).
 
@@ -78,7 +92,7 @@ def _load_history_panel(
     hist = pd.concat(frames, ignore_index=True)[_HIST_COLS]
     hist = hist[(hist["Date"] <= base_date) & hist["Code"].isin(codes)]
     keep = hist["Date"].drop_duplicates().sort_values().iloc[-(lookback + 1) :]
-    return hist[hist["Date"].isin(keep)]
+    return apply_unified(hist[hist["Date"].isin(keep)], market)
 
 
 @router.post("/api/screen/run")
@@ -102,7 +116,7 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
     if year not in years:
         raise HTTPException(status_code=503, detail=f"{year}년 데이터가 없습니다.")
 
-    df = load_year_screen(year)
+    df = load_year_screen_market(year, req.market)
     if req.date:
         df = df[df["Date"] <= pd.Timestamp(req.date)]
     else:
@@ -116,7 +130,7 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
 
     if parsed:
         lookback = cond_registry.required_lookback(parsed)
-        hist = _load_history_panel(year, years, base_date, lookback, set(base.index))
+        hist = _load_history_panel(year, years, base_date, lookback, set(base.index), req.market)
         panel = cond_registry.HistPanel(hist, base_date)
         mask = cond_registry.evaluate(parsed, panel, base, req.logic)
         hits = base.loc[mask]
@@ -133,6 +147,10 @@ def api_screen_run(req: ScreenRunRequest) -> dict:
     return {
         "date": base_date.strftime("%Y-%m-%d"),
         "total": total,
+        # 어느 체결로 걸렀는지 + 통합 값이 어디까지 채워졌는지. 화면이 그대로 띄운다 —
+        # 그 날 뒤 구간을 통합인 줄 알고 보면 거래대금이 절반으로 보인다.
+        "market": req.market,
+        "unified_until": unified_last_day() if is_unified(req.market) else None,
         "conditions": len(parsed),
         # 검색된 종목들의 당일 평균 등락률 — 검색식이 오늘 얼마나 먹혔는지 한 줄 요약
         "avg_chg": (sum(hit_chgs) / len(hit_chgs)) if hit_chgs else None,

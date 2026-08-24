@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from api.schemas import SimStage, SimStop
 from src.layer1_data import run_store
 from src.layer1_data.marcap_loader import available_years, load_years
+from src.layer1_data.unified import is_unified, unified_last_day
 from src.layer3_strategy import support_resistance
 from src.layer4_execution.backtest import resolve_period
 from src.layer4_execution.strategy_one import DEFAULT_BUY_WAIT_DAYS, run_strategy_one
@@ -71,6 +72,9 @@ class BacktestRequest(BaseModel):
     # 있게 해서, 데이터 분석을 너가 가능하도록 해"). 안 주면 이름 없이 담는다.
     label: str = ""
     screen_name: str = ""
+    # 어느 거래소 체결로 볼지 — krx(지금까지와 같음) / unt(넥스트레이드까지 합친 통합).
+    # 종목 고르기의 거래량·거래대금과 종목별 일봉 둘 다 이 기준으로 간다.
+    market: str = "krx"
     # **검사 구간 — 화면에서 고른 날짜가 그대로 온다**(ADR-0019). 코드가 안 나눈다.
     # 안 주면 2007-01-01 ~ 최신 거래일(resolve_period).
     # /api/backtest/all(전 구간)은 이 구간의 **거래일마다** 검색식을 다시 돌린다
@@ -92,6 +96,7 @@ def _strategy_kwargs(req: BacktestRequest) -> dict:
             status_code=400, detail="조건검색식이 비었습니다 — ①에서 검색식을 고르세요."
         )
     return {
+        "market": req.market,
         "zz": {
             "zz_depth": req.zz_depth,
             "zz_deviation": req.zz_deviation,
@@ -166,6 +171,10 @@ def _archive(result: dict, req: BacktestRequest) -> dict:
     검색식은 이름이 같아도 내용이 바뀔 수 있어서 이름만으로는 재현이 안 된다
     (오너 지적 2026-08-22 — 피씨엘 기준일을 다시 확인하려는데 조건이 안 남아 있었다).
     """
+    # 어느 체결로 봤는지 화면이 그대로 띄운다 — 통합인데 채워진 날짜를 모르면
+    # 그 뒤 구간을 통합인 줄 알고 본다.
+    result["market"] = req.market
+    result["unified_until"] = unified_last_day() if is_unified(req.market) else None
     try:
         result["run_id"] = run_store.save_run(
             result,

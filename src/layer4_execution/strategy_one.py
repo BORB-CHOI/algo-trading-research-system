@@ -41,7 +41,7 @@ from collections.abc import Callable
 
 import pandas as pd
 
-from src.layer1_data.daily import daily_bars
+from src.layer1_data.daily import bar_loader
 from src.layer1_data.derived import drop_halted
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy
 from src.layer3_strategy import conditions as cond_registry
@@ -415,9 +415,13 @@ def run_strategy_one(
     cost: CostModel = DEFAULT_COST,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
     hist: pd.DataFrame | None = None,
-    loader: Callable[[str], pd.DataFrame | None] = daily_bars,
+    market: str = "krx",
+    loader: Callable[[str], pd.DataFrame | None] | None = None,
 ) -> dict:
     """조건검색식 유니버스 전 종목에 전략 1호를 걸어 집계한다 (④ 백테스팅 탭의 본체).
+
+    `market="unt"` 이면 종목 고르기(거래량·거래대금)와 종목별 일봉을 넥스트레이드까지
+    합친 통합 기준으로 본다 — 2025-03-04 개장 이후 구간만 값이 달라진다.
 
     검사 구간은 start/end 로 받는다 — **화면에서 고른 날짜가 그대로 온다**(ADR-0019).
     안 주면 2007-01-01 ~ 오늘. 코드가 구간을 나누거나 막지 않는다.
@@ -432,7 +436,10 @@ def run_strategy_one(
     check_buy_wait(buy_wait_days)
 
     split_start, split_end = resolve_period(start, end)
-    universe, base_date, names = _select_universe(conditions, logic, split_start, hist, exclusions)
+    universe, base_date, names = _select_universe(
+        conditions, logic, split_start, hist, exclusions, market
+    )
+    load = loader or bar_loader(market)
 
     # 검색식이 정한 신고가 기간을 진입이 이어받는다 (ADR-0020).
     fib_high_days = cond_registry.new_high_days(cond_registry.parse_conditions(conditions))
@@ -460,7 +467,7 @@ def run_strategy_one(
     skipped: dict[str, str] = {}
     no_fill = 0
     for code in universe:
-        raw = loader(code)
+        raw = load(code)
         if raw is None or raw.empty:
             skipped[code] = "데이터 없음"
             continue

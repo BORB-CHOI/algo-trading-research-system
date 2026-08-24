@@ -16,6 +16,7 @@ from src.layer1_data.adjust import (
 )
 from src.layer1_data.daily import NAMUH, daily_bars, daily_source
 from src.layer1_data.derived import (
+    MINUTE_SPANS,
     NAMUH_BARS_DIR,
     drop_halted,
     load_adjusted,
@@ -24,6 +25,7 @@ from src.layer1_data.derived import (
 )
 from src.layer1_data.marcap_loader import available_years, load_years, symbol_master
 from src.layer1_data.recent import merge_with_marcap
+from src.layer1_data.unified import apply_unified
 
 load_dotenv(
     Path(__file__).resolve().parents[1] / ".env"
@@ -229,6 +231,26 @@ def market_daily(daily: pd.DataFrame, market: str, adjust: bool) -> pd.DataFrame
     return attach_marcap(drop_halted(raw).reset_index(drop=True), str(daily["Code"].iloc[0]))
 
 
+def effective_market(code: str, market: str, adjust: bool, period: str) -> str:
+    """이 요청이 **실제로** 어느 시장 봉을 쓰게 되는지 미리 알려 준다.
+
+    통합·NXT 를 골라도 그 종목 수집본이 없으면(넥스트레이드 미상장) 조용히 KRX 로
+    돌아간다 — 4,303종목 중 통합 수집본은 608종목뿐이다(실측 2026-08-25). 원주가
+    (adjust=False)도 마찬가지다. 화면이 "통합"이라고 켜 놓은 채 KRX 값을 보는 일이
+    없게, 응답에 실제 쓰인 시장을 같이 담는다.
+    """
+    code = code.strip().zfill(6)
+    if market == "krx":
+        return "krx"
+    if period in MINUTE_SPANS:
+        got = load_namuh_minutes(code, period, market)
+        return market if got is not None and not got.empty else "krx"
+    if not adjust:
+        return "krx"  # 나무 봉은 수정주가라 원주가 요청엔 못 쓴다
+    got = load_namuh_bars(code, "day", market)
+    return market if got is not None and not got.empty else "krx"
+
+
 def minute_candles(
     code: str, start: str | None, end: str | None, market: str, timespan: str = "min10"
 ) -> pd.DataFrame:
@@ -353,6 +375,16 @@ def load_year_screen(year: int) -> pd.DataFrame:
     if year == (available_years() or [None])[-1]:
         df = merge_with_marcap(df)
     return df
+
+
+@lru_cache(maxsize=4)
+def load_year_screen_market(year: int, market: str = "krx") -> pd.DataFrame:
+    """조건검색용 한 해 패널 — 통합(unt)이면 거래량·거래대금을 넥스트레이드까지 합친 값으로.
+
+    해마다·시장마다 한 번만 곱해 두고 재사용한다. 조건검색은 한 번 누를 때마다
+    이 표를 통째로 훑기 때문에 매번 다시 곱하면 그만큼 늦어진다.
+    """
+    return apply_unified(load_year_screen(year), market)
 
 
 @lru_cache(maxsize=1)

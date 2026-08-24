@@ -26,9 +26,10 @@ from collections.abc import Callable
 
 import pandas as pd
 
-from src.layer1_data.daily import daily_bars
+from src.layer1_data.daily import bar_loader
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
+from src.layer1_data.unified import apply_unified
 from src.layer3_strategy import conditions as cond_registry
 from src.layer4_execution.backtest import (
     MIN_RELIABLE_TRADES,
@@ -90,11 +91,16 @@ def signals_to_position(df: pd.DataFrame, signals: pd.DataFrame) -> pd.Series:
     return pd.Series(aligned.to_numpy(), index=df.index)
 
 
-def _load_selection_panel(split_start: pd.Timestamp, lookback: int) -> pd.DataFrame:
+def _load_selection_panel(
+    split_start: pd.Timestamp, lookback: int, market: str = "krx"
+) -> pd.DataFrame:
     """기본 데이터 소스: marcap 에서 선별용 일봉 패널(long 형)을 읽는다.
 
     split 시작 **이전** 데이터만, 기준일 + 룩백을 덮을 만큼 연도를 거슬러 로드한다.
     (연간 거래일 ~242일 — 룩백이 크면 전년도 하나로 모자랄 수 있다.)
+
+    `market="unt"` 이면 거래량·거래대금을 넥스트레이드까지 합친 값으로 바꾼다
+    (2025-03-04 개장 이후 날짜만 — src/layer1_data/unified.py).
     """
     years = available_years()
     if not years:
@@ -114,7 +120,7 @@ def _load_selection_panel(split_start: pd.Timestamp, lookback: int) -> pd.DataFr
             break
     if not frames:
         raise ValueError(f"{split_start.date()} 이전 거래일 데이터가 없습니다.")
-    return pd.concat(frames, ignore_index=True)
+    return apply_unified(pd.concat(frames, ignore_index=True), market)
 
 
 def _select_universe(
@@ -123,6 +129,7 @@ def _select_universe(
     split_start: pd.Timestamp,
     hist: pd.DataFrame | None,
     exclusions: ExclusionPolicy | None,
+    market: str = "krx",
 ) -> tuple[list[str], pd.Timestamp]:
     """조건검색식으로 **검사할 종목**을 뽑는다. 기준일 = split 시작 직전 거래일 (1회).
 
@@ -133,9 +140,10 @@ def _select_universe(
     lookback = cond_registry.required_lookback(parsed)
 
     if hist is None:
-        hist = _load_selection_panel(split_start, lookback)
+        hist = _load_selection_panel(split_start, lookback, market)
     else:
-        hist = hist[hist["Date"] < split_start]  # look-ahead 금지: split 안쪽 데이터로 선별 ❌
+        # look-ahead 금지: split 안쪽 데이터로 선별 ❌
+        hist = apply_unified(hist[hist["Date"] < split_start], market)
     if hist.empty:
         raise ValueError(f"{split_start.date()} 이전 거래일 데이터가 없습니다.")
 
@@ -214,7 +222,8 @@ def run_universe(
     order_notional: float | None = None,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
     hist: pd.DataFrame | None = None,
-    loader: Callable[[str], pd.DataFrame | None] = daily_bars,
+    market: str = "krx",
+    loader: Callable[[str], pd.DataFrame | None] | None = None,
 ) -> dict:
     """조건검색식으로 유니버스를 뽑아 종목별 백테스트를 돌리고 집계한다.
 
@@ -228,6 +237,9 @@ def run_universe(
       안 주면 2007-01-01 ~ 오늘. 코드가 구간을 나누거나 막지 않는다.
     - cost: ADR-0004 왕복 정액률. slippage + order_notional: 제곱근 충격 슬리피지(옵션).
     - exclusions: ADR-0003 유니버스 제외. Name/Market 컬럼이 없는 합성 데이터는 None.
+    - market: 어느 거래소 체결로 볼지. "krx" = 지금까지와 같음, "unt" = 넥스트레이드까지
+      합친 통합(2025-03-04 개장 이후 구간만 값이 바뀐다). 선별 패널의 거래량·거래대금과
+      종목별 일봉 둘 다 통합으로 간다.
     - hist/loader: 데이터 주입점(테스트용). 기본은 marcap(선별)과
       layer1.daily.daily_bars(상장 종목=나무 수집본 · 상폐=marcap 보정본).
 
@@ -249,13 +261,16 @@ def run_universe(
         raise ValueError("strategy.params 는 dict 여야 합니다.")
 
     split_start, split_end = resolve_period(start, end)
-    universe, base_date, _ = _select_universe(conditions, logic, split_start, hist, exclusions)
+    universe, base_date, _ = _select_universe(
+        conditions, logic, split_start, hist, exclusions, market
+    )
+    load = loader or bar_loader(market)
 
     per_symbol: dict[str, dict] = {}
     skipped: dict[str, str] = {}
     all_trades: list[Trade] = []
     for code in universe:
-        raw = loader(code)
+        raw = load(code)
         if raw is None or raw.empty:
             skipped[code] = "데이터 없음"
             continue

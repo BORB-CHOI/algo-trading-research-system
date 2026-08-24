@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from api.candles import (
     candle_map,
     change_vs_prev,
+    effective_market,
     get_candles,
     latest_marcap,
     load_year_screen,
@@ -132,6 +133,7 @@ def api_candles(
     ),
     market: str = Query("krx", pattern="^(krx|unt|nxt)$", description="시장 (KRX/통합/NXT)"),
 ) -> dict:
+    used_market = effective_market(code, market, adjust, period)
     if period in MINUTE_SPANS:
         df = minute_candles(code, start, end, market, period)
     else:
@@ -176,7 +178,10 @@ def api_candles(
         "candles": candles,
         # 이 봉이 어디서 왔나 — 화면이 그대로 띄운다. 두 소스를 같이 쓰기 때문에
         # "지금 보고 있는 게 어느 쪽 값인지"가 보여야 한다 (오너 2026-08-16).
-        "source": daily_source(code),
+        "source": daily_source(code, market=used_market),
+        # 실제로 쓴 시장. 고른 것과 다르면 그 종목 수집본이 없어 KRX 로 돌아간 것이다 —
+        # 화면이 "통합 없어 KRX" 로 알린다 (오너 2026-08-25).
+        "market": used_market,
     }
 
 

@@ -48,10 +48,11 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.layer1_data.daily import daily_bars
+from src.layer1_data.daily import bar_loader, daily_bars
 from src.layer1_data.derived import drop_halted
 from src.layer1_data.exclusions import DEFAULT_POLICY, ExclusionPolicy, apply_exclusions
 from src.layer1_data.marcap_loader import available_years, load_years
+from src.layer1_data.unified import apply_unified
 from src.layer3_strategy import conditions as cond_registry
 from src.layer3_strategy.market_structure import wave_series
 from src.layer3_strategy.zigzag import WaveLow, find_turns, zigzag_params_from
@@ -105,8 +106,8 @@ def _rounds_job(args: tuple) -> tuple[str, list[dict], list[Trade | None], str]:
     데이터는 **워커 안에서 직접 읽는다**. 메인이 읽어 넘기면 종목마다 표를 통째로
     직렬화해 보내야 해서, 계산을 나눠 번 이득을 전송 비용이 도로 까먹는다.
     """
-    code, days, p, cost, end_ts = args
-    raw = daily_bars(code)
+    code, days, p, cost, end_ts, market = args
+    raw = daily_bars(code, market=market)
     if raw is None or raw.empty:
         return code, [], [], "데이터 없음"
     df = drop_halted(raw).sort_values("Date").reset_index(drop=True)
@@ -128,6 +129,7 @@ def screen_by_day(
     end: pd.Timestamp,
     hist: pd.DataFrame | None = None,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
+    market: str = "krx",
     progress: ProgressFn | None = None,
     names_out: dict[str, str] | None = None,
 ) -> dict[pd.Timestamp, list[str]]:
@@ -144,7 +146,7 @@ def screen_by_day(
     if hist is None:
         y0, y1 = _panel_years(start, end, lookback)
         hist = load_years(y0, y1)
-    hist = hist.loc[hist["Date"] <= end]
+    hist = apply_unified(hist.loc[hist["Date"] <= end], market)
     if hist.empty:
         raise ValueError(f"{end.date()} 까지의 일봉이 없습니다.")
 
@@ -357,7 +359,8 @@ def run_walk_forward(
     cost: CostModel = DEFAULT_COST,
     exclusions: ExclusionPolicy | None = DEFAULT_POLICY,
     hist: pd.DataFrame | None = None,
-    loader: Callable[[str], pd.DataFrame | None] = daily_bars,
+    market: str = "krx",
+    loader: Callable[[str], pd.DataFrame | None] | None = None,
     progress: ProgressFn | None = None,
 ) -> dict:
     """전 기간·전 종목 백테스트. 반환은 `strategy_one` 과 같은 모양 + 매일 고른 흔적.
@@ -390,6 +393,7 @@ def run_walk_forward(
         end=end_ts,
         hist=hist,
         exclusions=exclusions,
+        market=market,
         progress=progress,
         names_out=names,
     )
@@ -443,10 +447,11 @@ def run_walk_forward(
 
     # 종목끼리는 서로 볼 일이 없어서 그대로 나눠 돌릴 수 있다. pandas 계산은 한 번에
     # 코어 하나만 쓰므로(GIL), 스레드가 아니라 **프로세스**로 나눠야 실제로 빨라진다.
-    # 기본 loader 가 아니면(테스트용 주입) 프로세스에 못 넘기니 예전처럼 한 줄로 돈다.
-    n_workers = worker_count(len(jobs)) if loader is daily_bars else 1
+    # 읽개를 따로 주면(테스트용 주입) 프로세스에 못 넘기니 예전처럼 한 줄로 돈다.
+    n_workers = worker_count(len(jobs)) if loader is None else 1
+    load = loader or bar_loader(market)
     if n_workers > 1:
-        payload = [(code, days, p, cost, end_ts) for code, days in jobs]
+        payload = [(code, days, p, cost, end_ts, market) for code, days in jobs]
         with ProcessPoolExecutor(max_workers=n_workers) as pool:
             for n, (code, rows, got_trades, reason) in enumerate(
                 pool.map(_rounds_job, payload, chunksize=8), 1
@@ -454,7 +459,7 @@ def run_walk_forward(
                 absorb(n, code, rows, got_trades, reason)
     else:
         for n, (code, days) in enumerate(jobs, 1):
-            raw = loader(code)
+            raw = load(code)
             if raw is None or raw.empty:
                 skipped[code] = "데이터 없음"
                 continue
