@@ -6,6 +6,7 @@ import {
   type FinanceCoverage,
   type ConditionDef,
   type ScreenResponse,
+  type TradeMarket,
 } from '../../../api'
 import { currentSymbol, onSymbolPick, pickSymbol, type SymbolPick } from '../../bus'
 import { chgClass, fmtChg, fmtEok, fmtPrice } from '../../format'
@@ -13,7 +14,7 @@ import { MiniCandles } from '../../MiniCandles'
 import { Card, Chip, Chips, KV, MsgLine } from '../../components/ui'
 import { deleteScreen, saveScreen, type Screens } from '../screenStore'
 import { parseParams, type SavedCondition } from '../strategyStore'
-import { ParamInputs, rowLabel, summarizeCond, todayStr } from './common'
+import { MarketNote, MarketPick, ParamInputs, rowLabel, summarizeCond, todayStr } from './common'
 
 // ① 종목선정 — 조건검색식을 여러 개 만들고 고친다 (저장소: hts-screens).
 // StrategyPanel.tsx 분할(구조 리팩토링 2026-08-06)로 옮겨온 스텝. 검색식 목록(screens)은
@@ -131,6 +132,8 @@ export function ScreenStep(props: {
   }
 
   const [date, setDate] = useState(todayStr) // 기준일 기본 = 오늘 (오너 지시 2026-08-06)
+  // 어느 거래소 체결로 거를지. 기본은 KRX — 지금까지와 결과가 같아야 한다(오너 2026-08-25).
+  const [market, setMarket] = useState<TradeMarket>('krx')
   const [result, setResult] = useState<ScreenResponse | null>(null)
   const [runMsg, setRunMsg] = useState('')
   const [running, setRunning] = useState(false)
@@ -141,7 +144,13 @@ export function ScreenStep(props: {
     setRunning(true)
     setRunMsg('조회 중…')
     try {
-      const r = await runScreen({ date: date || undefined, logic: useLogic, conditions: useConds, limit: LIMIT })
+      const r = await runScreen({
+        date: date || undefined,
+        logic: useLogic,
+        conditions: useConds,
+        limit: LIMIT,
+        market,
+      })
       if (req !== runReq.current) return
       setResult(r)
       setRunMsg('')
@@ -338,10 +347,12 @@ export function ScreenStep(props: {
                   onChange={(e) => setDate(e.target.value)}
                   title="기준일 (기본 = 오늘, 휴장일이면 직전 거래일 기준)"
                 />
+                <MarketPick style={{ flex: 'none', width: 196 }} value={market} onChange={setMarket} />
                 <button className="primary" disabled={running} onClick={() => void run(conds, logic)}>
                   {running ? '조회 중…' : '검색'}
                 </button>
               </div>
+              <MarketNote market={market} until={result?.unified_until} />
               <MsgLine text={screenMsg} />
             </Card>
 

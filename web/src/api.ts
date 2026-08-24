@@ -100,9 +100,15 @@ export async function searchSymbols(
   }
 }
 
+/** 어느 거래소 체결로 볼지. krx = KRX 체결만(marcap 그대로),
+ *  unt = 넥스트레이드(NXT)까지 합친 통합. 거래량·거래대금만 달라진다. */
+export type TradeMarket = 'krx' | 'unt'
+
 export type ScreenResponse = {
   date: string // 실제 기준 거래일 (휴장일이면 직전 거래일)
   total: number
+  market?: TradeMarket // 실제로 어느 체결로 걸렀나
+  unified_until?: string | null // 통합 값이 채워진 마지막 날짜 (그 뒤는 KRX 값만)
   conditions?: number // 적용된 조건 수 (0 = 전체 종목)
   avg_chg?: number | null // 검색된 종목의 당일 평균 등락률(%)
   themes_ready?: boolean // false = 테마 맵 백그라운드 수집 중
@@ -195,6 +201,7 @@ export type ScreenRunRequest = {
   logic: 'and' | 'or'
   conditions: ScreenCondition[]
   limit: number
+  market?: TradeMarket // 생략 = krx (지금까지와 같은 결과)
 }
 
 // 응답은 기존 ScreenResponse 와 동일 형태({date,total,items}).
@@ -476,6 +483,8 @@ export async function postSimulate(req: SimulateRequest): Promise<SimulateRespon
 export type BacktestRequest = StartParams & {
   conditions: ScreenCondition[]
   logic: 'and' | 'or'
+  /** 어느 거래소 체결로 볼지 — 종목 고르기와 종목별 일봉 둘 다 이 기준으로 간다. */
+  market?: TradeMarket
   zz_depth: number
   zz_deviation: number
   zz_deviation_mode?: DeviationMode
@@ -560,6 +569,8 @@ export type BacktestResponse = {
   no_fill: number // 매수 미체결(거래 아님 — 통계 제외)
   no_fill_rows: BacktestRow[] // 그 종목들 — 왜 안 걸렸는지 지정가를 볼 수 있다
   run_id: number | null // 보관함 번호. null 이면 저장 실패(warnings 참조)
+  market?: TradeMarket // 어느 체결로 봤나
+  unified_until?: string | null // 통합 값이 채워진 마지막 날짜
   warnings?: string[]
   skipped: Record<string, string>
   metrics: {

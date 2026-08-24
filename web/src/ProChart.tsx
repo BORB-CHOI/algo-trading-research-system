@@ -723,7 +723,7 @@ async function fetchCandles(
   market: BarMarket = 'unt',
   /** 이 날짜까지만. 왼쪽으로 밀어 **더 옛날 봉을 이어 받을 때** 쓴다(그 앞 구간만 받는다). */
   end?: string,
-): Promise<{ bars: KLineData[]; source: string }> {
+): Promise<{ bars: KLineData[]; source: string; used: BarMarket }> {
   // `end` 가 있으면 그 시점을 기준으로 거슬러 센다 — 지금부터 세면 엉뚱한 구간을 받는다.
   const auto = startFor(period, bars, end ? Date.parse(`${end}T00:00:00`) : undefined)
   // 전체(bars===0)면 이미 다 받으므로 minStart 는 볼 필요 없다.
@@ -732,9 +732,11 @@ async function fetchCandles(
     `code=${encodeURIComponent(code)}&period=${period}&start=${start}&market=${market}` +
     (end ? `&end=${end}` : '')
   const res = await fetch(`/api/candles?${q}`)
-  if (!res.ok) return { bars: [], source: 'none' } // 404 등 — 화면은 "데이터 없음"으로 남는다
-  const { candles, source } = (await res.json()) as {
+  // 404 등 — 화면은 "데이터 없음"으로 남는다
+  if (!res.ok) return { bars: [], source: 'none', used: market }
+  const { candles, source, market: used } = (await res.json()) as {
     source: string
+    market?: BarMarket
     candles: {
       time: string
       open: number
@@ -757,7 +759,7 @@ async function fetchCandles(
     turnover: c.amount,
     marcap: c.marcap,
   }))
-  return { bars: rows, source: source ?? 'none' }
+  return { bars: rows, source: source ?? 'none', used: used ?? market }
 }
 
 // 이동평균 기간과 색 — 증권사 앱(나무) 범례와 같게 맞춘다 (오너 2026-08-22).
@@ -998,6 +1000,9 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
   // 이 봉이 어디서 왔나 — 상장 종목은 나무 수집본, 상장폐지·미수집은 marcap 보정본.
   // 두 소스를 같이 쓰므로 화면이 그걸 말해 줘야 한다 (오너 2026-08-16).
   const [source, setSource] = useState('none')
+  /** 서버가 **실제로** 쓴 시장. 고른 것과 다르면 그 종목이 넥스트레이드에 없어 KRX 로
+   *  돌아간 것이다 — 통합이라고 켜 둔 채 KRX 값을 보는 일이 없게 딱지로 알린다. */
+  const [usedMarket, setUsedMarket] = useState<BarMarket>('unt')
   const [period, setPeriodState] = useState<BarPeriod>('day')
   const [market, setMarketState] = useState<BarMarket>('unt')
   const [bars, setBarsState] = useState<BarCount>(props.initialBars ?? 500)
@@ -1038,7 +1043,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     setBusy(true)
     try {
       const want = barsRef.current
-      const { bars: data, source } = await fetchCandles(
+      const { bars: data, source, used } = await fetchCandles(
         symbolRef.current.code,
         periodRef.current,
         want,
@@ -1047,6 +1052,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       )
       if (seq !== loadSeq.current) return // 그 사이 종목·주기가 또 바뀌었다 — 이 응답은 버린다
       setSource(source)
+      setUsedMarket(used)
       lastBaseRef.current = null // 데이터가 통째로 바뀌었다 — 오른쪽 끝을 다시 알린다
       lastSentRef.current = null
       // `more=true` — 왼쪽 끝에 닿으면 엔진이 더 달라고 부른다(setLoadDataCallback).
@@ -1487,6 +1493,14 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
                 }
               >
                 {source === 'namuh' ? '나무' : 'marcap'}
+              </span>
+            )}
+            {usedMarket !== market && (
+              <span
+                className="src fallback"
+                title={`이 종목은 ${MARKET_LABEL[market]} 체결 수집본이 없습니다 — KRX 체결만 보고 있습니다. 넥스트레이드에 올라간 종목만 통합으로 볼 수 있습니다.`}
+              >
+                통합 없어 KRX
               </span>
             )}
           </b>

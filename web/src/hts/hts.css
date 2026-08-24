@@ -1736,6 +1736,8 @@ table.grid.tight td {
 }
 .pro-bar .sym .src.namuh  { background: var(--hts-accent-soft); color: var(--hts-accent-down); }
 .pro-bar .sym .src.marcap { background: #fef3c7; color: #92400e; }
+/* 통합을 골랐는데 그 종목 수집본이 없어 KRX 로 돌아갔을 때 — 눈에 띄어야 한다 */
+.pro-bar .sym .src.fallback { background: #fee2e2; color: #991b1b; }
 
 /* 갱신 게이지 — 파일 16,576개를 훑느라 약 30초. 돌고는 있는지 보여야 한다. */
 .fresh-gauge { margin-top: 8px; }

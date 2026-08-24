@@ -2,7 +2,14 @@
 // StrategyPanel.tsx 분할(구조 리팩토링 2026-08-06) 때 원본에서 그대로 옮겼다. 값·마크업 불변.
 
 import { useState } from 'react'
-import type { ConditionDef, ConditionParamDef, SimulateRequest, Symbol } from '../../../api'
+import type { CSSProperties } from 'react'
+import type {
+  ConditionDef,
+  ConditionParamDef,
+  SimulateRequest,
+  Symbol,
+  TradeMarket,
+} from '../../../api'
 import { SymbolResults } from '../../components/SymbolResults'
 import { Chip, Chips, KV } from '../../components/ui'
 import { useListCursor, useLiveSearch } from '../../components/useLiveSearch'
@@ -205,5 +212,50 @@ export function ParamInputs(props: {
         </KV>
       ))}
     </>
+  )
+}
+
+// ── 어느 거래소 체결로 볼지 (①·④ 공용) ──────────────────────────
+// 2025-03-04 넥스트레이드가 열린 뒤로 한 종목 체결이 두 거래소에 나뉜다. marcap 은 KRX
+// 체결만 담아서, 합쳐 보지 않으면 거래대금이 실제의 절반쯤으로 잘린다(삼성전자 2026-08-21
+// 실측: 통합 18조 6480억 · KRX 7조 7032억). 고른 값은 요청에 담겨 서버로 간다.
+
+/** 고르개 글귀 — 한 줄로 읽히게 "…보고 [검색]" 으로 끝난다. */
+export const MARKET_PICK_LABEL: Record<TradeMarket, string> = {
+  krx: 'KRX 체결만 보고',
+  unt: '넥스트레이드까지 합쳐 보고',
+}
+
+export function MarketPick(props: {
+  value: TradeMarket
+  onChange: (m: TradeMarket) => void
+  style?: CSSProperties
+}) {
+  return (
+    <select
+      style={props.style}
+      value={props.value}
+      onChange={(e) => props.onChange(e.target.value as TradeMarket)}
+      title="넥스트레이드(NXT) 체결까지 합쳐서 거래량·거래대금을 볼지 고릅니다. 가격은 그대로입니다."
+    >
+      {(Object.keys(MARKET_PICK_LABEL) as TradeMarket[]).map((m) => (
+        <option key={m} value={m}>
+          {MARKET_PICK_LABEL[m]}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+/** 통합을 골랐을 때 같이 띄우는 안내. 어디까지 채워졌는지 모르면 절반짜리 값을 보게 된다. */
+export function MarketNote(props: { market: TradeMarket; until?: string | null }) {
+  if (props.market !== 'unt') return null
+  return (
+    <p className="hint">
+      넥스트레이드 체결은 <b>2025년 3월 4일</b>부터 있습니다.
+      {props.until ? <> 지금은 <b>{props.until}</b>까지 채워져 있고, 그 뒤 날짜는 KRX 체결만 보입니다.</> : null}{' '}
+      넥스트레이드에 올라가지 않은 종목도 KRX 값 그대로입니다. 바뀌는 건 거래량·거래대금뿐이고
+      시가·고가·저가·종가·시가총액은 KRX 값입니다.
+    </p>
   )
 }

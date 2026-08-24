@@ -9,6 +9,7 @@ import {
   postBacktestAll,
   postSimulate,
   type BacktestRequest,
+  type TradeMarket,
   type BacktestResponse,
   type BacktestRow,
   type SavedRun,
@@ -20,7 +21,7 @@ import { Modal } from '../../components/Modal'
 import { Card, KV, MsgLine } from '../../components/ui'
 import { BAND_PAYLOAD, SR_PAYLOAD, START_PAYLOAD, ZZ_PAYLOAD } from '../strategyOne'
 import { newBuyStage, toDraft, type Strategies, type StrategyDraft } from '../strategyStore'
-import { SIM_EXAMPLE, stopPayload, todayStr } from './common'
+import { MarketNote, MarketPick, SIM_EXAMPLE, stopPayload, todayStr } from './common'
 import { BacktestScore } from './BacktestScore'
 import { BacktestTable } from './BacktestTable'
 import { StrategySummary } from './StrategySummary'
@@ -298,6 +299,9 @@ export function BacktestStep(props: {
   // 검사 구간 — 언제부터 언제까지, 그리고 지금 어디까지 왔나
   const [allStart, setAllStart] = useState(ALL_START_DEFAULT)
   const [allEnd, setAllEnd] = useState(todayStr)
+  // 어느 거래소 체결로 볼지 — 종목 고르기와 종목별 일봉 둘 다 이 기준으로 간다.
+  // 기본은 KRX 라 예전 결과와 그대로 맞는다(오너 2026-08-25).
+  const [market, setMarket] = useState<TradeMarket>('krx')
   const [jobId, setJobId] = useState<string | null>(null)
   const [progress, setProgress] = useState<{ phase: string; done: number; total: number } | null>(null)
 
@@ -326,6 +330,7 @@ export function BacktestStep(props: {
       req: {
         conditions: draft.conditions,
         logic: draft.logic,
+        market,
         ...START_PAYLOAD,
         start_cool_pct: Number(draft.waveCoolPct || '0') || 0,
         ...ZZ_PAYLOAD,
@@ -459,6 +464,10 @@ export function BacktestStep(props: {
           <span className="unit">~</span>
           <input type="date" value={allEnd} onChange={(e) => setAllEnd(e.target.value)} />
         </KV>
+        <KV label="어느 체결로 보나">
+          <MarketPick style={{ flex: 1 }} value={market} onChange={setMarket} />
+        </KV>
+        <MarketNote market={market} until={btResult?.unified_until} />
         <p className="hint">
           거래일마다 검색식을 다시 돌려, 그날 걸린 종목을 그날 기준으로 사고팝니다.
           매매는 서로 별개라 앞 매매가 진행 중이어도 새로 엽니다. 한 기준일에 오른 구간이
