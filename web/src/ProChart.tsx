@@ -4,10 +4,13 @@ import {
   dispose as disposeKLineChart,
   init,
   LoadDataType,
+  IndicatorSeries,
   registerIndicator,
   registerOverlay,
   type Chart,
+  type IndicatorFigureStylesCallback,
   type KLineData,
+  type PaneOptions,
 } from 'klinecharts'
 import { mergeLive, shouldApply, todayStart, type LiveBarResponse } from './liveBar'
 import { registerKoreanLocale } from './locales'
@@ -61,10 +64,29 @@ function ensureIndicators(): void {
   indicatorsRegistered = true
 
   // 거래대금(turnover) 보조지표 — 내장엔 없어 전역 등록하면 Pro 지표 메뉴에도 뜬다.
+  //
+  // 내장 '거래량'(VOL)과 **같은 설정**을 준다. 안 주면 두 가지가 어긋난다(실측 2026-08-25):
+  //   · `minValue: 0` 이 없으면 세로축이 화면에 보이는 막대들의 **최솟값부터** 시작한다.
+  //     그래서 500억~800억만 보이는 구간에서는 막대가 전부 천장까지 차 올라 다 커 보인다.
+  //   · 막대 바닥(`baseValue`)을 안 주면 0 이 아니라 **축 아래끝**에서부터 그린다.
+  //     축 아래끝은 klinecharts 가 아래 여백(기본 10%)만큼 0 아래로 내려놓기 때문에
+  //     눈금에 마이너스가 찍힌다. 여백은 아래 SUB_PANE_GAP 으로 0 을 바닥에 붙인다.
+  const turnoverBarColor: IndicatorFigureStylesCallback<{ turnover: number }> = (data) => {
+    const k = data.current.kLineData
+    if (k && k.close > k.open) return { color: RED }
+    if (k && k.close < k.open) return { color: BLUE }
+    return { color: '#9aa4ad' }
+  }
   registerIndicator<{ turnover: number }>({
     name: 'TURNOVER',
     shortName: '거래대금',
-    figures: [{ key: 'turnover', title: '거래대금: ', type: 'bar' }],
+    series: IndicatorSeries.Volume, // 축 숫자를 거래량처럼 큰 수로 줄여 쓴다
+    precision: 0,
+    shouldFormatBigNumber: true,
+    minValue: 0, // 축은 언제나 0 부터 — 막대 크기를 눈으로 견줄 수 있게
+    figures: [
+      { key: 'turnover', title: '거래대금: ', type: 'bar', baseValue: 0, styles: turnoverBarColor },
+    ],
     calc: (dataList) => dataList.map((d) => ({ turnover: (d.turnover as number | undefined) ?? 0 })),
   })
 
@@ -812,6 +834,16 @@ export const SUB_INDICATORS: readonly (readonly [string, string])[] = [
   ['RSI', 'RSI'],
 ] as const
 
+/** 아래 창 하나를 만들 때 줄 설정. 막대 지표(거래량·거래대금)는 **0 을 창 바닥에 붙인다** —
+ *  klinecharts 는 기본으로 위 20% · 아래 10% 를 여백으로 두는데, 그러면 0 이 바닥보다 위로
+ *  떠서 막대가 전부 들려 보이고 눈금엔 마이너스가 찍힌다(실측 2026-08-25). MACD 처럼 0 아래로
+ *  내려가는 지표는 여백을 그대로 둔다. */
+function subPaneOptions(name: string): PaneOptions {
+  const id = `pane_${name}`
+  if (name === 'VOL' || name === 'TURNOVER') return { id, gap: { top: 0.1, bottom: 0 } }
+  return { id }
+}
+
 // 전략 적용 payload — bus.StrategyPick 과 같은 형태(구조적 타이핑).
 // ProChart 는 hts 셸에 의존하지 않도록 자체 선언한다. 파라미터 값은 항상 여기 담겨
 // 서버 요청으로만 나간다(ADR-0009 — 프런트·서버 어디에도 전략 숫자 하드코딩 없음).
@@ -1218,7 +1250,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
     )
     chart.createIndicator(signalsRef.current!.indicatorName, true, { id: 'candle_pane' })
     chart.createIndicator(overlayRef.current!.indicatorName, true, { id: 'candle_pane' })
-    chart.createIndicator('VOL', false, { id: 'pane_VOL' })
+    chart.createIndicator('VOL', false, subPaneOptions('VOL'))
     const pickCandle = (clicked?: CandleClick) => {
       const list = chart.getDataList()
       const index = clicked?.dataIndex
@@ -1434,7 +1466,7 @@ export const ProChart = forwardRef<ProChartHandle, ProChartProps>(function ProCh
       chart.removeIndicator(paneId)
       setSubs((s) => s.filter((x) => x !== name))
     } else {
-      chart.createIndicator(name, false, { id: paneId })
+      chart.createIndicator(name, false, subPaneOptions(name))
       setSubs((s) => [...s, name])
     }
   }
