@@ -26,6 +26,7 @@ KIS 는 엔드포인트가 200 개가 넘는데, 인증 헤더와 실패 판정 
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -72,10 +73,30 @@ class KisApiError(RuntimeError):
     """KIS 호출 실패. HTTP 실패와 `rt_cd != "0"` 을 모두 여기로 모은다."""
 
 
-def _requests_transport(url: str, headers: dict, params: dict) -> RawResponse:
+_SESSIONS = threading.local()
+
+
+def _session():
+    """줄기마다 연결을 하나 열어 두고 계속 쓴다 — 호출마다 새로 맺지 않는다.
+
+    `requests.get()` 을 맨몸으로 부르면 호출 하나에 TCP 연결과 TLS 악수를 새로 한다.
+    실측 2026-08-28 (KIS 차트 40콜 × 2회): 새로 맺으면 콜당 140.6ms·150.4ms,
+    연결을 이어 쓰면 76.6ms·78.9ms — **약 1.85배**. 주·월봉 갱신처럼 만 번을 부르는
+    쪽에서 이 차이가 곧 수십 분이다.
+
+    `requests.Session` 은 스레드 안전이 아니라 줄기마다 따로 둔다(KisClient 와 같은 규칙).
+    """
     import requests  # 지연 import — 파싱 테스트는 네트워크 의존 없이 돈다.
 
-    response = requests.get(url, headers=headers, params=params, timeout=10)
+    sess = getattr(_SESSIONS, "value", None)
+    if sess is None:
+        sess = requests.Session()
+        _SESSIONS.value = sess
+    return sess
+
+
+def _requests_transport(url: str, headers: dict, params: dict) -> RawResponse:
+    response = _session().get(url, headers=headers, params=params, timeout=10)
     try:
         body = response.json()
     except ValueError:
