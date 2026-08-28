@@ -748,6 +748,11 @@ def update_period_bars_from_daily(
                     if seen[1]:
                         acc["mismatch_units"] += 1
                         acc["mismatch_bars"] += int(seen[1])
+                    # **이것도 "이번 회차에 끝난 것"으로 표시한다.** 안 그러면 뒤따르는
+                    # ①-1b 가 "아직 안 채워졌다"고 보고 나무에 다시 물었다 — 실측
+                    # 2026-08-29: 5,513콜·1,807초(30분)를 통째로 헛돌았다. 지문이 같다는
+                    # 건 일봉도 주·월봉도 그대로라는 뜻이라, 받아 봐야 같은 값이다.
+                    local.append((market, code, folder))
                     continue
                 try:
                     if day is None:
