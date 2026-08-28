@@ -185,6 +185,6 @@
   - 재무로 업종 분류 ❌ — 숫자로는 업종을 판별 못 하고 분류는 이미 주어져 있다. 재무는 종목 품질 필터로만
 - VIX ≠ 공포지수 — 표시 이름 정정. 한국형 공포·탐욕 지수 자체 계산은 BORB-59 (오너 지적 2026-08-05)
 - 재무=OpenDART·패턴=TA-Lib 조사 완료 (BORB-41) — 패턴은 반영 완료, 재무는 OpenDART 백필 대기
-  - 백필 스크립트(scripts/backfill_dart.py)·스키마 안(DATA_SCHEMA §4) 준비 완료. DART_API_KEY 발급 후 실행하면 실측으로 정정
+  - 백필 스크립트(scripts/backfill_dart.py)·스키마 안(`docs/foundation/DATA_SCHEMA.md` §4) 준비 완료. DART_API_KEY 발급 후 실행하면 실측으로 정정
   - 미결: 정정공시(기재정정) 최초본/최종본 중 무엇을 쓸지 — as-of 정책 결정 필요
 - 전략·조건은 데이터로 정의, 숨은 하드코딩 금지 (ADR-0009, 오너 지시)

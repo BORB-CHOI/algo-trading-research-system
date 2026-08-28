@@ -1,8 +1,8 @@
 # Architecture Decision Records (ADR)
 
 되돌리기 어렵거나 방법론에 영향을 주는 결정을 한 건씩 기록한다.
-"왜 이렇게 정했는가"를 나중에 추적하기 위한 것. `docs/PROJECT_GUIDELINES.md`(방법론)와
-`docs/CHANGELOG.md`(지침서 버전 이력)와는 별개 — ADR은 **구현 결정**을 다룬다.
+"왜 이렇게 정했는가"를 나중에 추적하기 위한 것. `docs/foundation/PROJECT_GUIDELINES.md`(방법론)와
+`docs/project/CHANGELOG.md`(지침서 버전 이력)와는 별개 — ADR은 **구현 결정**을 다룬다.
 
 ## 작성 규칙
 
@@ -31,6 +31,8 @@
 | [0014](0014-support-resistance-targets.md) | 목표가 = 지지/저항 존 (라운드 피겨·VWAP 폐기) | 수락 (개정 2 적용) |
 | [0015](0015-strategy-one-backtest-v1.md) | ④ 백테스팅 — 전략 1호 전수 검사 v1 | 수락 |
 | [0016](0016-industry-momentum.md) | 업종/산업 모멘텀 | 제안 |
-| [0017](0017-daily-wave-replan.md) | 백테스트 라운드 중 파동 매일 갱신 (주문 정정) | 수락 |
+| [0017](0017-daily-wave-replan.md) | 백테스트 라운드 중 파동 매일 갱신 (주문 정정) | 폐기 (2026-08-22) |
 | [0018](0018-namuh-plug-broker.md) | 주문 창구 = 나무증권(PLUG), KIS 는 데이터용 병행 | 수락 (모의 왕복 검증 1건 조건부) |
 | [0019](0019-ats-identity-v4.md) | ATS 정체성 v4.0 — 확인하는 시스템 + 전략 9단 계층 | 수락 (2026-08-16) |
+| [0020](0020-stage-values-flow-through.md) | 단계 사이로 값이 흐르게 한다 (검색식 → 진입) | 제안 |
+| [0021](0021-period-bars-from-daily.md) | 주·월봉은 일봉으로 만들고 매일 전수 대조 | 제안 |

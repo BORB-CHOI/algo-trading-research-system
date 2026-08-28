@@ -1,11 +1,12 @@
 # 알고리즘 매매·연구 시스템 (ATS) — 프로젝트 지침서 v4.0
 
 > **이 문서는 확정된 원칙만 담는다.**
-> 아직 확인 안 된 주장(고수 발언·직관·학술 통설)은 `hypotheses/` 에 있다.
-> 새 결정이 나오면 이 문서가 먼저 갱신된다. 되돌리기 어려운 결정은 `adr/` 에 따로 쓴다.
+> 아직 확인 안 된 주장(고수 발언·직관·학술 통설)은 `../research/hypotheses/`에 있다.
+> 새 결정이 나오면 이 문서가 먼저 갱신된다. 되돌리기 어려운 결정은 `../adr/`에 따로 쓴다.
 >
-> 옛 지침서 v3.8: `archive/PROJECT_GUIDELINES-v3.8.md` (역사 보존, 현재 기준 아님)
-> 대체 근거: [ADR-0019](adr/0019-ats-identity-v4.md)
+> 옛 지침서 v3.8은 저장소에서 삭제됐고 git 이력에 보존한다.
+> `git show 163811e^:docs/archive/PROJECT_GUIDELINES-v3.8.md`
+> 대체 근거: [ADR-0019](../adr/0019-ats-identity-v4.md)
 
 ---
 
@@ -43,7 +44,7 @@
 
 **AI가 하지 않는 일:**
 
-- 어떤 조건으로 종목을 거를지 **정하지 않는다** — 오너가 화면에서 고른다 ([ADR-0009](adr/0009-strategy-as-data.md))
+- 어떤 조건으로 종목을 거를지 **정하지 않는다** — 오너가 화면에서 고른다 ([ADR-0009](../adr/0009-strategy-as-data.md))
 - 무엇을 먼저 확인할지 **우선순위를 매기지 않는다**
 - 임계값(시총 하한·되돌림 비율·호가 오프셋)을 **고르지 않는다**
 - 백테스트 구간을 **정하지 않는다**
@@ -57,7 +58,7 @@
 ```
 [1] 트레이더 발언 (실전 10년+, 큰 자금)
       ↓
-[2] 확인할 수 있는 주장으로 바꾸기        → hypotheses/
+[2] 확인할 수 있는 주장으로 바꾸기        → ../research/hypotheses/
       ↓
 [3] 숫자로 만들기 (가격·거래대금·시총·수급 …)
       ↓
@@ -90,7 +91,7 @@
 
 ### 0.6 숫자 표기 원칙
 
-**이 문서와 `hypotheses/` 의 모든 숫자(임계값·비율·기간)는 임시값이다.**
+**이 문서와 `../research/hypotheses/`의 모든 숫자(임계값·비율·기간)는 임시값이다.**
 
 - 고수 휴리스틱 + 직관 + 학술 통설로 추정한 값
 - 실제 값은 **데이터로 확인한 뒤 교체**
@@ -206,19 +207,19 @@ LLM이 못 가진 것 (이게 AI에게 전략 창조를 맡기지 않는 근거�
 ## §3. 전략은 아홉 칸으로 정의한다
 
 ```
-종목 선정 (Selection)      어떤 종목을 볼 것인가        → hypotheses/selection.md
+종목 선정 (Selection)      어떤 종목을 볼 것인가        → ../research/hypotheses/selection.md
    ↓
-시장 상황 (Market Regime)  오름장·횡보장·내림장          → hypotheses/regime.md
+시장 상황 (Market Regime)  오름장·횡보장·내림장          → ../research/hypotheses/regime.md
    ↓
 전략군 (Strategy Family)   눌림 / 돌파 / 박스탈출 / 갭 …
    ↓
-모양 (Setup)               어떤 형태가 만들어졌는가       → hypotheses/entry.md
+모양 (Setup)               어떤 형태가 만들어졌는가       → ../research/hypotheses/entry.md
    ↓
-진입 (Entry Model)         어느 가격·조건에서 사는가      → hypotheses/entry.md
+진입 (Entry Model)         어느 가격·조건에서 사는가      → ../research/hypotheses/entry.md
    ↓
-비중 (Position Sizing)     얼마를 살 것인가              → hypotheses/exit.md
+비중 (Position Sizing)     얼마를 살 것인가              → ../research/hypotheses/exit.md
    ↓
-청산 (Exit Model)          어디서 얼마를 파는가          → hypotheses/exit.md
+청산 (Exit Model)          어디서 얼마를 파는가          → ../research/hypotheses/exit.md
    ↓
 위험 관리 (Risk Model)     손절 · 최대 비중 · 동시 보유 수 → §7
    ↓
@@ -250,7 +251,7 @@ LLM이 못 가진 것 (이게 AI에게 전략 창조를 맡기지 않는 근거�
 
 같은 진입·청산 규칙을 두고 **종목 선정만 바꿔서** 성적을 견줄 수 있어야,
 어떤 조건이 진짜 값을 하는지 구분된다. 그래서 종목 선정은 전략 코드 안에 박지 않고
-**조건검색식(데이터)** 으로 정의한다 → [ADR-0009](adr/0009-strategy-as-data.md)
+**조건검색식(데이터)** 으로 정의한다 → [ADR-0009](../adr/0009-strategy-as-data.md)
 
 ### 3.3 4개 레이어와의 대응
 
@@ -375,12 +376,12 @@ src/layer4_execution/  백테스트 · 체결 · (향후) 실행
 
 | 데이터 | 범위 | 종목 수 | 정본 |
 |---|---|---|---|
-| 가격·시가총액·거래대금 | **1995 ~ 2026** (빠진 해 0) | — | `marcap` ([ADR-0002](adr/0002-data-source.md)) |
+| 가격·시가총액·거래대금 | **1995 ~ 2026** (빠진 해 0) | — | `marcap` ([ADR-0002](../adr/0002-data-source.md)) |
 | 수정주가 일봉 | 1995 ~ | **5,478** (상폐 포함) | `data/derived/adjusted/` |
-| 수급 (외인/기관/개인 등) | 1995 ~ | **5,478** (상폐 포함) | KIS ([ADR-0012](adr/0012-supply-demand-data-source.md)) |
+| 수급 (외인/기관/개인 등) | 1995 ~ | **5,478** (상폐 포함) | KIS ([ADR-0012](../adr/0012-supply-demand-data-source.md)) |
 | 주·월봉 · 분봉 | 봉마다 다름 | 4,298 | 나무 수집본 |
 | 공시 | — | — | DART |
-| 업종 지수 | **2017-01 ~** | — | KIS ([ADR-0016](adr/0016-industry-momentum.md)) |
+| 업종 지수 | **2017-01 ~** | — | KIS ([ADR-0016](../adr/0016-industry-momentum.md)) |
 
 분봉은 **주기마다 기간이 다르다** (증권사가 굵은 봉을 더 길게 준다):
 
@@ -398,9 +399,9 @@ src/layer4_execution/  백테스트 · 체결 · (향후) 실행
 - **`marcap` = 상장폐지 종목 담당** + 날짜별 시가총액·상장주식수·종목명(패널이 쓴다).
   나무 마스터는 현재 상장분 4,298종목뿐이라 망한 회사가 없다. 상폐 종목엔 여전히 자체
   보정(ADR-0006)이 쓰인다. pykrx 는 KRX 로그인 게이트로 깨진 상태 — 신규 의존 ❌
-- **수급 정본 = KIS.** 증분·교차검증 보조 = 나무 PLUG ([ADR-0012](adr/0012-supply-demand-data-source.md))
+- **수급 정본 = KIS.** 증분·교차검증 보조 = 나무 PLUG ([ADR-0012](../adr/0012-supply-demand-data-source.md))
 - **주·월봉 정본 = 나무 수집본.** 일봉 합성은 상폐·미수집 종목 대체용
-- **주문 창구 = 나무증권(NH PLUG)** ([ADR-0018](adr/0018-namuh-plug-broker.md)). KIS는 조회 전용 병행
+- **주문 창구 = 나무증권(NH PLUG)** ([ADR-0018](../adr/0018-namuh-plug-broker.md)). KIS는 조회 전용 병행
 - **수집 데이터는 재배포 금지** — GitHub 업로드 ❌, 로컬 `data/` 만
 
 ### 5.3 갱신은 "어디까지 받았나"를 적어 두고 그 뒤부터만 받는다
@@ -490,7 +491,7 @@ src/layer4_execution/  백테스트 · 체결 · (향후) 실행
 | 2 | **0.5%** | 수수료 + 미끄러짐 + 호가 영향 — **기본값** |
 | 3 | 0.8%+ | 변동성 클 때 — 최악 가정 시험 |
 
-→ [ADR-0004](adr/0004-transaction-costs.md)
+→ [ADR-0004](../adr/0004-transaction-costs.md)
 
 ### 6.4 실거래로 가는 길
 
@@ -524,7 +525,7 @@ src/layer4_execution/  백테스트 · 체결 · (향후) 실행
 - **한 종목 몰빵 ❌** — 한도는 임시값이지만 한도가 있다는 건 확정
 - **감정적 물타기 ❌ / 미리 계획한 분할 매수 ⭕**
 
-비중·분할 차수·손절선 같은 구체 숫자는 → `hypotheses/exit.md`
+비중·분할 차수·손절선 같은 구체 숫자는 → `../research/hypotheses/exit.md`
 
 ---
 
@@ -683,17 +684,19 @@ vectorbt / backtesting.py 는 **메인 엔진 ❌** — 단순 전략 하나를 
 ### 13.1 문서
 
 ```
-adr/                        되돌리기 어려운 구현 결정 (정본)
-hypotheses/                 아직 확인 안 된 조건 원재료
-archive/PROJECT_GUIDELINES-v3.8.md   옛 지침서 (역사 보존)
-ARCHITECTURE.md             코드가 어떻게 배치되는가
-DATA_SCHEMA.md              데이터 형태
-CHANGELOG.md                이 문서의 버전 이력
-PROGRESS.md                 레이어별 작업 기록
-CLAUDE.md (루트)            코드·도구 사용 규칙
+docs/README.md                         전체 문서 안내
+docs/foundation/PROJECT_GUIDELINES.md  확정 원칙 (이 문서)
+docs/foundation/ARCHITECTURE.md        코드 배치
+docs/foundation/DATA_SCHEMA.md         데이터 계약
+docs/research/hypotheses/              확인 대기 원재료
+docs/research/FINDINGS.md              실제 분석 결과
+docs/adr/                              구현 결정 기록
+docs/development/                      개발 환경·기여 절차
+docs/project/                          진행 상황·변경 이력
+CLAUDE.md                              코드·도구 사용 규칙
 ```
 
-**정본은 `adr/` 와 이 문서다.** Linear 는 추적용 사본이다.
+**정본은 `docs/adr/`와 이 문서다.** Linear는 추적용 사본이다.
 
 ### 13.2 학술 근거 (핵심만)
 
@@ -707,12 +710,12 @@ CLAUDE.md (루트)            코드·도구 사용 규칙
 - **Stovall (1996)**, **Conover et al. (2008)** — 업종 로테이션
 - **Shefrin & Statman (1985)** — 처분 효과
 
-전체 목록은 `archive/PROJECT_GUIDELINES-v3.8.md` §17.
+전체 목록은 옛 v3.8의 §17에 있다. 필요하면 위 `git show` 명령으로 확인한다.
 
 ### 13.3 이 문서 쓰는 법
 
 - 새 결정이 나오면 **이 문서를 먼저 갱신**하고 커밋한다
-- 확인 안 된 주장은 여기 쓰지 말고 `hypotheses/` 에 쓴다
+- 확인 안 된 주장은 여기 쓰지 말고 `../research/hypotheses/`에 쓴다
 - 코드 작성 전 이 문서 원칙 위반 여부를 확인한다
 - 되돌리기 어려운 결정은 ADR을 쓴다. **ADR을 뒤집을 때 지우지 않는다** — 상태만 바꾼다
 
@@ -728,14 +731,14 @@ CLAUDE.md (루트)            코드·도구 사용 규칙
 | "이 성적 믿어도 되나?" | §4.5 |
 | "이 데이터 있나?" | §5.1 |
 | "체결이 진짜 됐을까?" | §6.2 |
-| "이 조건 어디서 왔더라?" | `hypotheses/` |
-| "이거 왜 이렇게 정했더라?" | `adr/` |
+| "이 조건 어디서 왔더라?" | `docs/research/hypotheses/` |
+| "이거 왜 이렇게 정했더라?" | `docs/adr/` |
 
 ---
 
 **버전:** v4.0
 **날짜:** 2026-08-16
 **바뀐 것:** 정체성 재정의 (영원한 진화 → 확인과 감시) · 전략 9단 계층 도입 ·
-확인 안 된 주장을 `hypotheses/` 로 분리 · 역할 경계 명문화 · 구간 강제 제거 ·
+확인 안 된 주장을 `docs/research/hypotheses/`로 분리 · 역할 경계 명문화 · 구간 강제 제거 ·
 데이터 범위 정정 (2017~ → 1995~) · 수급 상폐 결손 발견
 **폐기한 것:** 없음 — 전부 옮겼다

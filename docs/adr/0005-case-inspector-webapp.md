@@ -46,7 +46,7 @@
 
 ## 결과 (Consequences)
 
-- 리포가 파이썬 단일 → **파이썬 + JS 모노레포**로 바뀐다. `docs/ARCHITECTURE.md` 갱신 필요(후속).
+- 리포가 파이썬 단일 → **파이썬 + JS 모노레포**로 바뀐다. `docs/foundation/ARCHITECTURE.md` 갱신 필요(후속).
 - 새 의존성: 파이썬 `webapp` optional group(fastapi·uvicorn·httpx), `web/` npm(react·vite·
   lightweight-charts). 프런트 산출물·node_modules 는 `.gitignore`.
 - 실행: 백엔드 `uvicorn api.main:app --port 8000`, 프런트 `cd web && npm run dev`.

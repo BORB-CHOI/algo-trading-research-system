@@ -3,8 +3,8 @@
 - **상태:** 수락
 - **날짜:** 2026-08-16
 - **관련:** PROJECT_GUIDELINES v4.0 전체 / ADR-0001(폐기) · ADR-0009 · ADR-0012 · ADR-0018
-- **근거 문서:** `ATS_REAL_MISSION_FINAL.md` (오너 제공, 2026-08-15),
-  `docs/superpowers/specs/2026-08-16-ats-v4-design.md`
+- **근거 문서:** `ATS_REAL_MISSION_FINAL.md` (오너 제공, 2026-08-15), 당시 설계서
+  (`git show cbd46cd:docs/superpowers/specs/2026-08-16-ats-v4-design.md`)
 
 ## 맥락 (Context)
 
@@ -50,7 +50,7 @@ add/correct만 하고 통삭제 없음. 충돌 문장에 정정 주석을 단다
   - **2026-08-23 삭제**(오너 지시 — 저장소 정리). 원본은 git 이력에 그대로 있다:
     `git show 163811e^:docs/archive/PROJECT_GUIDELINES-v3.8.md`
 - 본문의 조건 35개·재료 5축·반전 4종·회피 6가지·트리거 Tier는
-  `docs/hypotheses/` 로 옮겨 **"확인 대기 원재료"** 로 격하 (삭제 ❌)
+  `docs/research/hypotheses/` 로 옮겨 **"확인 대기 원재료"** 로 격하 (삭제 ❌)
 - 장점: 새 정체성이 선명해지고, 자산은 전부 남는다
 - 단점: 파일이 늘어난다 (7개)
 - 가드레일 위반: 없음 (삭제가 아니라 이관)
@@ -94,11 +94,10 @@ v4.0에서는 **가격·시총·수급·뉴스·주도주·신고가·재무 전
 
 ### 5. 문서 구조
 
-```
-docs/PROJECT_GUIDELINES.md          v4.0, 686줄 — 확정된 원칙만
-docs/hypotheses/*.md (7개)          확인 대기 원재료 (우선순위·검증계획 ❌ — 오너 몫)
-docs/archive/PROJECT_GUIDELINES-v3.8.md   원본 통째 보존
-```
+이 결정의 핵심은 **확정 원칙과 확인 대기 원재료를 분리하는 것**이다. 이후 문서 정보 구조를
+정리해 확정 원칙은 `docs/foundation/`, 가설과 결과는 `docs/research/`에 둔다. 현재 경로와
+읽는 순서는 [`docs/README.md`](../README.md)가 정본이다. v3.8 원본은 저장소 정리로 삭제됐고
+git 이력에만 보존한다(위 맥락 절의 복원 명령 참조).
 
 ### 6. 검사 구간
 

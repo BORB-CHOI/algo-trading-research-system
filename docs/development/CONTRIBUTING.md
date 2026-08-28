@@ -17,9 +17,9 @@
 
 ## 문서 규율
 
-- **지침서(`PROJECT_GUIDELINES.md`) 변경은 실제 구현·데이터·실거래 경험 기반으로만** (§0.1,
+- **지침서(`../foundation/PROJECT_GUIDELINES.md`) 변경은 실제 구현·데이터·실거래 경험 기반으로만** (§0.1,
   README 버전 관리 원칙). 머릿속 시뮬레이션으로 갱신하지 않는다.
-- 지침서 변경 시 `CHANGELOG.md`에 버전 엔트리, 상위 호환 유지.
+- 지침서 변경 시 `../project/CHANGELOG.md`에 버전 엔트리, 상위 호환 유지.
 - 구현 결정은 지침서가 아니라 **ADR**(`docs/adr/`)에 기록.
 
 ## Linear 연동

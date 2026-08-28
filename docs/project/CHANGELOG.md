@@ -1,6 +1,6 @@
 # CHANGELOG — AI 자동 매매 시스템 지침서
 
-> 본 파일은 PROJECT_GUIDELINES.md의 버전별 변경 요약이다.
+> 본 파일은 `../foundation/PROJECT_GUIDELINES.md`의 버전별 변경 요약이다.
 > 가장 최신 버전이 맨 위.
 
 ---
@@ -71,8 +71,13 @@
 
 **테마: 정체성 재정의 — "영원히 진화하는 자동매매" → "확인하고, 사람이 승인하고, 자동 실행"**
 
-근거 문서: 오너 제공 `ATS_REAL_MISSION_FINAL.md`(2026-08-15) · [ADR-0019](adr/0019-ats-identity-v4.md)
-설계서/계획: `superpowers/specs/2026-08-16-ats-v4-design.md` · `superpowers/plans/2026-08-16-ats-v4.md`
+근거 문서: 오너 제공 `ATS_REAL_MISSION_FINAL.md`(2026-08-15) · [ADR-0019](../adr/0019-ats-identity-v4.md)
+당시 설계서와 구현 계획은 완료 후 삭제했다. 최종본은 git 이력에서 확인한다.
+
+```bash
+git show cbd46cd:docs/superpowers/specs/2026-08-16-ats-v4-design.md
+git show cbd46cd:docs/superpowers/plans/2026-08-16-ats-v4.md
+```
 
 ### 왜
 
@@ -591,7 +596,8 @@ v3.8을 사용하면 v1, v2, v3, v3.1, v3.2, v3.3, v3.4, v3.5, v3.6, v3.7의 모
 (§11 컴플라이언스 삭제, 진입 타이밍, 장중 무개입 사유). 원칙·방법론은 상위 호환이나, 페르소나 관련 서술은
 v3.7 이하가 **오류**이므로 v3.8이 우선한다.
 
-새 채팅 시작 시 가장 최신 버전(`PROJECT_GUIDELINES.md`)만 첨부하면 된다. 본 CHANGELOG는 *"왜 이렇게 됐는지"* 의 역사 추적용.
+새 채팅 시작 시 `docs/README.md`에서 필요한 정본을 고른다. 본 CHANGELOG는
+*"왜 이렇게 됐는지"*의 역사 추적용이다.
 
 ---
 
