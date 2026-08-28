@@ -51,7 +51,11 @@ INTERVALS: list[tuple[str, str, str | None]] = [
 ]
 
 WORKERS = 5
-MIN_GAP = 0.18  # 전체 호출 간 최소 간격(초) — 실측 한도(초당 약 7건)보다 여유
+# 전체 호출 간 최소 간격(초). nhplug 0.3.0 부터 SDK 가 스스로 초당 호출을 조절하므로
+# (.env 의 NHPLUG_RATE_LIMIT, 기본 4회·상한 5회) 이 값은 뒤를 받치는 안전핀이다.
+# 실측 2026-08-28 (60종목 일봉, 5줄기): SDK 만 = 초당 4.43건, 여기에 이 값까지 겹치면 4.22건.
+# 겹치면 5% 쯤 느려진다. 0 으로 두면 SDK 조절에만 맡긴다.
+MIN_GAP = 0.18
 RATE_RETRY_SLEEP = 3.0
 NET_RETRY_SLEEP = 30.0
 MAX_RETRY = 5
@@ -85,17 +89,62 @@ def load_state() -> dict:
     return {}
 
 
-def save_state(state: dict) -> None:
+SAVE_EVERY_SEC = 5.0  # 이 간격 안에 또 부르면 건너뛴다 — 끊겨도 이만큼만 다시 받으면 된다
+_LAST_SAVE = 0.0
+
+
+def save_state(state: dict, force: bool = False) -> None:
+    """상태를 파일에 적는다 — **너무 자주 적지 않는다.**
+
+    전엔 굵기 하나를 받을 때마다 통째로 다시 썼다. `_state.json` 이 6.9MB 라 주·월봉
+    전량 재수집(11,020 조합)이면 **76GB** 를 쓰는 셈이다. 실측 2026-08-28: 50종목에
+    60초 걸렸는데 순수 호출은 39초 — **21초(35%)가 이 쓰기였다.**
+
+    끊겨도 안전한 이유: 상태는 "어디까지 받았나"를 적는 쪽지일 뿐이라, 몇 초치를
+    잃으면 그 몇 종목을 다시 받으면 그만이다. 끝날 때 `force=True` 로 한 번 더 적는다.
+    """
+    global _LAST_SAVE
+    now = time.monotonic()
+    if not force and now - _LAST_SAVE < SAVE_EVERY_SEC:
+        return
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    tmp = STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(STATE_PATH)
+    _LAST_SAVE = now
+
+
+def looks_like_bar(row: object) -> bool:
+    """봉 한 줄인가 — 날짜 자리가 `YYYYMMDD` 나 `YYYYMM` 인지로 가른다."""
+    if not isinstance(row, dict):
+        return False
+    day = str(row.get("bsop_date", "")).strip()
+    return day.isdigit() and len(day) in (6, 8)
 
 
 def rows_of(res: dict) -> list[dict]:
-    """봉 배열은 명세와 달리 Output_1 에 온다 — 배열인 Output_N 을 찾는다."""
+    """봉 배열을 골라낸다 — **봉처럼 생긴 줄만** 남긴다.
+
+    전엔 "배열인 Output_N 중 첫 번째"를 그냥 썼다. 나무 명세에도 `Output_0` 이 배열로
+    적혀 있는데 실제로는 객체로 오는 일이 있다고 경고돼 있고, 실제로 **다른 블록이
+    봉 배열에 섞여 들어왔다.**
+
+    실측 2026-08-28: 주·월봉 전량 재수집(16,578개 파일) 뒤 훑어 보니 **6개 파일**에
+    날짜 자리가 `''` · `'코스피 …'` · `'00'` 같은 값인 줄이 섞여 있었다. 시가 자리엔
+    `'L01Out2 20'`, 종가 자리엔 `'KGS07P'` 가 들어 있었다 — 봉이 아니라 다른 응답 조각이다.
+
+    이런 줄이 하나만 섞여도 그 종목의 최저가·거래대금 합계가 통째로 어긋난다.
+    조용히 틀리는 쪽이라 오래 못 봤다. 이제 **날짜가 아닌 줄은 버린다.**
+    """
+    best: list[dict] = []
     for key in sorted(k for k in res if k.startswith("Output")):
-        if isinstance(res[key], list):
-            return res[key]
-    return []
+        value = res[key]
+        if not isinstance(value, list):
+            continue
+        kept = [r for r in value if looks_like_bar(r)]
+        if len(kept) > len(best):
+            best = kept
+    return best
 
 
 def call_page(market: str, code: str, gubun: str, xtick: str | None, edate: str) -> list[dict]:
@@ -227,6 +276,7 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         list(pool.map(run, jobs))
 
+    save_state(state, force=True)  # 마지막 몇 초치까지 확실히 적는다
     print("수집 끝.")
     return 0
 
