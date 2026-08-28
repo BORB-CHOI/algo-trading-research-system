@@ -86,6 +86,7 @@ from src.layer1_data import (  # noqa: E402
     krx_gapfill,
     krx_openapi,
     last_dates,
+    parquet_io,
     period_bars,
 )
 from src.layer4_execution.brokers.kis.client import CallPolicy, KisApiError, KisClient  # noqa: E402
@@ -188,8 +189,7 @@ def merge_save(path: Path, old: pd.DataFrame | None, new: pd.DataFrame, keys: li
     )
     grown = len(merged) - (len(old) if old is not None else 0)
     if grown != 0 or old is None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        merged.to_parquet(path, index=False)
+        parquet_io.save(merged, path)  # 반쯤 쓰이다 만 파일이 안 남게
     return max(grown, 0)
 
 
@@ -214,38 +214,53 @@ def update_bars(
     totals = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
     lock = threading.Lock()
     done_n = 0
+    broke: list[str] = []  # 종목 하나가 왜 걸렸는지 — 요약에 몇 건만 실어 보여 준다
+
+    def one(code: str, market: str, folder: str, gubun: str, xtick: str | None) -> str:
+        """한 종목·한 굵기. 돌려주는 말: done / fresh / error / (숫자=늘어난 줄)."""
+        path = bars.OUT_DIR / market.lower() / folder / f"{code}.parquet"
+        if done and (market.lower(), code, folder) in done:
+            return "fresh"  # KIS 가 이번 회차에 이미 채웠다
+        # 먼저 날짜만 본다. 최신이면 파일을 열지도, 호출하지도 않는다.
+        since = last_date_of(path, "bsop_date")
+        if is_fresh(folder, since, last_day):
+            return "fresh"
+        stored = parquet_io.read(path)  # 깨진 저장본이면 None — 전체를 다시 받는다
+        try:
+            if not since:
+                new = bars.collect_one(market, code, gubun, xtick)  # 처음 = 전체
+            else:
+                new = _bars_since(market, code, gubun, xtick, since)
+        except bars.NhplugError:
+            return "error"
+        if folder in ("week", "month"):
+            return str(merge_period_save(path, stored, new, folder))  # 같은 주·달 두 봉 금지
+        keys = [c for c in ("bsop_date", "bsop_time") if c in new.columns] or ["bsop_date"]
+        return str(merge_save(path, stored, new, keys))
 
     def work(job: tuple[str, list[str]]) -> None:
         code, markets = job
         added = errors = skipped = called = 0
         for market in markets:
             for folder, gubun, xtick in intervals:
-                path = bars.OUT_DIR / market.lower() / folder / f"{code}.parquet"
-                if done and (market.lower(), code, folder) in done:
-                    skipped += 1  # KIS 가 이번 회차에 이미 채웠다
-                    continue
-                # 먼저 날짜만 본다. 최신이면 파일을 열지도, 호출하지도 않는다.
-                since = last_date_of(path, "bsop_date")
-                if is_fresh(folder, since, last_day):
-                    skipped += 1
-                    continue
-                old = pd.read_parquet(path) if path.exists() else None
+                # 파일 하나가 깨졌다고 회차 전체를 버리지 않는다. 실제 사고 2026-08-29 —
+                # 0바이트 봉 파일 하나에 갱신이 통째로 죽어, 30분치를 받아 놓고도 뒤에 올
+                # 수급·거래원·공시·신용잔고를 아예 못 돌았다.
                 try:
-                    if not since:
-                        new = bars.collect_one(market, code, gubun, xtick)  # 처음 = 전체
-                    else:
-                        new = _bars_since(market, code, gubun, xtick, since)
-                    called += 1
-                except bars.NhplugError:
+                    got = one(code, market, folder, gubun, xtick)
+                except Exception as e:  # noqa: BLE001 — 무엇이든 이 종목에서 끝낸다
                     errors += 1
+                    with lock:
+                        if len(broke) < 20:
+                            broke.append(f"{market.lower()}/{folder}/{code} {type(e).__name__}: {e}")
                     continue
-                if folder in ("week", "month"):
-                    added += merge_period_save(path, old, new, folder)  # 같은 주·달 두 봉 금지
+                if got == "fresh":
+                    skipped += 1
+                elif got == "error":
+                    errors += 1
                 else:
-                    keys = [c for c in ("bsop_date", "bsop_time") if c in new.columns] or [
-                        "bsop_date"
-                    ]
-                    added += merge_save(path, old, new, keys)
+                    called += 1
+                    added += int(got)
         nonlocal done_n
         with lock:
             totals["added"] += added
@@ -259,12 +274,15 @@ def update_bars(
 
     with ThreadPoolExecutor(max_workers=bars.WORKERS) as pool:
         list(pool.map(work, jobs))
-    return {
+    out = {
         "added_rows": totals["added"],
         "errors": totals["errors"],
         "skipped": totals["skipped"],
         "called": totals["called"],
     }
+    if broke:
+        out["broke"] = broke  # 조용히 넘기지 않는다 — 요약 로그에 남겨 눈에 띄게
+    return out
 
 
 KIS_READY_AFTER = "20:05"  # NXT 애프터마켓 종료(20:00) 뒤 — 통합·NXT 일봉이 그때 확정된다
@@ -345,7 +363,10 @@ def update_day_bars_kis(last_day: str) -> dict:
                 out["left_to_namuh"] += 1
                 continue
             path = bars.OUT_DIR / market / "day" / f"{code}.parquet"
-            old = pd.read_parquet(path)
+            old = parquet_io.read(path)
+            if old is None:
+                out["left_to_namuh"] += 1  # 저장본이 깨졌다 — 나무가 전체를 다시 받는다
+                continue
             if market == "krx" and _split_detected(old, hit["prdy_clpr"]):
                 recollect.add(code)  # 과거가 접혔다 — 나무에서 전체 재수집
                 continue
@@ -386,9 +407,7 @@ def _recollect_all(code: str, markets: list[str]) -> None:
                 continue
             if df.empty:
                 continue
-            path = bars.OUT_DIR / market / folder / f"{code}.parquet"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(path, index=False)
+            parquet_io.save(df, bars.OUT_DIR / market / folder / f"{code}.parquet")
 
 
 def _check_kis_against_namuh(appended: list[tuple[str, str]], since: str, day: str) -> dict:
@@ -599,7 +618,7 @@ def update_period_bars_kis(last_day: str) -> tuple[dict, set[tuple[str, str, str
             out.append(_kis_row_to_namuh(r, label))
         if not out:
             return "namuh"
-        old = pd.read_parquet(path)
+        old = parquet_io.read(path)
         added = merge_period_save(
             path, old, pd.DataFrame(out, columns=kis_snapshot.NAMUH_DAY_COLS), folder
         )
@@ -751,7 +770,7 @@ def update_period_bars_from_daily(
                         joined = stored
                     else:
                         joined = period_bars.graft(stored, fresh)
-                        joined.to_parquet(path, index=False)
+                        parquet_io.save(joined, path)
                         acc["written"] += 1
                     # 어긋난 과거 봉은 **일봉으로 만든 값으로 덮는다**(오너 승인 2026-08-29).
                     # 근거: KIS 로 심판을 본 14건이 전부 "일봉이 맞고 나무 주봉이 틀리다"였고,
@@ -767,7 +786,7 @@ def update_period_bars_from_daily(
                         joined = period_bars.graft(
                             joined, period_bars.rows_for(bad, made_all, folder)
                         )
-                        joined.to_parquet(path, index=False)
+                        parquet_io.save(joined, path)
                         acc["fixed"] += len(bad)
                     _remember(path, _stamp(day_path, path), 0)
                 except (OSError, ValueError, KeyError):
@@ -919,7 +938,7 @@ def update_kis(
             with lock:
                 totals["skipped"] += 1
             return  # 마지막 거래일까지 이미 있다 — 파일도 안 열고 호출도 안 한다
-        old = pd.read_parquet(path)
+        old = parquet_io.read(path)
         try:
             new = module.collect_code(supply._thread_client(), code, since, today)
         except module.KisApiError as e:
@@ -981,7 +1000,7 @@ def update_disclosures() -> dict:
     for start in targets:
         ym = start.strftime("%Y-%m")
         path = disclosures.OUT_DIR / f"{ym}.parquet"
-        old = pd.read_parquet(path) if path.exists() else None
+        old = parquet_io.read(path)
         frames = []
         for cls in disclosures.CORP_CLASSES:
             try:

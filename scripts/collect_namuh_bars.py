@@ -31,6 +31,11 @@ from nhplug import NhplugError, call  # noqa: E402
 from nhplug.instruments import load_master  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.layer1_data import parquet_io  # noqa: E402
+
 OUT_DIR = ROOT / "data" / "derived" / "namuh_bars"
 STATE_PATH = OUT_DIR / "_state.json"
 
@@ -225,9 +230,8 @@ def process_code(code: str, markets: list[str], state: dict) -> None:
                     save_state(state)
                 continue
             out_path = OUT_DIR / market.lower() / folder / f"{code}.parquet"
-            out_path.parent.mkdir(parents=True, exist_ok=True)
             if not df.empty:
-                df.to_parquet(out_path, index=False)
+                parquet_io.save(df, out_path)  # 반쯤 쓰이다 만 파일이 안 남게
             entry = {
                 "done": True,
                 "rows": int(len(df)),
