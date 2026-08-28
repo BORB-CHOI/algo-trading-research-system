@@ -1024,6 +1024,76 @@ def update_disclosures() -> dict:
     return {"added_rows": added, "errors": errors}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 겹쳐 도는 걸 막는 잠금 — **주인을 적어 둔다**
+# ─────────────────────────────────────────────────────────────────────────────
+# 실제 사고 2026-08-29: 잠금에 시각만 적혀 있어서 누구 것인지 알 수 없었다. 실행 B 가
+# 죽으면서 `finally` 로 잠금을 지웠는데 그건 **실행 A 의 잠금**이었다. 그때부터 잠금이
+# 없어져 A 와 새 실행이 같은 봉 파일을 동시에 썼고, 한쪽이 파일을 비우고 다시 쓰는
+# 사이에 다른 쪽이 읽어 0바이트 오류로 회차가 통째로 죽었다.
+#
+# 그리고 옛 방식은 "12시간 안이면 도는 중으로 본다"였는데, 이건 양쪽으로 틀렸다.
+#   - 죽은 실행이 남긴 잠금에 12시간을 기다린다 (2026-08-22 잠금이 닷새를 막았다)
+#   - 12시간 넘게 도는 실행은 남이 밀고 들어온다
+# 이제는 **그 번호의 프로그램이 실제로 살아 있는지**를 본다.
+
+
+def _process_alive(pid: int) -> bool:
+    """그 번호의 프로그램이 아직 살아 있나. 확인 못 하면 살아 있다고 본다(안전한 쪽)."""
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+    # 윈도우에선 os.kill 이 신호가 아니라 **강제 종료**라 절대 쓰면 안 된다.
+    import ctypes
+
+    k32 = ctypes.windll.kernel32
+    handle = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False  # 열지도 못한다 = 이미 없다
+    code = ctypes.c_ulong()
+    got = k32.GetExitCodeProcess(handle, ctypes.byref(code))
+    k32.CloseHandle(handle)
+    return bool(got) and code.value == 259  # STILL_ACTIVE
+
+
+def take_lock() -> str:
+    """잠금을 잡는다. 잡았으면 빈 문자열, 못 잡았으면 **건너뛸 이유**를 돌려준다."""
+    try:
+        held = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+        pid, at = int(held["pid"]), str(held["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pid, at = 0, ""
+        if LOCK_PATH.exists():  # 옛 방식이거나 깨진 잠금 — 시각만 보고 판단한다
+            age_h = (time.time() - LOCK_PATH.stat().st_mtime) / 3600
+            if age_h < 12:
+                return f"이전 갱신이 아직 도는 중({age_h:.1f}시간 전 시작) — 이번 회차는 건너뛴다."
+    if pid and pid != os.getpid() and _process_alive(pid):
+        return f"이전 갱신({at} 시작, 번호 {pid})이 아직 도는 중 — 이번 회차는 건너뛴다."
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOCK_PATH.write_text(
+        json.dumps({"pid": os.getpid(), "at": datetime.now().isoformat()}), encoding="utf-8"
+    )
+    return ""
+
+
+def drop_lock() -> None:
+    """**내 잠금일 때만** 지운다 — 남의 잠금을 지우면 둘이 겹쳐 돈다."""
+    try:
+        held = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+        if int(held["pid"]) != os.getpid():
+            return
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # 못 읽으면 내가 남긴 것으로 보고 치운다
+    LOCK_PATH.unlink(missing_ok=True)
+
+
 def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = None) -> dict:
     """갱신 전체 한 회차 — CLI(`main`)와 API(`/api/data/update`)가 **같은 함수**를 쓴다.
 
@@ -1039,15 +1109,9 @@ def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = Non
 
     if weekday == 6 and not force_minutes:
         return {"skipped": "일요일 — 갱신할 게 없다."}
-    if LOCK_PATH.exists():
-        age_h = (time.time() - LOCK_PATH.stat().st_mtime) / 3600
-        if age_h < 12:
-            return {
-                "skipped": f"이전 갱신이 아직 도는 중({age_h:.1f}시간 전 시작) — 이번 회차는 건너뛴다."
-            }
-        # 12시간 넘은 잠금은 죽은 실행의 흔적으로 보고 지운다
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LOCK_PATH.write_text(datetime.now().isoformat(), encoding="utf-8")
+    blocked = take_lock()
+    if blocked:
+        return {"skipped": blocked}
     load_marks()  # 지난 회차의 '마지막 날짜' 쪽지 — 안 바뀐 파일은 다시 안 읽는다
     load_period_state()  # 지난번 대조 결과 — 파일이 그대로면 다시 안 본다
 
@@ -1134,7 +1198,7 @@ def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = Non
         save_marks()
         save_period_state()
         log_line(**summary)
-        LOCK_PATH.unlink(missing_ok=True)
+        drop_lock()  # 내 잠금일 때만 — 남의 것을 지우면 둘이 겹쳐 돈다
 
     step("갱신 끝: " + json.dumps(summary, ensure_ascii=False))
     return summary
