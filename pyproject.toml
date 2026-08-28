@@ -1,13 +1,13 @@
 [project]
 name = "algo-trading-research-system"
 version = "0.0.1"
-description = "한국 주식 스윙 트레이딩 백테스트/자동매매 시스템 (docs/PROJECT_GUIDELINES.md 참조)"
+description = "한국 주식 스윙 트레이딩 백테스트/자동매매 시스템 (docs/README.md 참조)"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "UNLICENSED" }
 authors = [{ name = "BORB-CHOI" }]
 
-# 런타임 의존성 — 최소로 시작 (docs/CLAUDE.md: 데이터 범위 = 최소).
+# 런타임 의존성 — 최소로 시작 (CLAUDE.md: 데이터 범위 = 최소).
 # 데이터 소스/신호가 확정될 때마다 add. 미리 채우지 않는다.
 dependencies = [
     "pandas>=2.2",
@@ -23,7 +23,7 @@ dev = [
     "mypy>=1.11",
     "pre-commit>=3.8",
 ]
-# 백테스트 P&L 대조 oracle (docs/CLAUDE.md: 메인 엔진 ❌, 대조용으로만).
+# 백테스트 P&L 대조 oracle (CLAUDE.md: 메인 엔진 ❌, 대조용으로만).
 oracle = [
     "backtesting>=0.3",
 ]

@@ -26,14 +26,12 @@ algo-trading-research-system/
 ├── README.md                     ← 이 파일
 ├── CLAUDE.md                     ← 코드·도구 사용 규칙
 ├── docs/
-│   ├── PROJECT_GUIDELINES.md     ← 메인 지침서 v4.0 (확정된 원칙만)
-│   ├── hypotheses/               ← 아직 확인 안 된 조건 원재료 (주제 문서 8개)
-│   ├── adr/                      ← 되돌리기 어려운 구현 결정 (정본)
-│   ├── archive/                  ← 옛 지침서 v3.8 (역사 보존)
-│   ├── ARCHITECTURE.md           ← 코드 배치
-│   ├── DATA_SCHEMA.md            ← 데이터 형태
-│   ├── CHANGELOG.md              ← 지침서 버전 이력
-│   └── PROGRESS.md               ← 레이어별 작업 기록
+│   ├── README.md                 ← 문서의 단일 시작점
+│   ├── foundation/               ← 확정 원칙·아키텍처·데이터 계약
+│   ├── research/                 ← 확인 전 가설·확인 후 결과
+│   ├── development/              ← 개발 환경·기여 절차
+│   ├── project/                  ← 진행 상황·변경 이력
+│   └── adr/                      ← 되돌리기 어려운 구현 결정
 ├── src/
 │   ├── layer1_data/              데이터 수집·정제·저장          (가동 중)
 │   ├── layer2_llm_reading/           신호 — LLM 자리                (2단계, 비어 있음)
@@ -96,7 +94,8 @@ make web   # 프런트 — Vite :5173
 5. **살아남는 것이 먼저** — 미수·신용·스탁론 ❌.
    매매 안 하면 죽지 않는다. 안전장치는 돌아가는 중에 못 바꾼다
 
-자세한 내용은 [docs/PROJECT_GUIDELINES.md](docs/PROJECT_GUIDELINES.md) (v4.0).
+문서는 [docs 안내](docs/README.md)에서 목적에 따라 찾는다. 확정 원칙의 정본은
+[PROJECT_GUIDELINES](docs/foundation/PROJECT_GUIDELINES.md)다.
 
 ## v4.0에서 바뀐 것 (2026-08-16)
 
@@ -107,7 +106,8 @@ make web   # 프런트 — Vite :5173
 - **전략 9단 계층 도입** — 종목 선정 → 시장 상황 → 전략군 → 모양 → 진입 → 비중 → 청산 → 위험 → 실행
   - "전략 1호 = 피보나치"가 아니라 **상승 사이클 눌림매매의 진입 방법 하나가 피보나치**.
     격하가 아니라 승격 — 형제 진입 방법을 끼워 넣을 자리를 만든 것. **코드는 그대로**
-- **확인 안 된 주장을 분리** — 조건 35개·재료 5축·회피 6가지·트리거를 `docs/hypotheses/` 로 이관.
+- **확인 안 된 주장을 분리** — 조건 35개·재료 5축·회피 6가지·트리거를
+  `docs/research/hypotheses/`로 이관.
   v3.8 원본은 2026-08-23 저장소 정리로 삭제됐고 git 이력에 보존
 - **역할 경계 명문화** — AI가 조건·임계값·우선순위·구간을 정하지 않는다
 - **구간 강제 제거** — 화면에서 고른 날짜가 그대로 검사 구간. 기본값 2007~ (리먼 전부터)
@@ -128,25 +128,28 @@ make web   # 프런트 — Vite :5173
 ## 흔한 LLM 트레이딩 실수 — 이 시스템이 피하는 함정
 
 학계·업계 LLM 트레이딩 시스템이 반복해 빠지는 함정 20가지를 5개 묶음으로 정리한 문서가
-`docs/archive/PROJECT_GUIDELINES-v3.8.md` 뒤에 붙어 있던 README 원본에 있다.
+삭제된 v3.8 원본 README에 있었고, 필요하면 git 이력에서 확인할 수 있다.
 요지는 다섯 줄로 줄어든다.
 
 - **A. 잘못된 도구** — LLM에게 매매·예측을 시킨다 → LLM은 layer2 까지, 등급까지만
-- **B. 시장 메커니즘 무시** — 결과가 아니라 예상과의 차이가 가격을 움직인다 → `hypotheses/news.md`
+- **B. 시장 메커니즘 무시** — 결과가 아니라 예상과의 차이가 가격을 움직인다 →
+  `docs/research/hypotheses/news.md`
 - **C. 통계 부재** — 같은 구간 보며 값 고치기, 표본 부족, 조건 강화 후 지표 확인 안 함 → §4
 - **D. 위험 관리 실패** — 단일 알파 · 풀매수 · 손절 못함 · 거래비용 무시 → §7
 - **E. 사람 심리** — 개입 · 과로 · AI 환상 · 데이트레이딩 → §8.1 장중 무개입
 
 ## 새 채팅 시작 방법
 
-1. `docs/PROJECT_GUIDELINES.md` (v4.0) 를 컨텍스트로
-2. 작업 명시: *"이 지침서 기반으로 [구체 작업] 진행"*
-3. 한 채팅 = 한 작업
-4. 합의된 변경만 지침서에 반영 + Git commit
+1. `docs/README.md`에서 작업에 필요한 문서를 찾는다
+2. 확정 원칙이 필요한 작업이면 `docs/foundation/PROJECT_GUIDELINES.md`를 컨텍스트로 준다
+3. 작업 명시: *"이 지침서 기반으로 [구체 작업] 진행"*
+4. 한 채팅 = 한 작업
+5. 합의된 변경만 정본 문서에 반영 + Git commit
 
 ## 버전 관리
 
-- `docs/PROJECT_GUIDELINES.md` 는 **확정된 원칙만** 담는다. 확인 안 된 주장은 `docs/hypotheses/`
+- `docs/foundation/PROJECT_GUIDELINES.md`는 **확정된 원칙만** 담는다. 확인 안 된 주장은
+  `docs/research/hypotheses/`에 둔다
 - 되돌리기 어려운 결정은 `docs/adr/` 에 한 건씩. **뒤집을 때 지우지 않고 상태만 바꾼다**
-- 변경 이력은 `docs/CHANGELOG.md`
+- 변경 이력은 `docs/project/CHANGELOG.md`
 - 머릿속 시뮬레이션으로 지침서 갱신 ❌ — 실제 구현·데이터·실거래 경험 기반으로만
