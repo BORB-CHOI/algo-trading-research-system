@@ -4,6 +4,7 @@
 고수의 발언이든 오너의 직관이든 학술 논문이든, 데이터로 확인하기 전까지는 같은 등급이다.
 
 **이 폴더는 검증 계획이 아니다.** 무엇을 먼저 볼지, 어떻게 조합할지는 오너가 화면에서 정한다.
+실제 분석 정의와 결과는 [`../research-findings.md`](../research-findings.md)에 따로 누적한다.
 
 ## 왜 따로 두는가
 
@@ -37,8 +38,9 @@
 | [entry.md](entry.md) | 모양 · 진입 | 전략 화면에서 ⭕ |
 | [exit.md](exit.md) | 청산 · 비중 | 전략 화면에서 ⭕ |
 | [avoid.md](avoid.md) | 회피 (위험 관리) | 일부 ⭕ |
-| [flows.md](flows.md) | 수급 · 거래원 · 프로그램 | ❌ 조건 미구현 + ⚠️ 상폐 종목 없음 |
+| [flows.md](flows.md) | 수급 · 거래원 · 프로그램 | 데이터 있음 · 화면 조건은 ❌ |
 | [news.md](news.md) | 재료 · 심리 | ❌ 2단계(LLM) 전에는 불가 |
+| [fib-wave-label-candidates.md](fib-wave-label-candidates.md) | 파동 정답지 후보 | 수동 라벨링 자료 |
 
 ## 데이터로 확인할 때 지킬 것
 
