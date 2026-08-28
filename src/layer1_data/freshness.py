@@ -123,12 +123,16 @@ def count_files(dirpath: Path) -> int:
 def scan_last_date(
     dirpath: Path, date_col: str, *, on_file: Callable[[], None] | None = None
 ) -> tuple[str | None, int]:
-    """폴더 안 parquet 들에서 가장 늦은 날짜. **날짜 열만** 읽는다(통째로 열면 10배 느리다).
+    """폴더 안 parquet 들에서 가장 늦은 날짜.
+
+    날짜는 공용 쪽지(`last_dates`)에 물어본다 — **파일이 지난번과 똑같으면 열지 않는다.**
+    전엔 여기서만 16,576개를 매번 다시 열어 약 27초를 썼다(실측 2026-08-17).
+    갱신 쪽도 같은 쪽지를 보므로, 한 회차에 같은 파일을 두 번 여는 일이 없어진다.
 
     파일 하나가 깨져도 나머지로 답한다 — 하나 때문에 "모른다"가 되면 안 된다.
     `on_file` 은 파일 하나 볼 때마다 불린다(화면 게이지용, 깨진 파일도 센다).
     """
-    import pyarrow.parquet as pq
+    from . import last_dates
 
     dirpath = Path(dirpath)
     if not dirpath.is_dir():
@@ -138,14 +142,11 @@ def scan_last_date(
     for path in dirpath.glob("*.parquet"):
         if on_file is not None:
             on_file()
-        try:
-            col = pq.read_table(path, columns=[date_col])[date_col]
-        except (OSError, ValueError, KeyError):
+        raw = last_dates.of(path, date_col)
+        if not raw:
             continue
         n += 1
-        if len(col) == 0:
-            continue
-        day = _norm(col[-1].as_py())
+        day = _norm(raw)
         if day > best:
             best = day
     return (best or None), n
@@ -260,6 +261,9 @@ def refresh_marks(
     전체 개수는 **훑기 전에 한 번** 세서 고정한다. 도중에 늘어나면 게이지가 되감긴다.
     폴더가 아예 없는 소스는 건너뛴다 — "모름"을 적으면 화면이 헷갈린다.
     """
+    from . import last_dates
+
+    last_dates.ensure_loaded(Path(root) / "_last_dates.json")
     counts = {
         s["key"]: (1 if s["key"] == "marcap" else count_files(Path(root) / s["dir"]))
         for s in SOURCES
@@ -288,6 +292,7 @@ def refresh_marks(
             continue
         write_mark(src["key"], last, n_symbols=n, root=root)
         written[src["key"]] = last
+    last_dates.save()
     if on_progress is not None:
         on_progress("끝", total, total)
     return written
