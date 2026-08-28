@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchFreshness, refreshData, startHeavyUpdate, type DataFreshness as Fresh } from '../api'
+import { fetchFreshness, startHeavyUpdate, type DataFreshness as Fresh } from '../api'
 
 // 헤더의 데이터 상태 알약. 누르면 소스별로 펼쳐진다.
 //
@@ -45,9 +45,9 @@ export function DataFreshness() {
     return () => clearInterval(t)
   }, [load])
 
-  // 갱신이 도는 동안엔 자주 확인한다 — 몇 초짜리라 1분 주기로는 끝난 걸 못 본다.
-  // 무거운 갱신(나무 봉·수급·신용잔고)은 수 분~수십 분이라 2초 주기로 본다 — 창을
-  // 닫았다 열어도 서버가 계속 돌고 있으면 여기서 이어서 보인다(오너 요청 2026-08-22).
+  // 받아오는 동안엔 자주 확인한다. 데이터 받기는 수 분~수십 분이라 2초 주기 —
+  // 창을 닫았다 열어도 서버가 계속 돌고 있으면 여기서 이어서 보인다(오너 요청 2026-08-22).
+  // (`refreshing` 은 서버가 켜질 때 스스로 도는 가벼운 세기다 — 버튼과는 무관하다.)
   useEffect(() => {
     if (!data?.refreshing && !data?.heavy.running) return
     const ms = data.heavy.running ? 2000 : 1000
@@ -73,25 +73,16 @@ export function DataFreshness() {
   const chartGrade = chart?.grade ?? 'stale'
   const others = RANK[data.worst] > RANK[chartGrade] ? data.worst : null
 
-  async function onRefresh() {
+  // 버튼 하나로 끝낸다 — 무거운 갱신이 끝에 "어디까지 받았나"까지 다시 센다.
+  // 요일은 서버가 본다(토요일이면 분봉·신용잔고까지). 화면에서 고를 게 없다.
+  async function onUpdate() {
     setMsg('')
     try {
-      const r = await refreshData()
+      const r = await startHeavyUpdate(false)
       setMsg(r.message)
       await load()
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : '갱신 실패')
-    }
-  }
-
-  async function onHeavyUpdate(minutes: boolean) {
-    setMsg('')
-    try {
-      const r = await startHeavyUpdate(minutes)
-      setMsg(r.message)
-      await load()
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : '갱신 실패')
+      setMsg(e instanceof Error ? e.message : '받아오지 못했습니다')
     }
   }
 
@@ -109,7 +100,9 @@ export function DataFreshness() {
         <i className="dot" />
         시세 {chart?.last_date ?? '없음'}
         {others && <i className={`alarm g-${others}`} aria-label="다른 데이터가 묵었습니다" />}
-        {data.refreshing && <em className="spin">갱신 중</em>}
+        {(data.refreshing || data.heavy.running) && (
+          <em className="spin">받아오는 중</em>
+        )}
       </button>
 
       {open && (
@@ -136,18 +129,29 @@ export function DataFreshness() {
           </ul>
 
           <div className="fresh-act">
-            <button className="primary" disabled={data.refreshing} onClick={() => void onRefresh()}>
-              {data.refreshing ? '갱신 중…' : '지금 갱신 (약 30초)'}
+            {/* 버튼은 **하나**다(오너 요청 2026-08-29). 전에는 "지금 갱신"과
+                "나무 봉·수급·신용잔고 갱신" 둘이었는데, 무거운 쪽이 끝에 가벼운 쪽 일을
+                그대로 한다(⑤ 어디까지 받았나 다시 세기). 둘을 놓으면 어느 걸 눌러야 하는지
+                매번 고민하게 되고, 가벼운 쪽만 눌러 놓고 "갱신했는데 왜 그대로지"가 된다. */}
+            <button
+              className="primary"
+              disabled={data.heavy.running}
+              onClick={() => void onUpdate()}
+            >
+              {data.heavy.running ? '받아오는 중…' : '데이터 받아오기'}
             </button>
+            <p className="hint">
+              밀린 날짜만큼 따라잡습니다. <b>창을 닫아도 서버에서 계속 돕니다</b> — 다시 열면
+              여기서 이어서 보입니다. 토요일에 누르면 분봉·신용잔고까지 같이 받습니다.
+            </p>
 
-            {/* 파일 16,576개를 훑느라 30초쯤 걸린다 — 돌고는 있는지 보여야 한다. */}
-            {data.refreshing && (
+            {data.heavy.running && (
               <div className="fresh-gauge">
                 <div className="fresh-gauge-head">
-                  <span>{data.progress.phase || '시작하는 중'}</span>
+                  <span>{data.heavy.phase || '시작하는 중'}</span>
                   <span className="mono">
-                    {data.progress.total > 0
-                      ? `${data.progress.done.toLocaleString()} / ${data.progress.total.toLocaleString()}`
+                    {data.heavy.total > 0
+                      ? `${data.heavy.done.toLocaleString()} / ${data.heavy.total.toLocaleString()}`
                       : '준비 중…'}
                   </span>
                 </div>
@@ -156,62 +160,21 @@ export function DataFreshness() {
                     className="fresh-gauge-fill"
                     style={{
                       width:
-                        data.progress.total > 0
-                          ? `${Math.min(100, (data.progress.done / data.progress.total) * 100)}%`
+                        data.heavy.total > 0
+                          ? `${Math.min(100, (data.heavy.done / data.heavy.total) * 100)}%`
                           : '0%',
                     }}
                   />
                 </div>
-                <p className="hint">
-                  창을 닫거나 딴 화면을 봐도 서버에서 계속 돕니다 — 돌아오면 이어서 보입니다.
-                </p>
               </div>
             )}
-            <p className="hint">차트 일봉은 서버를 켤 때마다 자동으로 최신이 됩니다.</p>
 
-            <div className="fresh-heavy">
-              <button
-                type="button"
-                disabled={data.heavy.running}
-                onClick={() => void onHeavyUpdate(false)}
-              >
-                {data.heavy.running ? '무거운 갱신 도는 중…' : '나무 봉·수급·신용잔고 갱신'}
-              </button>
-              <p className="hint">
-                종목마다 따로 호출하는 무거운 갱신입니다(수천 건) — 수 분~수십 분 걸리지만
-                서버 백그라운드로 돌아서 창을 닫아도 계속됩니다. 다시 열면 여기서 이어서 보입니다.
-              </p>
-
-              {data.heavy.running && (
-                <div className="fresh-gauge">
-                  <div className="fresh-gauge-head">
-                    <span>{data.heavy.phase || '시작하는 중'}</span>
-                    <span className="mono">
-                      {data.heavy.total > 0
-                        ? `${data.heavy.done.toLocaleString()} / ${data.heavy.total.toLocaleString()}`
-                        : '준비 중…'}
-                    </span>
-                  </div>
-                  <div className="fresh-gauge-track">
-                    <div
-                      className="fresh-gauge-fill"
-                      style={{
-                        width:
-                          data.heavy.total > 0
-                            ? `${Math.min(100, (data.heavy.done / data.heavy.total) * 100)}%`
-                            : '0%',
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {!data.heavy.running && data.heavy.result?.error != null && (
-                <p className="hint warn">지난 회차 오류: {data.heavy.result.error}</p>
-              )}
-              {!data.heavy.running && data.heavy.result?.skipped != null && (
-                <p className="hint">지난 회차: {data.heavy.result.skipped}</p>
-              )}
+            {!data.heavy.running && data.heavy.result?.error != null && (
+              <p className="hint warn">지난번 오류: {data.heavy.result.error}</p>
+            )}
+            {!data.heavy.running && data.heavy.result?.skipped != null && (
+              <p className="hint">지난번: {data.heavy.result.skipped}</p>
+            )}
 
               <p className="hint">
                 터미널에서 직접 돌리고 싶으면(같은 잠금을 봐서 서로 안 겹칩니다):
