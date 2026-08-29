@@ -1,16 +1,18 @@
 """데이터 증분 갱신 — 매일 장 마감 후 돌려서 수집 데이터를 최신으로 유지한다.
 
-실행: .venv/Scripts/python scripts/update_data.py            # 요일에 맞는 갱신
-      .venv/Scripts/python scripts/update_data.py --minutes  # 분봉·신용잔고까지 강제
+실행: .venv/Scripts/python scripts/update_data.py
 
-무엇을 갱신하나 (요일별):
-  평일  : 오늘 일봉(KIS 멀티시세, 전 종목·KRX/통합/NXT) + 나무 주·월봉(전 종목) + KIS 수급
-          + 거래원 상위5 + DART 공시(이번 달)
-  토요일: 위 + 분봉 9종 + KIS 신용잔고  (1분봉 보관이 약 6주라 주 1회면 안 잃는다)
-  일요일: 아무것도 안 함 (장이 없던 날)
+무엇을 갱신하나 — **늘 전부 받는다. 켜고 끄는 갈래가 없다**(오너 결정 2026-08-29):
+  오늘 일봉(KIS 멀티시세, 전 종목·KRX/통합/NXT)
+  주·월봉 — 일봉으로 만들어 전수 대조 (증권사 호출 0, ADR-0021)
+  분봉 — 1분봉만 받고 굵은 건 만들어 전수 대조 (ADR-0022)
+  KIS 수급 · 거래원 상위5 · DART 공시(이번 달) · KIS 신용잔고
+
+**달력을 안 본다.** 무슨 요일에 켜든 같은 일을 한다. 무엇이 밀렸는지는 파일이 알고 있고,
+각 단계가 "저장된 마지막 날짜 < 시장 마지막 거래일"일 때만 받는다.
 
 ⚠️ **돌리는 시각은 20:05 이후** — 통합·NXT 일봉은 NXT 애프터마켓(~20:00)이 끝나야 확정이고,
-   KIS 멀티시세는 "지금 값"이라 그 전에 부르면 미완성 봉이 들어간다. 시각 관문(`kis_day_ready`)
+   KIS 멀티시세는 "지금 값"이라 그 전에 부르면 미완성 봉이 들어간다. 시각 관문(`kis_bars_ready`)
    에 걸리면 일봉은 예전처럼 나무 경로로 받는다(느리지만 맞다).
    KIS 수급도 조회 가능 시각이 있다 — `OPSQ2001 TIME LIMIT 00:00 ~ 15:40`. 시간에 걸리면
    첫 종목에서 멈추고 요약에 `blocked` 로 남긴다(헛호출 금지).
@@ -57,7 +59,8 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -86,6 +89,7 @@ from src.layer1_data import (  # noqa: E402
     krx_gapfill,
     krx_openapi,
     last_dates,
+    minute_bars,
     parquet_io,
     period_bars,
 )
@@ -106,6 +110,38 @@ DAILY_INTERVALS = [i for i in bars.INTERVALS if i[0] in ("day", "week", "month")
 DAY_INTERVALS = [i for i in bars.INTERVALS if i[0] == "day"]
 PERIOD_INTERVALS = [i for i in bars.INTERVALS if i[0] in ("week", "month")]
 MINUTE_INTERVALS = [i for i in bars.INTERVALS if i[0].startswith("min")]
+
+# 분봉은 **1분봉만 받고 나머지는 만든다** (ADR-0022, 오너 승인 2026-08-29).
+# 굵은 분봉을 다 받으면 파일 49,734개 = 나무 4.5/s = 3.07시간이다. 1분봉만 받으면 20분.
+MIN1_INTERVALS = [i for i in bars.INTERVALS if i[0] == "min1"]
+# 다만 **NXT·통합의 60분봉은 계속 받는다.** 그 09:00/10:00 경계만 나무가 날마다 다르게 줘서
+# (프리마켓을 10시 봉에 합치는 날 97.3%) 규칙으로 못 맞춘다. 파일 1,216개 = 4.5분.
+# 이걸 받으면 묶기 오류가 189 → 5개(0.00013%)로 준다 — 실측 2026-08-29, 378만 봉.
+MIN60_KEEP = [i for i in bars.INTERVALS if i[0] == "min60"]
+MIN60_KEEP_MARKETS = {"UNT", "NXT"}
+# 1분봉으로 만드는 굵기 — 위 둘을 뺀 나머지.
+MADE_WIDTHS = [3, 5, 10, 15, 30, 60, 120, 240]
+# ─────────────────────────────────────────────────────────────────────────────
+# 줄기(스레드)냐 프로세스냐 — **일의 성격으로 정한다**
+# ─────────────────────────────────────────────────────────────────────────────
+# 호출을 **기다리는** 일(나무·KIS·DART)은 줄기로 나눈다. 기다리는 동안 파이썬을 놓기
+# 때문이다. 다만 늘려 봐야 증권사 한도가 벽이라 그 한도에 맞춘 수로 고정한다.
+#
+# **계산하는** 일(봉 묶기)은 줄기로 나눠도 안 빨라진다 — 파이썬이 한 번에 하나씩만
+# 계산하기 때문이다(GIL). 실측 2026-08-29, 굵은 분봉 만들기(전 종목 환산):
+#
+#   줄기   1개 26.7분 · 2개 25.2분 · 4개 32.2분 · 8개 31.5분 · 16개 36.2분  ← 늘수록 손해
+#   프로세스 1개 27.4분 · 2개 15.6분 · 4개 10.8분 · **6개 9.0분** · 8개 10.1분
+#
+# 프로세스는 각자 파이썬을 하나씩 쓰므로 코어만큼 진짜로 나뉜다. 이 기계는 물리 코어 6개
+# (논리 12)이고 **6개에서 바닥**이었다 — 논리 코어까지 다 쓰면 오히려 느려진다.
+#
+# ⚠️ 기계마다 코어 수가 다르므로 **고정하지 않고 그때그때 센다.** `os.cpu_count()` 는
+# 논리 코어를 주므로 반으로 나눠 물리 코어에 맞춘다.
+CORES = os.cpu_count() or 4
+CPU_WORKERS = max(2, min(CORES // 2, 12))  # 계산하는 일 — 프로세스로 나눈다
+FILE_WORKERS = max(4, min(CORES, 16))  # 파일만 읽고쓰는 일 — 줄기로도 나뉜다
+MINUTE_WORKERS = CPU_WORKERS
 
 # 시장의 마지막 거래일을 판정할 기준 종목. 매일 거래되는 대형주면 무엇이든 된다.
 REFERENCE_CODE = "005930"
@@ -200,6 +236,7 @@ def update_bars(
     *,
     progress: ProgressFn | None = None,
     label: str = "나무 봉 증분",
+    only_markets: set[str] | None = None,
 ) -> dict:
     """나무 봉 증분 — 저장된 마지막 날짜 이후만 받아 이어붙인다. 파일이 없으면 전체 수집.
 
@@ -211,6 +248,10 @@ def update_bars(
         (str(r.sCode), ["KRX"] + (["UNT", "NXT"] if str(r.nxt_yn) == "Y" else []))
         for r in master.itertuples()
     ]
+    if only_markets:  # 어떤 굵기는 특정 시장만 받는다 (NXT·통합 60분봉)
+        want = {m.upper() for m in only_markets}
+        jobs = [(code, [m for m in ms if m in want]) for code, ms in jobs]
+        jobs = [(code, ms) for code, ms in jobs if ms]
     totals = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
     lock = threading.Lock()
     done_n = 0
@@ -288,6 +329,10 @@ def update_bars(
 KIS_READY_AFTER = "20:05"  # NXT 애프터마켓 종료(20:00) 뒤 — 통합·NXT 일봉이 그때 확정된다
 KIS_MULTI_POLICY = CallPolicy(min_interval_sec=0.1, max_attempts=5, backoff_base_sec=2.0)
 KIS_CHECK_SAMPLE = 20  # KIS 로 붙인 봉 중 무작위 표본을 나무와 대조한다(자가 검증)
+# 일봉 파일 읽고쓰기 줄기 — 실측 2026-08-29 (300개 표본, 5,134개 환산):
+#   1줄기 54초 · 4줄기 25초 · 8줄기 22초 · 16줄기 23초 → 8 부터 바닥
+# 이건 파일을 기다리는 일이라 줄기로도 나뉜다(파이썬을 놓는다). 코어 수에 맞춘다.
+DAY_FILE_WORKERS = FILE_WORKERS
 
 
 def _kis_multi_client() -> KisClient | None:
@@ -299,12 +344,31 @@ def _kis_multi_client() -> KisClient | None:
     return KisClient(creds, token, policy=KIS_MULTI_POLICY)
 
 
-def kis_day_ready(last_day: str, now: datetime | None = None) -> bool:
-    """오늘이 마지막 거래일이고 20:05 가 지났나 — 그래야 멀티시세 값이 확정 일봉이다."""
+def kis_bars_ready(last_day: str, now: datetime | None = None) -> bool:
+    """마지막 거래일의 KIS 값이 **확정됐나** — 장이 닫혀 있고 그 뒤로 체결이 없었나.
+
+    멀티시세도 주·월봉도 "지금 값"을 준다. 장중에 부르면 진행 중인 값이 확정 봉으로
+    들어간다. 반대로 장이 닫힌 뒤라면 **켠 날이 언제든** 마지막 거래일 값을 그대로 준다.
+
+    맞다고 보는 때:
+      - 오늘이 마지막 거래일이고 20:05 가 지났다 (NXT 애프터마켓 종료 뒤)
+      - 오늘이 그 뒤 날이고, 주말이거나 장 열리기(08:00) 전이다
+
+    ⚠️ 전에는 ①-0 만 **"오늘이 마지막 거래일이고 20:05 뒤"** 라는 더 좁은 판정을 따로
+    썼다. 그건 매일 저녁 정해진 시각에 돌리는 걸 전제한 조건이라, 오너처럼 불규칙하게
+    켜면(토요일 새벽, 2주 뒤 아침) **한 번도 안 돌았다.**
+    실측 2026-08-29 04:49(토): 멀티시세가 준 값 = 우리 금요일 일봉, 3종목 3/3 완전 일치.
+    같은 상황을 이 함수는 이미 True 로 보고 있었다 — 판정이 둘로 갈려 있던 게 문제였다.
+    """
     now = now or datetime.now()
-    if not last_day or now.strftime("%Y%m%d") != last_day:
+    today = now.strftime("%Y%m%d")
+    if not last_day:
         return False
-    return now.strftime("%H:%M") >= KIS_READY_AFTER
+    if today == last_day:
+        return now.strftime("%H:%M") >= KIS_READY_AFTER
+    if today > last_day:
+        return now.weekday() >= 5 or now.strftime("%H:%M") < "08:00"
+    return False
 
 
 def update_day_bars_kis(last_day: str) -> dict:
@@ -319,8 +383,8 @@ def update_day_bars_kis(last_day: str) -> dict:
 
     자가 검증: 붙인 것 중 표본 20종목을 나무 일봉과 대조해 다른 개수를 요약에 남긴다.
     """
-    if not kis_day_ready(last_day):
-        return {"skipped": f"오늘({last_day})이 거래일이고 {KIS_READY_AFTER} 이후여야 한다"}
+    if not kis_bars_ready(last_day):
+        return {"skipped": f"마지막 거래일({last_day}) 값이 아직 확정 아님 — 장중이거나 20:05 전"}
     client = _kis_multi_client()
     if client is None:
         return {"skipped": "KIS 실전 키 없음"}
@@ -342,6 +406,7 @@ def update_day_bars_kis(last_day: str) -> dict:
     }
     recollect: set[str] = set()
     appended: list[tuple[str, str]] = []
+    lock = threading.Lock()
     for market in ("krx", "unt", "nxt"):
         targets = [
             code
@@ -357,22 +422,40 @@ def update_day_bars_kis(last_day: str) -> dict:
             out["error"] = f"{market}: {e}"
             break
         out["called"] += -(-len(targets) // kis_snapshot.CHUNK)
-        for code in targets:
+
+        # 여기부터는 **호출이 아니라 파일 일**이다 — 종목마다 일봉 파일을 통째로 읽어
+        # 한 줄 붙이고 다시 쓴다. 한 줄기로 돌면 5,134개에 54초가 든다(실측 2026-08-29).
+        # 파일 입출력은 파이썬이 서로 자리를 안 뺏으므로(GIL 을 놓는다) 줄기를 늘리면
+        # 실제로 빨라진다. 계산 단계(주·월봉 만들기)와 정반대다.
+        #   1줄기 54초 · 4줄기 25초 · 8줄기 22초 · 16줄기 23초  → 8 에서 더 안 준다
+        # 시장·응답을 기본값으로 묶어 둔다 — 반복문 변수를 그냥 쓰면 다음 시장 값으로
+        # 바뀔 수 있다(여기선 매 시장마다 다 끝내고 넘어가지만, 묶어 두는 게 안전하다).
+        def one(code: str, market: str = market, snap: dict = snap) -> None:
             hit = snap.get(code)
             if not hit or hit["row"] is None:
-                out["left_to_namuh"] += 1
-                continue
+                with lock:
+                    out["left_to_namuh"] += 1
+                return
             path = bars.OUT_DIR / market / "day" / f"{code}.parquet"
             old = parquet_io.read(path)
             if old is None:
-                out["left_to_namuh"] += 1  # 저장본이 깨졌다 — 나무가 전체를 다시 받는다
-                continue
+                with lock:
+                    out["left_to_namuh"] += 1  # 저장본이 깨졌다 — 나무가 전체를 다시 받는다
+                return
             if market == "krx" and _split_detected(old, hit["prdy_clpr"]):
-                recollect.add(code)  # 과거가 접혔다 — 나무에서 전체 재수집
-                continue
+                with lock:
+                    recollect.add(code)  # 과거가 접혔다 — 나무에서 전체 재수집
+                return
             new = pd.DataFrame([hit["row"]], columns=kis_snapshot.NAMUH_DAY_COLS)
-            out["added"] += merge_save(path, old, new, ["bsop_date"])
-            appended.append((market, code))
+            grown = merge_save(path, old, new, ["bsop_date"])
+            with lock:
+                out["added"] += grown
+                appended.append((market, code))
+
+        # 시장 하나를 끝내고 다음으로 간다 — 다음 시장의 대상 고르기가 `recollect` 를
+        # 보기 때문에, 여기서 다 끝나 있어야 한다.
+        with ThreadPoolExecutor(max_workers=DAY_FILE_WORKERS) as pool:
+            list(pool.map(one, targets))
 
     for code in sorted(recollect):
         _recollect_all(code, jobs[code])
@@ -443,22 +526,6 @@ KIS_PERIOD_POLICY = CallPolicy(
     min_interval_sec=0.3, max_attempts=5, backoff_base_sec=2.0
 )  # 5줄기 → 초당 ~16 (20이면 EGW00201 거절이 섞인다, 실측)
 _KIS_LOCAL = threading.local()
-
-
-def kis_bars_ready(last_day: str, now: datetime | None = None) -> bool:
-    """KIS 봉이 확정값인 시각인가 — 오늘이 거래일이면 20:05 뒤, 다음날이면 장 열리기(08:00) 전이나 주말.
-
-    KIS 주·월봉은 "지금까지" 봉이라 장중에 부르면 오늘 체결이 섞인 진행 봉이 온다.
-    """
-    now = now or datetime.now()
-    today = now.strftime("%Y%m%d")
-    if not last_day:
-        return False
-    if today == last_day:
-        return now.strftime("%H:%M") >= KIS_READY_AFTER
-    if today > last_day:
-        return now.weekday() >= 5 or now.strftime("%H:%M") < "08:00"
-    return False
 
 
 def _kis_period_client(creds, token) -> KisClient:
@@ -680,7 +747,10 @@ def update_period_bars_from_daily(
     """주·월봉의 **아직 끝나지 않은 봉**을 일봉으로 채우고, **그 자리에서 전수 대조까지** 한다.
 
     증권사 호출 0. 저장된 마지막 봉이 든 주(달)부터 다시 만든다 — 그 봉은 받을 당시
-    진행 중이었을 수 있어서다. **그보다 과거는 한 줄도 안 건드린다.**
+    진행 중이었을 수 있어서다. 그보다 과거는 **어긋났을 때만** 일봉으로 만든 값으로 덮는다.
+
+    **프로세스로 나눈다.** 봉을 묶는 건 계산이라 줄기로는 안 빨라진다 — 실측 2026-08-28:
+    1줄기 241초 · 4줄기 330초 · 16줄기 340초. 일감은 `period_bars.build_one` 에 있다.
 
     ## 왜 채우기와 대조를 한 단계로 합쳤나
 
@@ -692,132 +762,125 @@ def update_period_bars_from_daily(
     전엔 만든 값이 저장본과 같아도 무조건 다시 썼다. 그러면 파일 11,026개의 고친 시각이
     전부 바뀌어 **`last_dates` 쪽지가 통째로 무효가 된다.** 그래서 뒤따르는 '어디까지 받았나'
     갱신이 0.4초에서 **153.9초**로 되돌아갔다(실측). 값이 같으면 손대지 않는다.
-
-    저장본이 아예 없는 종목은 손대지 않는다 — 처음 수집은 예전처럼 나무가 맡는다.
     """
-    done: set[tuple[str, str, str]] = set()
     master = bars.load_master("m_new_stock")
     jobs = [
-        (str(r.sCode), ["krx"] + (["unt", "nxt"] if str(r.nxt_yn) == "Y" else []))
+        (str(bars.OUT_DIR), str(r.sCode), ["krx"] + (["unt", "nxt"] if str(r.nxt_yn) == "Y" else []))
         for r in master.itertuples()
     ]
-    totals = {
-        "made": 0,
-        "written": 0,
-        "unchanged": 0,
-        "cached": 0,
-        "fixed": 0,
-        "no_stored": 0,
-        "errors": 0,
-        "checked_bars": 0,
-        "mismatch_units": 0,
-        "mismatch_bars": 0,
-    }
+    keys = (
+        "made", "written", "unchanged", "cached", "fixed", "no_stored", "errors",
+        "checked_bars", "mismatch_units", "mismatch_bars",
+    )
+    totals = dict.fromkeys(keys, 0)
+    done: set[tuple[str, str, str]] = set()
     worst: list[tuple[str, int]] = []
-    lock = threading.Lock()
-    done_n = 0
-    cols = ["bsop_date", *period_bars.VALUE_COLUMNS]
 
-    def work(job: tuple[str, list[str]]) -> None:
-        code, markets = job
-        acc = dict.fromkeys(totals, 0)
-        local: list[tuple[str, str, str]] = []
-        found: list[tuple[str, int]] = []
-        for market in markets:
-            day_path = bars.OUT_DIR / market / "day" / f"{code}.parquet"
-            if not day_path.exists():
-                continue
-            day = None
-            for folder in ("week", "month"):
-                path = bars.OUT_DIR / market / folder / f"{code}.parquet"
-                since = last_date_of(path, "bsop_date")
-                if not since:
-                    acc["no_stored"] += 1  # 처음 수집은 나무 몫으로 남긴다
-                    continue
-                # 지난번에 본 두 파일(일봉·주월봉)의 지문을 쪽지와 맞춰 본다.
-                # **둘 다 그대로면 만들 값도, 대조 결과도 그대로다** — 파일을 열지도,
-                # 묶지도, 견주지도 않고 지난 결과를 그대로 쓴다(실측 240초 → 2.8초).
-                #
-                # 이래서 **켜는 간격과 상관없이 늘 전 종목이 대조돼 있다.** 하루 만에 켜든
-                # 2주 만에 켜든, 그동안 바뀐 것만 다시 보면 나머지는 지난 답이 여전히 맞다.
-                stamp = _stamp(day_path, path)
-                seen = _seen_before(path)
-                if stamp and seen and seen[0] == stamp:
-                    # 두 파일 다 지난번 그대로다 — 만들 값도, 대조 결과도 그대로다.
-                    acc["cached"] += 1
-                    if seen[1]:
-                        acc["mismatch_units"] += 1
-                        acc["mismatch_bars"] += int(seen[1])
-                    # **이것도 "이번 회차에 끝난 것"으로 표시한다.** 안 그러면 뒤따르는
-                    # ①-1b 가 "아직 안 채워졌다"고 보고 나무에 다시 물었다 — 실측
-                    # 2026-08-29: 5,513콜·1,807초(30분)를 통째로 헛돌았다. 지문이 같다는
-                    # 건 일봉도 주·월봉도 그대로라는 뜻이라, 받아 봐야 같은 값이다.
-                    local.append((market, code, folder))
-                    continue
-                try:
-                    if day is None:
-                        # 봉을 만들 때 쓰는 열만 읽는다 — 14개 중 7개면 된다.
-                        day = pd.read_parquet(day_path, columns=cols)
-                    stored = pd.read_parquet(path)
-                    key = period_bars.period_key(
-                        pd.Series([_day_of(since, folder)]), folder
-                    ).iloc[0]
-                    fresh = period_bars.synthesize(day, folder, since_key=key)
-                    if not fresh.empty:
-                        acc["made"] += len(fresh)
-                        local.append((market, code, folder))
-                    # 만든 봉이 저장본에 **이미 같은 값으로** 있으면 아무것도 안 한다.
-                    # 보통은 지난 회차에 넣어 둔 그 값이라 여기서 거의 다 끝난다.
-                    # 이 지름길이 없으면 종목마다 1,900줄짜리 표를 다시 이어 붙이고
-                    # 정렬한 뒤 통째로 견주게 된다 — 그게 이 단계의 340초였다(실측).
-                    if _already_there(stored, fresh):
-                        acc["unchanged"] += 1
-                        joined = stored
-                    else:
-                        joined = period_bars.graft(stored, fresh)
-                        parquet_io.save(joined, path)
-                        acc["written"] += 1
-                    # 어긋난 과거 봉은 **일봉으로 만든 값으로 덮는다**(오너 승인 2026-08-29).
-                    # 근거: KIS 로 심판을 본 14건이 전부 "일봉이 맞고 나무 주봉이 틀리다"였고,
-                    # 나무에서 다시 받아도 같은 값이 온다(전량 재수집으로 확인).
-                    bad, made_all = period_bars.disagreements(
-                        day, joined[cols], folder, VERIFY_SINCE
-                    )
-                    acc["checked_bars"] += len(joined)
-                    if len(bad):
-                        acc["mismatch_units"] += 1
-                        acc["mismatch_bars"] += len(bad)
-                        found.append((f"{market}/{code}/{folder}", len(bad)))
-                        joined = period_bars.graft(
-                            joined, period_bars.rows_for(bad, made_all, folder)
-                        )
-                        parquet_io.save(joined, path)
-                        acc["fixed"] += len(bad)
-                    _remember(path, _stamp(day_path, path), 0)
-                except (OSError, ValueError, KeyError):
-                    acc["errors"] += 1
-        nonlocal done_n
-        with lock:
-            for k, v in acc.items():
-                totals[k] += v
-            done.update(local)
-            worst.extend(found)
-            done_n += 1
-            n2 = done_n
-        if progress and (n2 % 200 == 0 or n2 == len(jobs)):
-            progress(label, n2, len(jobs))
+    def gather(got: dict, n: int) -> None:
+        for k in totals:
+            totals[k] += got[k]
+        done.update(tuple(x) for x in got["done"])
+        worst.extend(got["worst"])
+        _STATE.update(got["stamps"])
+        if progress and (n % 200 == 0 or n == len(jobs)):
+            progress(label, n, len(jobs))
 
-    with ThreadPoolExecutor(max_workers=PERIOD_WORKERS) as pool:
-        list(pool.map(work, jobs))
-    out = dict(totals)
-    out["worst"] = [f"{k}:{n}" for k, n in sorted(worst, key=lambda x: -x[1])[:10]]
-    return out, done
+    try:
+        with ProcessPoolExecutor(
+            max_workers=CPU_WORKERS,
+            initializer=period_bars.start_worker,
+            initargs=(_STATE, VERIFY_SINCE),
+        ) as pool:
+            for n, got in enumerate(pool.map(period_bars.build_one, jobs, chunksize=16), 1):
+                gather(got, n)
+    except (BrokenProcessPool, OSError, EOFError, PermissionError) as e:
+        # 프로세스를 못 띄우는 자리가 있다 — 그때는 한 줄기로 돈다(느리지만 답은 같다).
+        totals.update(dict.fromkeys(totals, 0))
+        done.clear()
+        worst.clear()
+        period_bars.start_worker(_STATE, VERIFY_SINCE)
+        for n, job in enumerate(jobs, 1):
+            gather(period_bars.build_one(job), n)
+        totals["fell_back"] = f"{type(e).__name__}: 프로세스 대신 한 줄기로 돌렸다"
+    worst.sort(key=lambda x: -x[1])
+    return {**totals, "worst": worst[:10]}, done
 
 
-# 주·월봉마다 "지난번에 본 두 파일의 지문 + 그때 어긋난 봉 수"를 적어 둔다.
-#   {주월봉 경로: [[일봉 고친시각, 일봉 크기, 주월봉 고친시각, 주월봉 크기], 어긋난 봉 수]}
-_STATE: dict[str, list] = {}
-_STATE_LOCK = threading.Lock()
+# ─────────────────────────────────────────────────────────────────────────────
+# 굵은 분봉을 1분봉으로 만들기 (ADR-0022) — 증권사 호출 0
+# ─────────────────────────────────────────────────────────────────────────────
+MINUTE_STATE = ROOT / "data" / "derived" / "_minute_state.json"
+_MIN_STATE: dict = {}
+
+
+def load_minute_state() -> None:
+    global _MIN_STATE
+    try:
+        _MIN_STATE = json.loads(MINUTE_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _MIN_STATE = {}
+
+
+def save_minute_state() -> None:
+    MINUTE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MINUTE_STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_MIN_STATE, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(MINUTE_STATE)
+
+
+def update_minute_bars_from_one(last_day: str, progress: ProgressFn | None = None) -> dict:
+    """굵은 분봉을 1분봉으로 만들고 **전 종목 대조**한다 — 증권사 호출 0 (ADR-0022).
+
+    저장본의 과거는 손대지 않는다. 저장된 마지막 봉이 든 **날부터** 다시 만들어 덮고,
+    **덮기 전에** 대조한다(덮고 보면 저장본이 곧 만든 값이라 늘 0 이 나온다).
+
+    **프로세스로 나눈다.** 실측 2026-08-29(전 종목 환산): 줄기 1개 26.7분 · 2개 25.2분 ·
+    16개 36.2분 / 프로세스 1개 27.4분 · 2개 15.6분 · 4개 10.8분 · **6개 9.0분** · 8개 10.1분.
+    일감은 `minute_bars.build_one` 에 있다.
+
+    NXT·통합의 60분봉은 여기서 안 만든다 — 나무에서 직접 받는다(`MIN60_KEEP`).
+    """
+    master = bars.load_master("m_new_stock")
+    jobs = []
+    for r in master.itertuples():
+        code = str(r.sCode)
+        for market in ["krx"] + (["unt", "nxt"] if str(r.nxt_yn) == "Y" else []):
+            widths = [
+                w for w in MADE_WIDTHS if not (w == 60 and market.upper() in MIN60_KEEP_MARKETS)
+            ]
+            jobs.append((str(bars.OUT_DIR), market, code, widths))
+    totals = dict.fromkeys(
+        ("made", "written", "unchanged", "cached", "no_stored", "errors", "checked", "bad"), 0
+    )
+    worst: list[tuple[str, int]] = []
+
+    def gather(got: dict, n: int) -> None:
+        for k in totals:
+            totals[k] += got[k]
+        worst.extend(got["worst"])
+        _MIN_STATE.update(got["stamps"])
+        if progress and (n % 100 == 0 or n == len(jobs)):
+            progress("②-2 굵은 분봉 만들고 대조", n, len(jobs))
+
+    try:
+        with ProcessPoolExecutor(
+            max_workers=CPU_WORKERS,
+            initializer=minute_bars.start_worker,
+            initargs=(_MIN_STATE,),
+        ) as pool:
+            for n, got in enumerate(pool.map(minute_bars.build_one, jobs, chunksize=8), 1):
+                gather(got, n)
+    except (BrokenProcessPool, OSError, EOFError, PermissionError) as e:
+        # 프로세스를 못 띄우는 자리가 있다(윈도우는 프로세스가 뜰 때 `__main__` 을 다시
+        # 읽는데, 그게 파일이 아닌 경우 등). 그때는 한 줄기로 돈다 — 느리지만 답은 같다.
+        totals.update(dict.fromkeys(totals, 0))
+        worst.clear()
+        minute_bars.start_worker(_MIN_STATE)
+        for n, job in enumerate(jobs, 1):
+            gather(minute_bars.build_one(job), n)
+        totals["fell_back"] = f"{type(e).__name__}: 프로세스 대신 한 줄기로 돌렸다"
+    worst.sort(key=lambda x: -x[1])
+    return {**totals, "worst": worst[:10]}
 
 
 def load_period_state() -> None:
@@ -833,48 +896,6 @@ def save_period_state() -> None:
     tmp = VERIFY_STATE.with_suffix(".tmp")
     tmp.write_text(json.dumps(_STATE, ensure_ascii=False), encoding="utf-8")
     tmp.replace(VERIFY_STATE)
-
-
-def _stamp(day_path: Path, path: Path) -> list | None:
-    """두 파일의 지문 — 고친 시각과 크기. 둘 다 그대로면 결과도 그대로다."""
-    try:
-        a, b = day_path.stat(), path.stat()
-    except OSError:
-        return None
-    return [a.st_mtime_ns, a.st_size, b.st_mtime_ns, b.st_size]
-
-
-def _seen_before(path: Path) -> list | None:
-    return _STATE.get(str(path))
-
-
-def _remember(path: Path, stamp: list | None, bad: int) -> None:
-    if stamp is None:
-        return
-    with _STATE_LOCK:
-        _STATE[str(path)] = [stamp, int(bad)]
-
-
-def _already_there(stored: pd.DataFrame, made: pd.DataFrame) -> bool:
-    """만든 봉이 저장본에 이미 같은 값으로 들어 있나 — **바뀐 줄만 본다.**
-
-    보통 새로 만드는 건 진행 중인 봉 한 줄뿐이다. 그 한 줄만 견주면 되는데 표를 통째로
-    다시 만들어 견주면 종목마다 1,900줄을 이어 붙이고 정렬하게 된다.
-    """
-    if made.empty:
-        return True
-    dates = set(made["bsop_date"].astype(str))
-    hit = stored[stored["bsop_date"].astype(str).isin(dates)]
-    if len(hit) != len(made):
-        return False
-    left = made.set_index("bsop_date").sort_index().astype(str)
-    right = hit.set_index("bsop_date").sort_index()[left.columns].astype(str)
-    return left.equals(right)
-
-
-def _day_of(stored_date: str, folder: str) -> str:
-    """월봉 날짜(`YYYYMM`)를 그 달 1일로 펴서 주·월 공통으로 다룬다."""
-    return stored_date + "01" if folder == "month" and len(stored_date) == 6 else stored_date
 
 
 def _bars_since(market: str, code: str, gubun: str, xtick: str | None, since: str) -> pd.DataFrame:
@@ -1094,7 +1115,30 @@ def drop_lock() -> None:
     LOCK_PATH.unlink(missing_ok=True)
 
 
-def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = None) -> dict:
+def _kis_stream(last_day: str) -> dict:
+    """수급 → 거래원 → 신용잔고를 **한 갈래로 묶어** 나무 갈래와 같이 돌린다.
+
+    셋 다 KIS 서버라 서로 한도를 나눠 쓰므로 이 안에서는 차례로 간다. 대신 나무 갈래와는
+    한도가 따로 놀아 통째로 겹칠 수 있다.
+
+    하나가 죽어도 나머지를 버리지 않는다 — 실패도 값으로 담아 돌려준다.
+    """
+    out: dict = {}
+    for name, run in (
+        ("supply", lambda: update_kis(
+            supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day)),
+        ("members", lambda: {"rows": members.snapshot_all()}),
+        ("credit", lambda: update_kis(
+            credit, credit.OUT_DIR, "deal_date", "신용잔고", last_day)),
+    ):
+        try:
+            out[name] = run()
+        except Exception as e:  # noqa: BLE001 — 한 단계 때문에 회차를 버리지 않는다
+            out[name] = {"error": f"{type(e).__name__}: {e}"}
+    return out
+
+
+def run_update(*, progress: ProgressFn | None = None) -> dict:
     """갱신 전체 한 회차 — CLI(`main`)와 API(`/api/data/update`)가 **같은 함수**를 쓴다.
 
     잠금 파일(`LOCK_PATH`)로 겹침을 막는다 — 터미널에서 돌리든 웹 버튼으로 돌리든 같은
@@ -1105,15 +1149,12 @@ def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = Non
     실패해도 `summary`에 담아 로그로 남기고 **위로 다시 던진다** — 호출부(CLI/API)가
     각자 방식으로 사람에게 알린다.
     """
-    weekday = datetime.now().weekday()  # 월=0 … 일=6
-
-    if weekday == 6 and not force_minutes:
-        return {"skipped": "일요일 — 갱신할 게 없다."}
     blocked = take_lock()
     if blocked:
         return {"skipped": blocked}
     load_marks()  # 지난 회차의 '마지막 날짜' 쪽지 — 안 바뀐 파일은 다시 안 읽는다
-    load_period_state()  # 지난번 대조 결과 — 파일이 그대로면 다시 안 본다
+    load_period_state()  # 지난번 주·월봉 대조 결과 — 파일이 그대로면 다시 안 본다
+    load_minute_state()  # 지난번 분봉 대조 결과
 
     # 단계마다 걸린 시간(초)을 재서 요약에 남긴다 — 어디가 오래 걸리는지 로그만 보고 안다.
     # 전에는 회차 전체 시간만 남아서 "수급이 느린 건가 봉이 느린 건가"를 알 수 없었다.
@@ -1133,13 +1174,16 @@ def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = Non
         if progress:
             progress(msg, done, total)
 
-    do_minutes = force_minutes or weekday == 5  # 토요일
-    summary: dict = {"minutes_included": do_minutes}
+    # **분봉은 늘 받는다** (오너 결정 2026-08-29). 켜고 끄는 갈래를 없앴다 —
+    # 요일로 정하던 것도, 손으로 `--minutes` 를 붙이던 것도 다 없다.
+    # 1분봉만 받고 굵은 건 만들기 때문에(ADR-0022) 늘 받아도 감당이 된다.
+    summary: dict = {"minutes_included": True}
     # DART 는 KIS·나무와 **다른 서버**라 한도가 따로 논다. 뒤에서 같이 돌려 두고 마지막에
     # 결과만 거둔다 — 혼자 60초를 먹던 단계가 공짜가 된다(실측 2026-08-28).
     # 중간에 어디서 죽더라도 반드시 닫히게 try 밖에서 만든다.
     dart_pool = ThreadPoolExecutor(max_workers=1)
     dart_future = dart_pool.submit(update_disclosures)
+    kis_pool = ThreadPoolExecutor(max_workers=1)
     try:
         last_day = market_last_trading_day()
         step(f"⓪ 시장 마지막 거래일: {last_day or '(판정 실패 — 전부 확인한다)'}")
@@ -1149,6 +1193,14 @@ def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = Non
 
         step("①-0 오늘 일봉 (KIS 멀티시세, 30종목/콜)...")
         summary["bars_day_kis"] = update_day_bars_kis(last_day)
+
+        # 여기서부터 **나무 갈래와 KIS 갈래를 같이 돌린다.**
+        # 두 증권사는 한도가 따로 논다(나무 초당 4.5 · KIS 초당 20). 차례로 돌리면 한쪽이
+        # 부를 동안 다른 쪽은 놀고 있다. 실측 2026-08-29: KIS 쪽 합이 약 7.5분인데
+        # 나무 쪽이 26분이라, 겹치면 **KIS 시간이 통째로 사라진다.**
+        # DART 는 이미 같은 방식으로 앞에서 띄워 뒀다.
+        kis_future = kis_pool.submit(_kis_stream, last_day)
+
         # 일봉을 먼저 최신으로 만든 뒤에야 주·월봉을 그 일봉으로 만들 수 있다.
         step("① 나무 일봉 증분 — KIS 가 못 채운 것만...")
         summary["bars_daily"] = update_bars(
@@ -1162,28 +1214,32 @@ def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = Non
         summary["bars_period_namuh"] = update_bars(
             PERIOD_INTERVALS, last_day, made_done, progress=progress, label="①-1b 나무 주·월봉"
         )
-        if do_minutes:
-            step("② 나무 분봉 증분...")
-            summary["bars_minutes"] = update_bars(
-                MINUTE_INTERVALS, last_day, progress=progress, label="② 나무 분봉 증분"
-            )
-        step("③ KIS 수급 증분...")
-        summary["supply"] = update_kis(
-            supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day, progress=progress
+        # 분봉은 **1분봉만 받고 나머지는 만든다** (ADR-0022, 오너 승인 2026-08-29).
+        # 전부 받으면 파일 49,734개 · 3.07시간. 이렇게 하면 6,742콜 · 약 25분이다.
+        step("② 나무 1분봉 증분...")
+        summary["bars_min1"] = update_bars(
+            MIN1_INTERVALS, last_day, progress=progress, label="② 나무 1분봉 증분"
         )
-        step("③-2 거래원 당일 상위5 (전 종목)...")
-        summary["members"] = {"rows": members.snapshot_all()}
+        step("②-1 NXT·통합 60분봉 — 이 굵기만 직접 받는다...")
+        summary["bars_min60_kept"] = update_bars(
+            MIN60_KEEP,
+            last_day,
+            progress=progress,
+            label="②-1 NXT·통합 60분봉",
+            only_markets=MIN60_KEEP_MARKETS,
+        )
+        step("②-2 굵은 분봉 — 1분봉으로 만들고 전수 대조 (호출 0)...")
+        summary["bars_minutes_made"] = update_minute_bars_from_one(
+            last_day, progress=progress
+        )
+        step("③ KIS 수급·거래원·신용잔고 — 뒤에서 돌던 것 거두기...")
+        summary.update(kis_future.result(timeout=3600))
         step("③-3 DART 공시 — 뒤에서 돌던 것 거두기...")
         try:
             summary["disclosures"] = dart_future.result(timeout=600)
         except Exception as e:  # 공시 하나 때문에 나머지 갱신을 버리지 않는다
             summary["disclosures"] = {"error": f"{type(e).__name__}: {e}"}
 
-        if do_minutes:
-            step("④ KIS 신용잔고 증분...")
-            summary["credit"] = update_kis(
-                credit, credit.OUT_DIR, "deal_date", "신용잔고", last_day, progress=progress
-            )
         step("⑤ 어디까지 받았나 다시 세기...")
         summary["freshness"] = freshness.refresh_marks()
         summary["ok"] = True
@@ -1193,10 +1249,12 @@ def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = Non
         raise
     finally:
         dart_pool.shutdown(wait=False)
+        kis_pool.shutdown(wait=False)
         close_stage()
         summary["timing_sec"] = timing
         save_marks()
         save_period_state()
+        save_minute_state()
         log_line(**summary)
         drop_lock()  # 내 잠금일 때만 — 남의 것을 지우면 둘이 겹쳐 돈다
 
@@ -1205,9 +1263,8 @@ def run_update(*, force_minutes: bool = False, progress: ProgressFn | None = Non
 
 
 def main() -> int:
-    force_minutes = "--minutes" in sys.argv
     try:
-        summary = run_update(force_minutes=force_minutes)
+        summary = run_update()
     except Exception:
         return 1
     if summary.get("skipped"):
