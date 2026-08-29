@@ -42,6 +42,7 @@ from src.layer4_execution.brokers.kis.client import (  # noqa: E402
 OUT_DIR = ROOT / "data" / "derived" / "supply"
 STATE_PATH = OUT_DIR / "_state.json"
 TOKEN_CACHE = ROOT / "kis_token.json"
+_TOKEN_LOCK = threading.Lock()  # 토큰 발급은 1분에 1회 — 줄기들이 겹쳐 부르면 403 이 난다
 
 SUPPLY_PATH = "/uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily"
 SUPPLY_TR = "FHPTJ04160001"
@@ -162,7 +163,13 @@ def make_client_parts() -> tuple[KisCredentials, object]:
     )
     if creds.env != "real":
         raise SystemExit("이 TR 은 실전(real) 전용이다. .env 의 KIS_ENV=real 확인.")
-    return creds, get_access_token(creds, cache_path=TOKEN_CACHE)
+    # **한 줄기씩 줄 세워 받는다.** KIS 토큰 발급은 **1분에 1회**다. 줄기 5개가 동시에
+    # 시작하면 캐시가 아직 비어 있어 다섯이 한꺼번에 발급을 요청하고, 하나만 성공하고
+    # 나머지는 403(EGW00133)으로 죽는다 — 실제 사고 2026-08-29 04:26, 수급 단계가
+    # 0.9초 만에 회차째 끝났다.
+    # 앞선 줄기가 받아 캐시에 적어 두면 뒤 줄기들은 발급 없이 그걸 읽는다.
+    with _TOKEN_LOCK:
+        return creds, get_access_token(creds, cache_path=TOKEN_CACHE)
 
 
 def make_client() -> tuple[KisClient, object]:
