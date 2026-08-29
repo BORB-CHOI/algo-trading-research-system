@@ -33,8 +33,13 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+
+from . import parquet_io
 
 # 나무 수집본 파일의 열 차례 — 새로 만든 봉도 이 모양이어야 이어붙일 수 있다.
 COLUMNS = [
@@ -54,19 +59,57 @@ COLUMNS = [
     "fcam_mod_cls_code",
 ]
 
-# 주·월봉에는 값이 안 오는 열들 — 나무가 빈 문자열로 준다. 그대로 맞춘다.
+# 주·월봉에서 **정말로** 비어 있는 열 — 나무 수집본도 빈 문자열이다.
+#
+# ⚠️ `stck_sdpr`(기준가)은 나무가 값을 주는데도 여기 남겨 둔다. 나무의 **일봉 기준가
+# 자체가 깨져 있어서** 옮기면 깨진 값을 퍼뜨리게 된다. 실측 2026-08-29 (일봉 515,640줄):
+#   기준가가 0                          20.4%
+#   0 아닌 것 중 전일 종가와 같음         74.3%   ← 나머지는 안 맞는다
+#   0 아닌데 종가와 규모가 다름(수정주가) 11.2%   ← 42,214 옆에 종가 10,791 같은 줄
+# 주봉 쪽도 어긋난 것의 95%가 "나무가 0을 준" 경우였다. 재현할 규칙이 없다.
 BLANK_COLUMNS = [
     "bsop_time",
-    "stck_sdpr",
-    "flng_cls_code",
-    "prtt_rate",
-    "news_cnt",
     "updownmark",
-    "fcam_mod_cls_code",
 ]
 
-# 값을 견줄 때 쓰는 열. 나머지는 빈 칸이라 견줄 게 없다.
+# 값을 견줄 때 쓰는 열. 여기가 다르면 봉이 다른 것이다.
 VALUE_COLUMNS = ["stck_oprc", "stck_hgpr", "stck_lwpr", "stck_prpr", "vol", "tr_pbmn"]
+
+# 일봉에서 **그대로 만들어 낼 수 있는** 열. 규칙은 나무 수집본과 맞춰 찾았다 —
+# 실측 2026-08-29, 120종목 · 주봉 85,792봉 · 월봉 20,208봉 (연말 걸친 주·양 끝 제외):
+#
+# | 열 | 규칙 | 주봉 | 월봉 | 진짜 불일치 |
+# |---|---|---|---|---|
+# | flng_cls_code (락 구분)     | 그 기간 최대값 | 91.25% | 77.78% | **0건** |
+# | prtt_rate (락 비율)         | 그 기간 최대값 | 99.97% | 97.47% | **0건** |
+# | fcam_mod_cls_code (액면변경)| 그 기간 최대값 | 100.0% | 97.57% | **0건** |
+# | news_cnt (뉴스 건수)        | 그 기간 합     | 98.94% | 100.0% | 주봉 913건(1.06%) |
+#
+# 일치율이 100% 가 아닌 건 **전부 "나무가 0 을 준" 경우**다(락 구분 7,509건 등).
+# 우리 값은 일봉에 실제로 있는 값이라 나무의 0 보다 맞다. 뉴스 건수만 주봉에서
+# 1.06% 가 진짜로 다른데, **월봉에서는 합이 정확히 맞아** 규칙은 합이 맞다고 본다
+# (나무 주봉 쪽 잡음). 예: 028300 2022-05-30 주 — 일봉 6+16+7+4=33 인데 나무는 13.
+#
+# ⚠️ 이 열들을 비워 두면 **다시는 안 채워진다**(①-1b 는 저장본 없는 종목만 받는다).
+# 실측: 주봉 0.15%·월봉 1.07% 가 이미 비어 있었고, 월봉은 한 종목에서 31줄까지 갔다.
+# `stck_sdpr`(기준가)도 만든다 — **그 기간 첫 일봉의 기준가**.
+# 처음엔 "나무 데이터가 깨졌다"고 보고 비우려 했는데, 오너 지적으로 다시 재니 틀렸다
+# (실측 2026-08-29):
+#   · 기준가가 0 인 건 **옛 구간 결측**이다 — 1990년대 93.8% · 2000년대 53.7% ·
+#     2010년대 0.0% · 2020년대 0.3%. 깨진 게 아니라 나무가 옛날 걸 안 준 것이다.
+#   · 갭과는 무관하다. 기준가는 정의상 전일 종가라, 갭은 기준가와 **시가** 사이에 생긴다.
+#   · 나무가 값을 준 2015년 이후 주봉 40,635봉에 이 규칙을 대면 **97.24%**,
+#     그리고 **145종목 중 143종목이 정확히 100%** 다.
+#   · 안 맞는 2종목(096690·088800)은 **일봉 안에서** 기준가와 OHLC 의 척도가 어긋나 있다
+#     (기준가 13,481 옆에 종가 12,060). 그건 우리가 만드는 문제가 아니다.
+# 주봉엔 나무가 최근에도 34.6% 를 0 으로 준다 — 그 자리에 우리 값이 들어가면 더 낫다.
+EXTRA_RULES = {
+    "stck_sdpr": "first",
+    "flng_cls_code": "max",
+    "prtt_rate": "max",
+    "fcam_mod_cls_code": "max",
+    "news_cnt": "sum",
+}
 
 
 def period_key(dates: pd.Series, folder: str) -> pd.Series:
@@ -88,7 +131,10 @@ def _aggregate(day: pd.DataFrame, folder: str, since_key: str = "") -> pd.DataFr
     if day.empty or folder not in ("week", "month"):
         return pd.DataFrame()
 
-    work = day[["bsop_date", *VALUE_COLUMNS]]
+    # 일봉에 딸려 온 열이 있으면 그것도 같이 묶는다. 없으면 없는 대로 간다 —
+    # 부르는 쪽이 열을 몇 개 읽어 왔는지에 따라 알아서 맞춘다.
+    extras = [c for c in EXTRA_RULES if c in day.columns]
+    work = day[["bsop_date", *VALUE_COLUMNS, *extras]]
     # 필요한 구간만 잘라 낸다. 일봉은 날짜순으로 저장돼 있으므로 **시작 자리만 찾으면**
     # 된다 — 9,000줄에 조건을 걸어 참/거짓 표를 만들 필요가 없다.
     # 날짜가 `YYYYMMDD` 라 글자 순서 = 날짜 순서다. 월봉 시작키(`YYYYMM`)는 그 달 1일로 편다.
@@ -111,16 +157,33 @@ def _aggregate(day: pd.DataFrame, folder: str, since_key: str = "") -> pd.DataFr
     num = {c: pd.to_numeric(work[c], errors="coerce").to_numpy(float) for c in VALUE_COLUMNS}
     frame = pd.DataFrame(num)
     frame["last_day"] = dates
-    grouped = frame.groupby(keys, sort=True)
-    return grouped.agg(
-        stck_oprc=("stck_oprc", "first"),
-        stck_hgpr=("stck_hgpr", "max"),
-        stck_lwpr=("stck_lwpr", "min"),
-        stck_prpr=("stck_prpr", "last"),
-        vol=("vol", "sum"),
-        tr_pbmn=("tr_pbmn", "sum"),
-        last_day=("last_day", "last"),
-    )
+    spec = {
+        "stck_oprc": ("stck_oprc", "first"),
+        "stck_hgpr": ("stck_hgpr", "max"),
+        "stck_lwpr": ("stck_lwpr", "min"),
+        "stck_prpr": ("stck_prpr", "last"),
+        "vol": ("vol", "sum"),
+        "tr_pbmn": ("tr_pbmn", "sum"),
+        "last_day": ("last_day", "last"),
+    }
+    for col in extras:
+        if EXTRA_RULES[col] == "sum":  # 뉴스 건수 — 숫자로 더한다
+            frame[col] = pd.to_numeric(work[col], errors="coerce").fillna(0).to_numpy(float)
+        else:  # 락 구분·락 비율·액면변경 — 글자 그대로 가장 큰 값
+            frame[col] = work[col].astype(str).to_numpy()
+        spec[col] = (col, EXTRA_RULES[col])
+    return frame.groupby(keys, sort=True).agg(**spec)
+
+
+def _finish_extras(out: pd.DataFrame) -> None:
+    """파일에 넣기 직전 마무리 — 진짜 빈 열은 비우고, 만들어 낸 열은 글자로 바꾼다."""
+    for col in BLANK_COLUMNS:
+        out[col] = ""
+    for col, how in EXTRA_RULES.items():
+        if col not in out.columns:
+            out[col] = ""  # 일봉에서 그 열을 안 읽어 왔다 — 빈 칸으로 둔다
+        elif how == "sum":
+            out[col] = out[col].fillna(0).round().astype("int64").astype(str)
 
 
 def synthesize(day: pd.DataFrame, folder: str, since_key: str = "") -> pd.DataFrame:
@@ -136,8 +199,7 @@ def synthesize(day: pd.DataFrame, folder: str, since_key: str = "") -> pd.DataFr
     for col in VALUE_COLUMNS:
         # 나무는 정수 문자열로 준다. 거래대금이 커서 float 로 두면 지수 표기가 섞인다.
         out[col] = out[col].round().astype("int64").astype(str)
-    for col in BLANK_COLUMNS:
-        out[col] = ""
+    _finish_extras(out)
     # `astype(str)` 이어야 나무 수집본과 같은 dtype 이 된다. `astype("string")` 은
     # 빈칸 표시가 <NA> 로 달라져 저장본과 섞이면 비교가 어긋난다(실측 2026-08-28).
     return out[COLUMNS].astype(str).reset_index(drop=True)
@@ -236,8 +298,7 @@ def rows_for(keys, made: pd.DataFrame, folder: str) -> pd.DataFrame:
     out["bsop_date"] = out["_key"] if folder == "month" else out["last_day"]
     for col in VALUE_COLUMNS:
         out[col] = out[col].round().astype("int64").astype(str)
-    for col in BLANK_COLUMNS:
-        out[col] = ""
+    _finish_extras(out)
     return out[COLUMNS].astype(str).reset_index(drop=True)
 
 
@@ -245,3 +306,124 @@ def mismatches(day: pd.DataFrame, stored: pd.DataFrame, folder: str, since: str 
     """어긋난 봉이 몇 개인가 — `disagreements` 의 개수만 센다."""
     bad, _ = disagreements(day, stored, folder, since)
     return len(bad)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 한 종목을 통째로 처리 — **프로세스로 나눠 돌리려고** 여기에 둔다
+# ─────────────────────────────────────────────────────────────────────────────
+# 봉을 묶는 건 계산이라 줄기(스레드)를 늘려도 안 빨라진다(GIL). 실측 2026-08-28:
+#   1줄기 241.0초 · 4줄기 330.0 · 8줄기 333.7 · 16줄기 340.3   ← 늘수록 손해
+# 프로세스는 각자 파이썬을 하나씩 쓰므로 코어만큼 진짜로 나뉜다(굵은 분봉에서 3배 확인).
+# 일감을 **`update_data` 가 아니라 이 모듈에** 두는 이유: 프로세스가 새로 뜰 때마다 모듈을
+# 다시 읽는데, `update_data` 는 나무 SDK·KIS 어댑터까지 딸려 와 뜨는 데만 몇 초가 걸린다.
+
+_SEEN: dict = {}
+_SINCE = "20240101"
+
+
+def start_worker(seen: dict, verify_since: str) -> None:
+    """프로세스가 뜰 때 **한 번만** 지난 회차 지문과 대조 시작점을 받아 둔다."""
+    global _SEEN, _SINCE
+    _SEEN = seen or {}
+    _SINCE = verify_since
+
+
+def stamp_of(a: Path, b: Path) -> list | None:
+    """두 파일의 지문(고친 시각·크기) — 둘 다 그대로면 결과도 그대로다."""
+    try:
+        x, y = a.stat(), b.stat()
+    except OSError:
+        return None
+    return [x.st_mtime_ns, x.st_size, y.st_mtime_ns, y.st_size]
+
+
+def day_of(stored_date: str, folder: str) -> str:
+    """저장된 마지막 봉 날짜 → 그 봉이 든 기간의 **첫날**."""
+    if folder == "month":
+        return f"{stored_date[:6]}01"
+    d = date(int(stored_date[:4]), int(stored_date[4:6]), int(stored_date[6:8]))
+    return (d - timedelta(days=d.weekday())).strftime("%Y%m%d")
+
+
+def already_there(stored: pd.DataFrame, made: pd.DataFrame) -> bool:
+    """만든 봉이 저장본에 이미 같은 값으로 들어 있나 — **바뀐 줄만 본다.**"""
+    if made.empty:
+        return True
+    dates = set(made["bsop_date"].astype(str))
+    hit = stored[stored["bsop_date"].astype(str).isin(dates)]
+    if len(hit) != len(made):
+        return False
+    left = made.set_index("bsop_date").sort_index().astype(str)
+    right = hit.set_index("bsop_date").sort_index()[left.columns].astype(str)
+    return left.equals(right)
+
+
+def build_one(job: tuple) -> dict:
+    """한 종목의 주·월봉을 일봉으로 채우고 **그 자리에서 전수 대조까지** 한다. 호출 0.
+
+    저장된 마지막 봉이 든 주(달)부터 다시 만든다 — 그 봉은 받을 당시 진행 중이었을 수
+    있어서다. **그보다 과거는 어긋났을 때만 건드린다.**
+    """
+    root, code, markets = job
+    root = Path(root)
+    keys = (
+        "made", "written", "unchanged", "cached", "fixed", "no_stored", "errors",
+        "checked_bars", "mismatch_units", "mismatch_bars",
+    )
+    acc = dict.fromkeys(keys, 0)
+    done: list[tuple[str, str, str]] = []
+    found: list[tuple[str, int]] = []
+    stamps: dict[str, list] = {}
+    cols = ["bsop_date", *VALUE_COLUMNS, *EXTRA_RULES]
+    for market in markets:
+        day_path = root / market / "day" / f"{code}.parquet"
+        if not day_path.exists():
+            continue
+        day = None
+        for folder in ("week", "month"):
+            path = root / market / folder / f"{code}.parquet"
+            now = stamp_of(day_path, path)
+            was = _SEEN.get(str(path))
+            if now and was and was[0] == now:
+                # 두 파일 다 지난번 그대로다 — 만들 값도 대조 결과도 그대로다.
+                acc["cached"] += 1
+                if was[1]:
+                    acc["mismatch_units"] += 1
+                    acc["mismatch_bars"] += int(was[1])
+                done.append((market, code, folder))  # 안 그러면 ①-1b 가 헛돈다
+                continue
+            try:
+                stored = parquet_io.read(path)
+                if stored is None or stored.empty:
+                    acc["no_stored"] += 1  # 처음 수집은 나무 몫
+                    continue
+                since = str(stored["bsop_date"].astype(str).max())
+                if day is None:
+                    day = pd.read_parquet(day_path, columns=cols)
+                key = period_key(pd.Series([day_of(since, folder)]), folder).iloc[0]
+                fresh = synthesize(day, folder, since_key=key)
+                if not fresh.empty:
+                    acc["made"] += len(fresh)
+                    done.append((market, code, folder))
+                if already_there(stored, fresh):
+                    acc["unchanged"] += 1
+                    joined = stored
+                else:
+                    joined = graft(stored, fresh)
+                    parquet_io.save(joined, path)
+                    acc["written"] += 1
+                bad, made_all = disagreements(day, joined[cols], folder, _SINCE)
+                acc["checked_bars"] += len(joined)
+                if len(bad):
+                    acc["mismatch_units"] += 1
+                    acc["mismatch_bars"] += len(bad)
+                    found.append((f"{market}/{code}/{folder}", len(bad)))
+                    joined = graft(joined, rows_for(bad, made_all, folder))
+                    parquet_io.save(joined, path)
+                    acc["fixed"] += len(bad)
+                fresh_stamp = stamp_of(day_path, path)
+                if fresh_stamp:
+                    stamps[str(path)] = [fresh_stamp, 0]
+            except (OSError, ValueError, KeyError):
+                acc["errors"] += 1
+    return {**acc, "done": done, "worst": found, "stamps": stamps}
