@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 
 from api.refresh import REFRESH_STATE, clear_data_caches, run_refresh
 from src.layer1_data import freshness
@@ -82,7 +82,7 @@ _UPDATE_STATE: dict[str, Any] = {
 }
 
 
-def _run_heavy_update(*, force_minutes: bool) -> None:
+def _run_heavy_update() -> None:
     """나무 봉 증분 + KIS 수급·신용잔고 — `scripts/update_data.py` 를 뒤에서 그대로 돌린다.
 
     브라우저를 닫거나 새로고침해도 이 스레드는 서버 프로세스가 살아 있는 한 계속 돈다
@@ -102,7 +102,7 @@ def _run_heavy_update(*, force_minutes: bool) -> None:
     try:
         import scripts.update_data as update_data  # 무거운 임포트라 여기서만 — 서버 뜨는 속도에 안 영향
 
-        result = update_data.run_update(force_minutes=force_minutes, progress=progress)
+        result = update_data.run_update(progress=progress)
     except Exception as e:  # 스레드가 이것 때문에 조용히 죽으면 안 된다 — 실패도 값으로 남긴다
         result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
     finally:
@@ -116,9 +116,7 @@ def _run_heavy_update(*, force_minutes: bool) -> None:
 
 
 @router.post("/api/data/update")
-def api_data_update(
-    minutes: bool = Query(False, description="분봉·신용잔고까지 강제 포함"),
-) -> dict:
+def api_data_update() -> dict:
     """나무 봉·KIS 수급·신용잔고 증분 — 종목당 호출이 많은(수천 건) **무거운** 갱신.
 
     조회만 한다. 주문 없음. 서버 백그라운드 스레드로 돌아서 브라우저를 닫아도 계속
@@ -126,7 +124,7 @@ def api_data_update(
     """
     if _UPDATE_STATE["running"]:
         return {"started": False, "message": "이미 갱신 중입니다."}
-    threading.Thread(target=lambda: _run_heavy_update(force_minutes=minutes), daemon=True).start()
+    threading.Thread(target=_run_heavy_update, daemon=True).start()
     return {
         "started": True,
         "message": "무거운 갱신을 시작했습니다 — 수 분~수십 분 걸립니다. 창을 닫아도 계속 됩니다.",

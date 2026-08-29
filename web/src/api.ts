@@ -893,8 +893,8 @@ export async function fetchFreshness(): Promise<DataFreshness> {
 // 화면 버튼은 `startHeavyUpdate` 하나뿐이다 — 그게 끝에 이 일까지 한다(오너 요청 2026-08-29).
 // 엔드포인트(`/api/data/refresh`)는 남겨 둔다. 서버 시작 때와 손으로 부를 때 쓴다.
 
-/** 나무 봉·KIS 수급·신용잔고 증분 — 서버 백그라운드로 돈다(브라우저 닫아도 계속).
- *  `minutes` 는 분봉·신용잔고까지 강제 포함(평소엔 토요일에만 돈다). */
-export async function startHeavyUpdate(minutes = false): Promise<{ started: boolean; message: string }> {
-  return postJson(`/api/data/update?minutes=${minutes ? 'true' : 'false'}`, {})
+/** 봉·수급·거래원·공시·신용잔고를 한 번에 받아온다 — 서버 뒤에서 도니 창을 닫아도 계속된다.
+ *  분봉까지 늘 받는다. 켜고 끄는 값은 없다(오너 결정 2026-08-29). */
+export async function startHeavyUpdate(): Promise<{ started: boolean; message: string }> {
+  return postJson('/api/data/update', {})
 }

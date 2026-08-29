@@ -78,7 +78,7 @@ export function DataFreshness() {
   async function onUpdate() {
     setMsg('')
     try {
-      const r = await startHeavyUpdate(false)
+      const r = await startHeavyUpdate()
       setMsg(r.message)
       await load()
     } catch (e) {
