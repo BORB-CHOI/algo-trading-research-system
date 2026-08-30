@@ -140,7 +140,11 @@ def fix_turnover() -> int:
             return "skip"
         num = lambda c: pd.to_numeric(got[c], errors="coerce").fillna(0)  # noqa: E731
         fresh = kiwoom_bars.turnover(num("vol"), num("stck_hgpr"), num("stck_lwpr")).astype(str)
-        if fresh.equals(got["tr_pbmn"].astype(str)):
+        cur = got["tr_pbmn"].astype(str)
+        # `999900` 은 나무만 주던 **장 마감 뒤 하루 묶음**이라 봉이 아니다. 고·저로 만든
+        # 값이 뜻이 없으므로 받은 값을 그대로 둔다.
+        fresh = fresh.where(got["bsop_time"].astype(str).ne("999900"), cur)
+        if fresh.equals(cur):
             return "same"
         out = got.copy()
         out["tr_pbmn"] = fresh.astype(out["tr_pbmn"].dtype)

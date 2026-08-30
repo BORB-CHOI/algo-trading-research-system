@@ -49,6 +49,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .minute_bars import lone_auction
+
 ROOT = Path(__file__).resolve().parents[2]
 TOKEN_PATH = ROOT / "data" / "derived" / "_kiwoom_token.json"
 
@@ -63,7 +65,7 @@ SUFFIX = {"krx": "", "unt": "_AL", "nxt": "_NX"}
 # 시장을 안 가린다: KRX 마감 단일가는 통합(unt)에도 그대로 들어온다. 실측 2026-08-30
 # 005930 08-28 — 키움 통합 153000 량 1,146,522 = 나무 통합 153000 량 1,146,522 (똑같다).
 # NXT 는 이 시각에 봉이 아예 없어서 이 규칙이 걸릴 일이 없다.
-CLOSE_AUCTION_MIN = 15 * 60 + 30
+AUCTION_GAP = 11  # 연속 체결 마지막 분 → 동시호가까지 몇 분 (15:19 → 15:30)
 
 # 우리 봉 파일의 열 — 나무가 주던 것과 **같은 차례·같은 이름**으로 맞춘다.
 # 안 그러면 차트도 굵은 봉 만들기도 파일마다 다른 열을 만나게 된다.
@@ -307,10 +309,11 @@ def to_bars(rows: list[dict]) -> pd.DataFrame:
     src = src[keep].reset_index(drop=True)
     tm = tm[keep].reset_index(drop=True)
     mins = tm.str[8:10].astype(int) * 60 + tm.str[10:12].astype(int)
-    # 마감 단일가(15:30 정각 체결)만 이름을 그대로 두고, 나머지는 끝 시각으로 1분 옮긴다.
-    label = np.where(
-        mins.to_numpy() == CLOSE_AUCTION_MIN, CLOSE_AUCTION_MIN, mins.to_numpy() + 1
-    )
+    # 마감 단일가만 이름을 그대로 두고, 나머지는 끝 시각으로 1분 옮긴다.
+    # 규칙은 `minute_bars.lone_auction` 한 곳에 있다. 여기 시각은 봉이 **시작한**
+    # 시각이라 연속 체결 마지막 분과 11분 떨어져 있다(15:19 → 15:30).
+    keep_as_is = lone_auction(tm.str[:8], mins, gap=AUCTION_GAP)
+    label = np.where(keep_as_is.to_numpy(), mins.to_numpy(), mins.to_numpy() + 1)
 
     price: dict[str, pd.Series] = {}
     for want, got in (("stck_oprc", "open_pric"), ("stck_hgpr", "high_pric"),

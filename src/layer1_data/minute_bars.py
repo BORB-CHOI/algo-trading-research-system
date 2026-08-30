@@ -53,11 +53,9 @@ from . import parquet_io
 # 장이 열리는 시각 — 봉을 묶는 기준점이다(분 단위).
 ANCHOR = {"krx": 9 * 60, "unt": 8 * 60, "nxt": 8 * 60}
 
-# 정규장이 끝나는 시각 — **장 시작부터 몇 분인지**로 적는다(`ANCHOR` 를 뺀 값).
-# 자정 기준으로 적으면 `bucket_of` 의 비교가 통째로 안 걸린다(실측 2026-08-29에 낸 실수).
-#   krx  09:00~15:20 = 380분  (종가는 15:30 에 따로 찍힌다)
-#   통합·NXT 08:00~20:00 = 720분
-SESSION_END = {"krx": 15 * 60 + 20 - 9 * 60, "unt": 20 * 60 - 8 * 60, "nxt": 20 * 60 - 8 * 60}
+# 마감동시호가가 찍히는 시각 — **장 시작부터 몇 분인지**로 적는다(`ANCHOR` 를 뺀 값).
+# 이 봉만 15:30 **에서 새로 시작하는** 봉이라 묶을 때 따로 봐야 한다(`bucket_of`).
+AUCTION_AT = {m: 15 * 60 + 30 - a for m, a in ANCHOR.items()}
 
 CLOSING_MARK = "999900"  # 장 마감 뒤 집계 봉 — 굵은 봉에도 그대로 하나 실린다
 OHLC = ["stck_oprc", "stck_hgpr", "stck_lwpr", "stck_prpr"]
@@ -70,21 +68,71 @@ def minutes_of(times: pd.Series, market: str) -> pd.Series:
     return t.str[:2].astype(int) * 60 + t.str[2:4].astype(int) - ANCHOR[market]
 
 
-def bucket_of(mins: pd.Series, market: str, width: int) -> pd.Series:
-    """그 분이 몇 번째 봉에 드나 — 봉 이름이 **끝 시각**이라 1을 빼고 나눈다.
+def lone_auction(days: pd.Series, mins: pd.Series, gap: int) -> pd.Series:
+    """어느 줄이 **마감 동시호가**인가 — 시계를 박아 두지 않고 모양으로 찾는다.
 
-    정규장이 끝난 뒤(15:20 초과)는 전부 마지막 격자 봉에 담는다(위 규칙 3).
+    동시호가는 1분 동안 쌓인 봉이 아니라 **그 시각에 한 번 체결된 것**이다. 그래서 다른
+    봉과 달리 자기 자리에서 새로 시작한다.
+
+    ## 왜 시계를 못 박나 — 수능일에 1분을 잃었다 (실측 2026-08-30)
+
+    옛 규칙은 `15:30 이면 동시호가`였다. 그런데 **수능일(2025-11-13)은 장이 한 시간 늦게
+    열고 늦게 닫는다** — 10:00~16:20, 동시호가 16:30. 그날 15:30 은 그냥 거래 중인 1분인데
+    동시호가로 보는 바람에 앞 봉과 이름이 겹쳐 **한 줄이 통째로 사라졌다**(068270 3,534주).
+    262 거래일 중 하루가 그렇게 망가져 있었고, 굵은 분봉도 그날만 틀렸다.
+
+    ## 어떻게 찾나
+
+    연속 체결이 끝나고 한참 뒤에 **혼자 서는 봉**이다. 셋을 다 만족해야 한다:
+
+        · 앞뒤 1분에 봉이 없다 (혼자 선다)
+        · `gap` 분 앞에는 봉이 있다 (= 연속 체결의 마지막 분)
+        · 오후 3시~5시 사이다
+
+    `gap` 은 시각을 어느 쪽 이름으로 세느냐에 따라 다르다 — 봉이 **시작한** 시각이면 11
+    (15:19 → 15:30), **끝난** 시각이면 10 (15:20 → 15:30).
+
+    장 마감 뒤에 하나 더 오는 봉(정상일 15:35~36)이나 통합·NXT 애프터마켓 첫 봉(15:40)은
+    `gap` 앞에 봉이 없어서 안 걸린다.
     """
-    idx = (mins - 1) // width
-    end = SESSION_END[market]
-    if end % width == 0:
-        # 장 마감이 격자에 **딱 떨어진다** — 마지막 정규 봉이 온전하므로 종가 봉은 따로 선다.
-        # 예) krx min5 는 15:20 봉이 15:16~15:20 로 꽉 차 있고, 15:30 종가 봉이 하나 더 온다.
-        return idx
-    # 딱 안 떨어진다 — 마지막 토막(예: krx min3 의 15:19~15:20)이 종가 봉과 한 봉이 된다.
-    # 실측 005930 2026-08-28: 나무 min3 15:30 봉 = 151900+152000+153000 거래량 합.
-    last = (end - 1) // width
-    return idx.where(idx <= last, last)
+    m = mins.astype("int64")
+    key = days.astype(str) + ":" + m.astype(str)
+    have = set(key)
+
+    def near(shift: int) -> pd.Series:
+        return (days.astype(str) + ":" + (m + shift).astype(str)).isin(have)
+
+    return ~near(-1) & ~near(1) & near(-gap) & (m >= 15 * 60) & (m <= 17 * 60)
+
+
+def bucket_of(
+    mins: pd.Series, market: str, width: int, days: pd.Series | None = None
+) -> pd.Series:
+    """그 분이 몇 번째 봉에 드나 — **봉이 시작한 분**을 격자로 나눈다.
+
+    우리 봉 이름은 끝 시각이라 1을 빼면 시작 분이 된다. 다만 **마감동시호가(15:30)만
+    예외**다 — 그건 15:29~15:30 을 담은 봉이 아니라 15:30 **에** 한 번 체결된 것이라
+    거기서 새 봉이 시작한다. 1을 빼면 앞 봉에 딸려 들어간다.
+
+    ## 왜 고쳤나 (실측 2026-08-30)
+
+    옛 규칙은 "장 마감(15:20) 뒤는 전부 마지막 정규 봉에 담는다"였다. **나무가 그렇게
+    묶었기 때문**이다. 1분봉 창구를 키움으로 옮긴 뒤 키움이 직접 주는 굵은 봉과 맞대 보니
+    갈리는 자리가 딱 여기였다 — 키움은 15:30 을 격자대로 넣는다:
+
+        krx min30  키움: … 1430(15:00까지) · 1500(15:20까지) · **1530(동시호가만)**
+                   옛것: … 1500          · 1530(15:20+동시호가를 한 봉으로 뭉갬)
+        krx min60  키움: … 1500 = 15:01~15:20 + 동시호가  (한 봉이 맞다)
+
+    즉 굵기마다 다른 게 아니라 **격자에 15:30 이 걸리느냐**로 갈린다. 격자대로 나누면
+    두 경우가 저절로 맞는다. 값 자체(시·고·저·종·거래량)는 옛 규칙에서도 같았다 —
+    **경계만 틀렸다.**
+    """
+    if days is None:  # 날짜를 안 주면 옛 방식 — 정상일만 맞는다
+        is_auction = mins == AUCTION_AT[market]
+    else:
+        is_auction = lone_auction(days, mins + ANCHOR[market], gap=10)
+    return (mins - 1).where(~is_auction, mins) // width
 
 
 def _pre_market_fold(buckets: pd.Series, market: str, width: int) -> pd.Series:
@@ -164,7 +212,7 @@ def synthesize_from(work, tail, columns, market: str, width: int) -> pd.DataFram
         return tail.reset_index(drop=True) if len(tail) else pd.DataFrame(columns=columns)
     # 묶음 열쇠는 **숫자로** 만든다. 날짜와 자리를 글자로 이어 붙이면 판다스가 원소마다
     # 문자열 연산을 돌아 호출 하나에 정규식이 수백 번 돈다.
-    bucket = bucket_of(work["_m"], market, width)
+    bucket = bucket_of(work["_m"], market, width, work["bsop_date"])
     bucket = _pre_market_fold(bucket, market, width)
     keys = (work["_d"].to_numpy() * 10_000 + bucket.to_numpy()).astype("int64")
 
@@ -276,7 +324,9 @@ def widths_from(intervals) -> list[int]:
     return [int(str(name)[3:]) for name, *_ in intervals if str(name).startswith("min")]
 
 
-__all__ = ["ANCHOR", "SESSION_END", "synthesize", "compare", "bucket_of", "widths_from"]
+__all__ = [
+    "ANCHOR", "AUCTION_AT", "bucket_of", "compare", "lone_auction", "synthesize", "widths_from",
+]
 _ = np  # numpy 는 형 변환에서만 쓴다
 
 
@@ -365,8 +415,14 @@ def build_one(job: tuple) -> dict:
 
     돌려주는 것에 지문도 실어 보낸다 — 프로세스끼리 쪽지를 못 나눠 쓰므로,
     부모가 받아서 한 곳에 모은다.
+
+    일감에 다섯째 자리로 `True` 를 실어 주면 **한 번 통째로 다시 만든다.** 평소에는
+    저장된 마지막 봉이 든 날부터만 만드는데, 1분봉이 39일에서 262 거래일로 깊어진
+    뒤에는 그러면 **깊어진 과거가 굵은 봉에 영영 안 실린다**(마지막 날짜는 그대로라
+    "새로 만들 게 없다"고 본다). 창구를 바꾼 뒤 한 번만 이 길로 돈다.
     """
-    root, market, code, widths = job
+    root, market, code, widths = job[:4]
+    full = len(job) > 4 and bool(job[4])
     root = Path(root)
     seen = _SEEN
     acc = dict.fromkeys(
@@ -375,7 +431,9 @@ def build_one(job: tuple) -> dict:
     found: list[tuple[str, int]] = []
     stamps: dict[str, list] = {}
     src = root / market / "min1" / f"{code}.parquet"
-    one = parquet_io.read(src, since=stored_floor(root, market, code, widths))
+    one = parquet_io.read(src) if full else parquet_io.read(
+        src, since=stored_floor(root, market, code, widths)
+    )
     if one is None or one.empty:
         return {**acc, "worst": found, "stamps": stamps}
     days = complete_days(one, market)
@@ -385,18 +443,21 @@ def build_one(job: tuple) -> dict:
     for width in widths:
         path = root / market / f"min{width}" / f"{code}.parquet"
         try:
-            now = stamp_of(src, path)
-            was = seen.get(str(path))
-            if now and was and was[0] == now:
-                acc["cached"] += 1
-                acc["bad"] += int(was[1])
-                continue
+            if not full:  # 통째로 다시 만들 땐 "안 바뀌었다"는 쪽지를 믿지 않는다
+                now = stamp_of(src, path)
+                was = seen.get(str(path))
+                if now and was and was[0] == now:
+                    acc["cached"] += 1
+                    acc["bad"] += int(was[1])
+                    continue
             stored = parquet_io.read(path)
             if stored is None or stored.empty:
-                acc["no_stored"] += 1  # 처음 수집은 나무 몫
-                continue
-            since = str(stored["bsop_date"].astype(str).max())
-            if not any(d >= since for d in days):
+                if not full:
+                    acc["no_stored"] += 1  # 처음 수집은 나무 몫
+                    continue
+                stored = None  # 저장본이 없어도 만든 값으로 새로 놓는다
+            since = min(days) if full else str(stored["bsop_date"].astype(str).max())
+            if not full and not any(d >= since for d in days):
                 acc["unchanged"] += 1
                 continue
             if since not in prep:
@@ -414,7 +475,7 @@ def build_one(job: tuple) -> dict:
                 found.append((f"{market}/{code}/min{width}", got["bad"]))
             if not made.empty:
                 acc["made"] += len(made)
-                joined = graft(stored, made)
+                joined = made if stored is None else graft(stored, made)
                 if joined is None:
                     acc["unchanged"] += 1
                 else:

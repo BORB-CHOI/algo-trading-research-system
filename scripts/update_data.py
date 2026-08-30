@@ -961,7 +961,9 @@ def save_minute_state() -> None:
     tmp.replace(MINUTE_STATE)
 
 
-def update_minute_bars_from_one(last_day: str, progress: ProgressFn | None = None) -> dict:
+def update_minute_bars_from_one(
+    last_day: str, progress: ProgressFn | None = None, *, full: bool = False
+) -> dict:
     """굵은 분봉을 1분봉으로 만들고 **전 종목 대조**한다 — 증권사 호출 0 (ADR-0022).
 
     저장본의 과거는 손대지 않는다. 저장된 마지막 봉이 든 **날부터** 다시 만들어 덮고,
@@ -972,13 +974,17 @@ def update_minute_bars_from_one(last_day: str, progress: ProgressFn | None = Non
     일감은 `minute_bars.build_one` 에 있다.
 
     NXT·통합의 60분봉도 여기서 만든다 (ADR-0023, 실측 2026-08-30 — 키움 것과 100% 일치).
+
+    `full=True` 면 **한 번 통째로 다시 만든다.** 1분봉 창구를 바꿔 과거가 깊어졌을 때
+    한 번만 쓴다 — 평소 길로는 깊어진 과거가 굵은 봉에 안 실린다(저장본의 마지막
+    날짜는 그대로여서 "새로 만들 게 없다"고 본다).
     """
     master = bars.load_master("m_new_stock")
     jobs = []
     for r in master.itertuples():
         code = str(r.sCode)
         for market in ["krx"] + (["unt", "nxt"] if str(r.nxt_yn) == "Y" else []):
-            jobs.append((str(bars.OUT_DIR), market, code, MADE_WIDTHS))
+            jobs.append((str(bars.OUT_DIR), market, code, MADE_WIDTHS, full))
     totals = dict.fromkeys(
         ("made", "written", "unchanged", "cached", "no_stored", "errors", "checked", "bad"), 0
     )
@@ -1383,7 +1389,29 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
     return summary
 
 
+def rebuild_wide_minutes() -> int:
+    """굵은 분봉을 **한 번 통째로** 다시 만든다 — 증권사 호출 0.
+
+    1분봉 창구를 바꿔 과거가 39일에서 262 거래일로 깊어졌을 때 한 번 쓴다. 평소 갱신은
+    저장본의 마지막 날짜부터만 만들어서, 깊어진 과거가 굵은 봉에 영영 안 실린다.
+    """
+    load_minute_state()
+    _MIN_STATE.clear()  # 지문을 비운다 — 안 비우면 "안 바뀌었다"고 건너뛴다
+    started = time.time()
+
+    def show(label: str, done: int, total: int) -> None:
+        print(f"  {label} {done:,}/{total:,} · {time.time() - started:.0f}초", flush=True)
+
+    got = update_minute_bars_from_one(market_last_trading_day(), show, full=True)
+    save_minute_state()
+    print(json.dumps(got, ensure_ascii=False, indent=2))
+    print(f"끝. {time.time() - started:.0f}초")
+    return 0
+
+
 def main() -> int:
+    if "--rebuild-wide-minutes" in sys.argv:
+        return rebuild_wide_minutes()
     try:
         summary = run_update()
     except Exception:
