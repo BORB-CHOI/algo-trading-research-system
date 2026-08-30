@@ -8,13 +8,14 @@
 - 서버가 보관한 과거를 전부 받는다: 날짜를 뒤로 넘겨가며(빈 응답까지) 조회.
 - 저장: data/derived/namuh_bars/<시장>/<봉굵기>/<종목코드>.parquet (원본 필드 그대로).
 - 중단·재시작 안전: _state.json 에 종목×시장×굵기 단위 완료 기록. 재실행 시 이어받는다.
-- 병렬 5줄기 — 전체 호출 속도는 한 군데서 조절한다(실측 한도 초당 약 7건의 8할 이하).
+- 병렬 5줄기 — 호출 속도는 SDK 한 곳에서만 조절한다(실측 한도 초당 5건, 2026-08-30).
 - 조회만 한다. 주문 없음.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -26,6 +27,13 @@ import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# 나무 SDK 의 초당 호출 한도를 **SDK 가 허용하는 끝까지** 올린다(기본 4 · 상한 5).
+# `.env` 에 값이 있으면 그걸 그대로 쓴다(오너 설정이 이긴다).
+# 실측 2026-08-30 (1분봉 한 페이지씩 80콜):
+#   한도 4 + 안전핀 0.18초 = 초당 3.69   ·  한도 5 + 안전핀 없음 = 초당 4.25 (실패 0)
+#   전 종목 5,513콜로 치면 24.9분 → 21.6분
+os.environ.setdefault("NHPLUG_RATE_LIMIT", "5")
 
 from nhplug import NhplugError, call  # noqa: E402
 from nhplug.instruments import load_master  # noqa: E402
@@ -56,11 +64,11 @@ INTERVALS: list[tuple[str, str, str | None]] = [
 ]
 
 WORKERS = 5
-# 전체 호출 간 최소 간격(초). nhplug 0.3.0 부터 SDK 가 스스로 초당 호출을 조절하므로
-# (.env 의 NHPLUG_RATE_LIMIT, 기본 4회·상한 5회) 이 값은 뒤를 받치는 안전핀이다.
-# 실측 2026-08-28 (60종목 일봉, 5줄기): SDK 만 = 초당 4.43건, 여기에 이 값까지 겹치면 4.22건.
-# 겹치면 5% 쯤 느려진다. 0 으로 두면 SDK 조절에만 맡긴다.
-MIN_GAP = 0.18
+# 전체 호출 간 최소 간격(초). SDK 가 이미 초당 호출을 조절하므로 이건 뒤를 받치는 안전핀인데,
+# **겹쳐 걸면 그냥 느려지기만 한다.** 실측 2026-08-30 (1분봉 80콜):
+#   SDK 한도 4 + 이 값 0.18 = 초당 3.69   ·   SDK 한도 5 + 이 값 0 = 초당 4.25 (둘 다 실패 0)
+# 그래서 조절은 SDK 한 곳에만 맡긴다(위 `NHPLUG_RATE_LIMIT`).
+MIN_GAP = 0.0
 RATE_RETRY_SLEEP = 3.0
 NET_RETRY_SLEEP = 30.0
 MAX_RETRY = 5

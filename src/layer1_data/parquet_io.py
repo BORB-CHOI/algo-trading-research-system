@@ -49,15 +49,26 @@ def save(df: pd.DataFrame, path: Path) -> None:
             tmp.unlink(missing_ok=True)
 
 
-def read(path: Path) -> pd.DataFrame | None:
+def read(path: Path, since: str = "", date_col: str = "bsop_date") -> pd.DataFrame | None:
     """저장본을 읽는다. **없거나 못 읽으면 `None`** — 부르는 쪽은 처음 받는 것으로 친다.
 
     `ArrowInvalid` 는 `ValueError` 를 물려받는다(0바이트·잘린 파일이 여기로 온다).
+
+    `since` 를 주면 **그 날짜부터만 읽는다.** 1분봉이 39일에서 262 거래일로 깊어지면
+    파일이 6.7배가 되는데, 굵은 분봉을 만들 땐 늘 최근 며칠만 쓴다. 통째로 읽으면
+    안 쓸 과거를 읽느라 그 단계가 깊이에 비례해 느려진다.
     """
     path = Path(path)
     if not path.exists():
         return None
     try:
+        if since:
+            return pd.read_parquet(path, filters=[(date_col, ">=", str(since))])
         return pd.read_parquet(path)
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError):
+        if since:  # 거르기가 안 먹는 파일(열이 없거나 옛 형식)이면 통째로 읽어 본다
+            try:
+                return pd.read_parquet(path)
+            except (OSError, ValueError):
+                return None
         return None

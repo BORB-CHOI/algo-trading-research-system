@@ -88,15 +88,22 @@ def bucket_of(mins: pd.Series, market: str, width: int) -> pd.Series:
 
 
 def _pre_market_fold(buckets: pd.Series, market: str, width: int) -> pd.Series:
-    """**NXT 의 60분봉만** — 프리마켓 봉을 다음 봉에 합친다(규칙 4).
+    """**더 이상 아무것도 안 한다** — 나무 때문에 넣었던 규칙이라 키움 1분봉엔 걸면 안 된다.
 
-    통합(unt)은 KRX + NXT 를 합친 값이라 이 규칙이 없다. 실측 2026-08-29 (30종목):
-    이 규칙을 통합에도 걸면 99.85% → 90.46% 로 오히려 깨진다. NXT 는 83.66% → 99.28%.
+    옛 규칙(규칙 4): NXT 60분봉에서 09:00 봉을 비우고 프리마켓을 10:00 봉에 합친다.
+    나무가 그렇게 줬기 때문이다(실측 2026-08-29, 30종목: NXT 83.66% → 99.28%).
+
+    1분봉을 키움으로 바꾸고 다시 재보니 **정반대다** (실측 2026-08-30, 통합·NXT 4종목 ·
+    1,650봉 · 키움이 직접 주는 60분봉을 잣대로):
+
+        NXT   합치기 켬 90.91%  →  **끔 100.00%**
+        통합  합치기 켬 100%    ·   끔 100%   (원래 이 규칙이 안 걸린다)
+
+    즉 그 접힘은 나무가 봉을 묶던 방식이었고, 키움은 자정 격자 그대로 묶는다.
+    껍데기만 남겨 둔다 — 지운 자리를 나중에 다시 만들지 않도록 이력을 남기려고.
     """
-    if market != "nxt" or width != 60:
-        return buckets
-    open_at = (9 * 60 - ANCHOR[market] - 1) // width  # 09:00 봉의 자리
-    return buckets.where(buckets != open_at, open_at + 1)
+    _ = (market, width)
+    return buckets
 
 
 def complete_days(one_min: pd.DataFrame, market: str) -> set[str]:
@@ -283,6 +290,31 @@ _ = np  # numpy 는 형 변환에서만 쓴다
 # 읽는데, `update_data` 는 나무 SDK·KIS 어댑터까지 딸려 와 뜨는 데만 몇 초가 걸린다.
 
 
+def stored_floor(root: Path, market: str, code: str, widths) -> str:
+    """1분봉을 **어느 날짜부터 읽으면 되나** — 굵기별 저장본의 마지막 날짜 중 가장 이른 것.
+
+    굵은 봉은 "저장된 마지막 봉이 든 날부터" 다시 만든다. 그러니 그보다 앞선 1분봉은
+    읽어 봐야 안 쓴다. 1분봉이 262 거래일로 깊어지면 파일이 6.7배가 되는데, 통째로 읽으면
+    이 단계가 과거 깊이에 비례해 느려진다.
+
+    저장본이 하나도 없으면 빈 글자를 돌려준다(= 통째로 읽는다).
+    """
+    import pyarrow.parquet as pq
+
+    floors: list[str] = []
+    for width in widths:
+        path = root / market / f"min{width}" / f"{code}.parquet"
+        if not path.exists():
+            continue
+        try:
+            col = pq.read_table(path, columns=["bsop_date"])["bsop_date"].to_pylist()
+        except (OSError, ValueError, KeyError):
+            return ""  # 못 읽는 파일이 하나라도 있으면 안전하게 통째로
+        if col:
+            floors.append(max(str(x) for x in col))
+    return min(floors) if floors else ""
+
+
 def stamp_of(a: Path, b: Path) -> list | None:
     """두 파일의 지문(고친 시각·크기) — 둘 다 그대로면 결과도 그대로다."""
     try:
@@ -343,7 +375,7 @@ def build_one(job: tuple) -> dict:
     found: list[tuple[str, int]] = []
     stamps: dict[str, list] = {}
     src = root / market / "min1" / f"{code}.parquet"
-    one = parquet_io.read(src)
+    one = parquet_io.read(src, since=stored_floor(root, market, code, widths))
     if one is None or one.empty:
         return {**acc, "worst": found, "stamps": stamps}
     days = complete_days(one, market)

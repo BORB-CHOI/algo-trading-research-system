@@ -5,7 +5,8 @@
 무엇을 갱신하나 — **늘 전부 받는다. 켜고 끄는 갈래가 없다**(오너 결정 2026-08-29):
   오늘 일봉(KIS 멀티시세, 전 종목·KRX/통합/NXT)
   주·월봉 — 일봉으로 만들어 전수 대조 (증권사 호출 0, ADR-0021)
-  분봉 — 1분봉만 받고 굵은 건 만들어 전수 대조 (ADR-0022)
+  분봉 — 1분봉만 받고 굵은 건 9종 전부 만들어 전수 대조 (ADR-0022·0023).
+        그 1분봉은 **키움에서** 받는다 (ADR-0023) — 나무 20.9분 → 9.5분, 보관 39일 → 262일
   KIS 수급 · 거래원 상위5 · DART 공시(이번 달) · KIS 신용잔고
 
 **달력을 안 본다.** 무슨 요일에 켜든 같은 일을 한다. 무엇이 밀렸는지는 파일이 알고 있고,
@@ -86,9 +87,11 @@ import collect_namuh_bars as bars  # noqa: E402
 from src.layer1_data import (  # noqa: E402
     freshness,
     kis_snapshot,
+    kiwoom_bars,
     krx_gapfill,
     krx_openapi,
     last_dates,
+    min1_lanes,
     minute_bars,
     parquet_io,
     period_bars,
@@ -114,12 +117,12 @@ MINUTE_INTERVALS = [i for i in bars.INTERVALS if i[0].startswith("min")]
 # 분봉은 **1분봉만 받고 나머지는 만든다** (ADR-0022, 오너 승인 2026-08-29).
 # 굵은 분봉을 다 받으면 파일 49,734개 = 나무 4.5/s = 3.07시간이다. 1분봉만 받으면 20분.
 MIN1_INTERVALS = [i for i in bars.INTERVALS if i[0] == "min1"]
-# 다만 **NXT·통합의 60분봉은 계속 받는다.** 그 09:00/10:00 경계만 나무가 날마다 다르게 줘서
-# (프리마켓을 10시 봉에 합치는 날 97.3%) 규칙으로 못 맞춘다. 파일 1,216개 = 4.5분.
-# 이걸 받으면 묶기 오류가 189 → 5개(0.00013%)로 준다 — 실측 2026-08-29, 378만 봉.
-MIN60_KEEP = [i for i in bars.INTERVALS if i[0] == "min60"]
-MIN60_KEEP_MARKETS = {"UNT", "NXT"}
-# 1분봉으로 만드는 굵기 — 위 둘을 뺀 나머지.
+# NXT·통합의 60분봉도 **만든다.** 전에는 이 둘만 나무에서 직접 받았다 — 그 09:00/10:00
+# 경계를 나무가 날마다 다르게 줘서(프리마켓을 10시 봉에 합치는 날 97.3%) 규칙으로 못
+# 맞췄기 때문이다. 1분봉을 키움으로 바꾸니 그 문제가 사라졌다. 실측 2026-08-30 —
+# 키움 1분봉으로 만든 60분봉 대 키움이 직접 주는 60분봉, 통합·NXT 4종목 1,650봉:
+#   **완전일치 100.00%** (단 `minute_bars._pre_market_fold` 를 꺼야 한다. 켜면 NXT 90.91%)
+# 그래서 이 단계를 통째로 없앴다 — 나무 1,216콜 · 4.8분이 그대로 빠진다.
 MADE_WIDTHS = [3, 5, 10, 15, 30, 60, 120, 240]
 # ─────────────────────────────────────────────────────────────────────────────
 # 줄기(스레드)냐 프로세스냐 — **일의 성격으로 정한다**
@@ -229,6 +232,15 @@ def merge_save(path: Path, old: pd.DataFrame | None, new: pd.DataFrame, keys: li
     return max(grown, 0)
 
 
+def all_jobs() -> list[tuple[str, list[str]]]:
+    """전 종목 × 받을 시장 — 나무 마스터가 정본. NXT 상장 종목만 통합·NXT 를 더 받는다."""
+    master = bars.load_master("m_new_stock")
+    return [
+        (str(r.sCode), ["KRX"] + (["UNT", "NXT"] if str(r.nxt_yn) == "Y" else []))
+        for r in master.itertuples()
+    ]
+
+
 def update_bars(
     intervals: list[tuple[str, str, str | None]],
     last_day: str,
@@ -236,22 +248,17 @@ def update_bars(
     *,
     progress: ProgressFn | None = None,
     label: str = "나무 봉 증분",
-    only_markets: set[str] | None = None,
+    jobs: list[tuple[str, list[str]]] | None = None,
 ) -> dict:
     """나무 봉 증분 — 저장된 마지막 날짜 이후만 받아 이어붙인다. 파일이 없으면 전체 수집.
 
     종목 단위로 병렬 처리한다(수집기와 같은 줄기 수·같은 속도 조절기).
     순차로 돌면 호출 왕복 730ms 가 그대로 쌓여 초당 1.4건밖에 못 낸다 — 실측 2026-08-17.
+
+    `jobs` 를 주면 그 목록만 받는다 — 1분봉을 키움과 나눠 맡을 때 쓴다(`min1_lanes`).
     """
-    master = bars.load_master("m_new_stock")
-    jobs = [
-        (str(r.sCode), ["KRX"] + (["UNT", "NXT"] if str(r.nxt_yn) == "Y" else []))
-        for r in master.itertuples()
-    ]
-    if only_markets:  # 어떤 굵기는 특정 시장만 받는다 (NXT·통합 60분봉)
-        want = {m.upper() for m in only_markets}
-        jobs = [(code, [m for m in ms if m in want]) for code, ms in jobs]
-        jobs = [(code, ms) for code, ms in jobs if ms]
+    if jobs is None:
+        jobs = all_jobs()
     totals = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
     lock = threading.Lock()
     done_n = 0
@@ -324,6 +331,132 @@ def update_bars(
     if broke:
         out["broke"] = broke  # 조용히 넘기지 않는다 — 요약 로그에 남겨 눈에 띄게
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ② 1분봉 — 어느 시장을 어느 창구가 맡나는 `min1_lanes` 표가 정한다 (ADR-0023)
+# ─────────────────────────────────────────────────────────────────────────────
+# 지금은 세 시장 다 키움이다. 나무 20.9분이 **9.5분**이 되고, 보관도 39 거래일에서 262
+# 거래일로 깊어진다. 두 창구는 봉 하나까지 같지 않아서 **한 시장은 통째로 한 창구가
+# 맡는다** — 종목을 섞으면 조건검색·지표가 종목마다 다른 잣대로 계산된다
+# (오너 결정 2026-08-30: "정확도는 타협 불가. 속도를 종목 섞기로 사지 않는다").
+# 표를 한 줄 바꾸면 두 창구가 다시 같이 돌 수 있게 틀은 그대로 둔다.
+KIWOOM_WORKERS = 8  # 호출을 기다리는 일이라 줄기로 나뉜다. 속도는 kiwoom_bars.THROTTLE 이 잡는다
+
+
+def update_min1_kiwoom(
+    jobs: list[tuple[str, list[str]]],
+    last_day: str,
+    *,
+    progress: ProgressFn | None = None,
+    label: str = "② 1분봉 키움 몫",
+) -> dict:
+    """키움 몫 1분봉 증분 — 저장된 마지막 날짜 이후만 받아 이어붙인다.
+
+    `merge_save` 가 (날짜, 시각)이 같은 봉만 새 값으로 덮으므로, 나무만 주던
+    `999900`(장 마감 뒤 집계) 줄은 **이미 있는 것이 그대로 남는다.** 키움엔 그 줄이
+    없어서 앞으로 받는 날에는 안 생긴다(오너 결정 2026-08-30: 적당히 두고, 나중에
+    필요하면 그때 채운다).
+    """
+    totals = dict.fromkeys(("added", "errors", "skipped", "called"), 0)
+    broke: list[str] = []
+    my_lock = threading.Lock()
+    done_n = 0
+
+    def one(code: str, market: str) -> str:
+        path = bars.OUT_DIR / market.lower() / "min1" / f"{code}.parquet"
+        since = last_date_of(path, "bsop_date")
+        if is_fresh("min1", since, last_day):
+            return "fresh"
+        stored = parquet_io.read(path)  # 깨진 저장본이면 None — 받은 것만 남는다
+        new = kiwoom_bars.collect(market.lower(), code, since)
+        if new.empty:
+            return "0"
+        return str(merge_save(path, stored, new, ["bsop_date", "bsop_time"]))
+
+    def work(job: tuple[str, list[str]]) -> None:
+        code, markets = job
+        added = errors = skipped = called = 0
+        for market in markets:
+            try:
+                got = one(code, market)
+            except Exception as e:  # noqa: BLE001 — 종목 하나 때문에 회차를 버리지 않는다
+                errors += 1
+                with my_lock:
+                    if len(broke) < 20:
+                        broke.append(f"{market.lower()}/min1/{code} {type(e).__name__}: {e}")
+                continue
+            if got == "fresh":
+                skipped += 1
+            else:
+                called += 1
+                added += int(got)
+        nonlocal done_n
+        with my_lock:
+            totals["added"] += added
+            totals["errors"] += errors
+            totals["skipped"] += skipped
+            totals["called"] += called
+            done_n += 1
+            n = done_n
+        if progress and (n % 20 == 0 or n == len(jobs)):
+            progress(label, n, len(jobs))
+
+    with ThreadPoolExecutor(max_workers=KIWOOM_WORKERS) as pool:
+        list(pool.map(work, jobs))
+    out = {
+        "added_rows": totals["added"],
+        "errors": totals["errors"],
+        "skipped": totals["skipped"],
+        "called": totals["called"],
+    }
+    if broke:
+        out["broke"] = broke
+    return out
+
+
+def update_min1_both(last_day: str, *, progress: ProgressFn | None = None) -> dict:
+    """1분봉 한 회차 — 나무와 키움을 **동시에** 돌리고 둘 다 끝나면 거둔다.
+
+    몫은 **시장 단위**로 갈린다(`min1_lanes.BROKER`). 지금은 세 시장 다 키움이라
+    나무 몫이 비어 있는데, 그래도 두 갈래로 두는 것은 표 한 줄만 바꾸면 바로 나뉘어
+    같이 돌기 때문이다.
+    """
+    lanes = min1_lanes.split(all_jobs())
+    total = sum(len(v) for v in lanes.values())
+    # 진행률은 **두 몫을 합쳐 한 줄로** 보여 준다 — 두 줄이 번갈아 뜨면 게이지가 튄다.
+    seen = {"namuh": 0, "kiwoom": 0}
+    lock = threading.Lock()
+
+    def report(lane: str):
+        def fn(_label: str, done: int, _total: int) -> None:
+            with lock:
+                seen[lane] = done
+                got = seen["namuh"] + seen["kiwoom"]
+            if progress:
+                progress("② 1분봉 (나무·키움 동시)", got, total)
+
+        return fn
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        namuh = pool.submit(
+            update_bars,
+            MIN1_INTERVALS,
+            last_day,
+            progress=report("namuh"),
+            label="② 1분봉 나무 몫",
+            jobs=lanes["namuh"],
+        )
+        kiwoom = pool.submit(
+            update_min1_kiwoom, lanes["kiwoom"], last_day, progress=report("kiwoom")
+        )
+        got_n, got_k = namuh.result(), kiwoom.result()
+    return {
+        "namuh": got_n,
+        "kiwoom": got_k,
+        "jobs": {k: len(v) for k, v in lanes.items()},
+        "estimate_sec": min1_lanes.estimate_sec(lanes),
+    }
 
 
 KIS_READY_AFTER = "20:05"  # NXT 애프터마켓 종료(20:00) 뒤 — 통합·NXT 일봉이 그때 확정된다
@@ -838,17 +971,14 @@ def update_minute_bars_from_one(last_day: str, progress: ProgressFn | None = Non
     16개 36.2분 / 프로세스 1개 27.4분 · 2개 15.6분 · 4개 10.8분 · **6개 9.0분** · 8개 10.1분.
     일감은 `minute_bars.build_one` 에 있다.
 
-    NXT·통합의 60분봉은 여기서 안 만든다 — 나무에서 직접 받는다(`MIN60_KEEP`).
+    NXT·통합의 60분봉도 여기서 만든다 (ADR-0023, 실측 2026-08-30 — 키움 것과 100% 일치).
     """
     master = bars.load_master("m_new_stock")
     jobs = []
     for r in master.itertuples():
         code = str(r.sCode)
         for market in ["krx"] + (["unt", "nxt"] if str(r.nxt_yn) == "Y" else []):
-            widths = [
-                w for w in MADE_WIDTHS if not (w == 60 and market.upper() in MIN60_KEEP_MARKETS)
-            ]
-            jobs.append((str(bars.OUT_DIR), market, code, widths))
+            jobs.append((str(bars.OUT_DIR), market, code, MADE_WIDTHS))
     totals = dict.fromkeys(
         ("made", "written", "unchanged", "cached", "no_stored", "errors", "checked", "bad"), 0
     )
@@ -1215,19 +1345,10 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
             PERIOD_INTERVALS, last_day, made_done, progress=progress, label="①-1b 나무 주·월봉"
         )
         # 분봉은 **1분봉만 받고 나머지는 만든다** (ADR-0022, 오너 승인 2026-08-29).
-        # 전부 받으면 파일 49,734개 · 3.07시간. 이렇게 하면 6,742콜 · 약 25분이다.
-        step("② 나무 1분봉 증분...")
-        summary["bars_min1"] = update_bars(
-            MIN1_INTERVALS, last_day, progress=progress, label="② 나무 1분봉 증분"
-        )
-        step("②-1 NXT·통합 60분봉 — 이 굵기만 직접 받는다...")
-        summary["bars_min60_kept"] = update_bars(
-            MIN60_KEEP,
-            last_day,
-            progress=progress,
-            label="②-1 NXT·통합 60분봉",
-            only_markets=MIN60_KEEP_MARKETS,
-        )
+        # 그 1분봉은 **키움이 맡는다** (ADR-0023) — 20.9분이 9.5분이 되고, 나무가 통째로
+        # 잃던 날(KRX 2일·통합 4일)이 메워진다. 어느 시장을 누가 맡나는 `min1_lanes` 표.
+        step("② 1분봉 — 키움에서 받는다...")
+        summary["bars_min1"] = update_min1_both(last_day, progress=progress)
         step("②-2 굵은 분봉 — 1분봉으로 만들고 전수 대조 (호출 0)...")
         summary["bars_minutes_made"] = update_minute_bars_from_one(
             last_day, progress=progress
