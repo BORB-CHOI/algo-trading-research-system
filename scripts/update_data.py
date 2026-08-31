@@ -962,7 +962,11 @@ def save_minute_state() -> None:
 
 
 def update_minute_bars_from_one(
-    last_day: str, progress: ProgressFn | None = None, *, full: bool = False
+    last_day: str,
+    progress: ProgressFn | None = None,
+    *,
+    full: bool = False,
+    only: set[str] | None = None,
 ) -> dict:
     """굵은 분봉을 1분봉으로 만들고 **전 종목 대조**한다 — 증권사 호출 0 (ADR-0022).
 
@@ -983,6 +987,8 @@ def update_minute_bars_from_one(
     jobs = []
     for r in master.itertuples():
         code = str(r.sCode)
+        if only is not None and code not in only:
+            continue  # 몇 종목만 다시 만들 때 (`--codes`)
         for market in ["krx"] + (["unt", "nxt"] if str(r.nxt_yn) == "Y" else []):
             jobs.append((str(bars.OUT_DIR), market, code, MADE_WIDTHS, full))
     totals = dict.fromkeys(
@@ -1389,7 +1395,7 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
     return summary
 
 
-def rebuild_wide_minutes() -> int:
+def rebuild_wide_minutes(only: set[str] | None = None) -> int:
     """굵은 분봉을 **한 번 통째로** 다시 만든다 — 증권사 호출 0.
 
     1분봉 창구를 바꿔 과거가 39일에서 262 거래일로 깊어졌을 때 한 번 쓴다. 평소 갱신은
@@ -1402,7 +1408,7 @@ def rebuild_wide_minutes() -> int:
     def show(label: str, done: int, total: int) -> None:
         print(f"  {label} {done:,}/{total:,} · {time.time() - started:.0f}초", flush=True)
 
-    got = update_minute_bars_from_one(market_last_trading_day(), show, full=True)
+    got = update_minute_bars_from_one(market_last_trading_day(), show, full=True, only=only)
     save_minute_state()
     print(json.dumps(got, ensure_ascii=False, indent=2))
     print(f"끝. {time.time() - started:.0f}초")
@@ -1411,7 +1417,13 @@ def rebuild_wide_minutes() -> int:
 
 def main() -> int:
     if "--rebuild-wide-minutes" in sys.argv:
-        return rebuild_wide_minutes()
+        only = None
+        if "--codes" in sys.argv:  # 몇 종목만 — 쉼표로 잇거나 목록 파일 경로
+            got = sys.argv[sys.argv.index("--codes") + 1]
+            text = Path(got).read_text(encoding="utf-8") if Path(got).exists() else got
+            only = {c.strip() for c in text.replace(chr(10), ",").split(",") if c.strip()}
+            print(f"굵은 분봉을 {len(only):,}종목만 다시 만든다")
+        return rebuild_wide_minutes(only)
     try:
         summary = run_update()
     except Exception:
