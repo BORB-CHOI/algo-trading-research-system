@@ -50,6 +50,7 @@ from src.layer1_data.members import (  # noqa: E402
     parse_daily,
     parse_snapshot,
 )
+from src.layer4_execution.brokers.kis.client import CallPolicy, KisClient  # noqa: E402
 
 SNAP_URL = "/uapi/domestic-stock/v1/quotations/inquire-member"
 SNAP_TR = "FHKST01010600"
@@ -58,9 +59,25 @@ DAILY_TR = "FHPST04540000"
 
 STATE_PATH = MEMBERS_PATH.parent / "_state.json"
 WORKERS = 5  # 오너 결정 2026-08-18: 5줄기(초당 10건, 한도 20). 거절은 재시도가 받는다.
+MEMBER_RATE_PER_SECOND = 10.0
+MEMBER_POLICY = CallPolicy(
+    min_interval_sec=WORKERS / MEMBER_RATE_PER_SECOND,
+    max_attempts=5,
+    backoff_base_sec=2.0,
+)
 FLOOR = "20250101"  # 이보다 뒤는 어차피 안 준다(260거래일 한도). 넉넉히 잡고 서버가 자르게 둔다
 
 _LOCK = threading.Lock()
+_LOCAL = threading.local()
+
+
+def _thread_client() -> KisClient:
+    """거래원 전용 초당 10건 정책. 수급의 더 빠른 정책을 빌려 쓰지 않는다."""
+    got = getattr(_LOCAL, "client", None)
+    if got is None:
+        got = KisClient(*S.make_client_parts(), policy=MEMBER_POLICY)
+        _LOCAL.client = got
+    return got
 
 
 def _load(path: Path, default):
@@ -97,7 +114,7 @@ def snapshot_all() -> int:
     def one(code: str) -> None:
         try:
             body = (
-                S._thread_client()
+                _thread_client()
                 .get(SNAP_URL, SNAP_TR, {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code})
                 .body
             )
@@ -150,7 +167,7 @@ def backfill_one(code: str, members: list[str], state: dict) -> None:
     for mb in members:
         for attempt in range(1, 6):
             try:
-                rows.extend(fetch_daily(S._thread_client(), code, mb, FLOOR, end))
+                rows.extend(fetch_daily(_thread_client(), code, mb, FLOOR, end))
                 break
             except S.KisApiError as e:
                 with _LOCK:
@@ -214,7 +231,7 @@ def backfill_all() -> int:
 
 def discover_members(probe_code: str = "005930") -> dict[str, str]:
     """00001~00099 를 전수로 찔러 **실제로 응답이 오는** 코드만 남긴다. 추측 없음."""
-    client = S._thread_client()
+    client = _thread_client()
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - pd.Timedelta(days=20)).strftime("%Y%m%d")
     live: dict[str, str] = _load(MEMBERS_PATH, {})
