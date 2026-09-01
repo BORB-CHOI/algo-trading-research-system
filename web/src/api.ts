@@ -864,7 +864,7 @@ export type RefreshProgress = {
   total: number
 }
 
-/** 나무 봉 증분 + KIS 수급·신용잔고 — 종목당 호출이 많은 무거운 갱신의 진행 상태. */
+/** 봉·수급·신용잔고·VI·시장 자금 — 종목당 호출이 많은 무거운 갱신의 진행 상태. */
 export type HeavyUpdateStatus = {
   running: boolean
   phase: string
@@ -893,7 +893,7 @@ export async function fetchFreshness(): Promise<DataFreshness> {
 // 화면 버튼은 `startHeavyUpdate` 하나뿐이다 — 그게 끝에 이 일까지 한다(오너 요청 2026-08-29).
 // 엔드포인트(`/api/data/refresh`)는 남겨 둔다. 서버 시작 때와 손으로 부를 때 쓴다.
 
-/** 봉·수급·거래원·공시·신용잔고를 한 번에 받아온다 — 서버 뒤에서 도니 창을 닫아도 계속된다.
+/** 봉·수급·거래원·공시·신용잔고·VI·시장 자금을 한 번에 받는다 — 창을 닫아도 계속된다.
  *  분봉까지 늘 받는다. 켜고 끄는 값은 없다(오너 결정 2026-08-29). */
 export async function startHeavyUpdate(): Promise<{ started: boolean; message: string }> {
   return postJson('/api/data/update', {})

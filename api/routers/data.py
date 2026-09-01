@@ -83,7 +83,7 @@ _UPDATE_STATE: dict[str, Any] = {
 
 
 def _run_heavy_update() -> None:
-    """나무 봉 증분 + KIS 수급·신용잔고 — `scripts/update_data.py` 를 뒤에서 그대로 돌린다.
+    """봉·수급·신용잔고·VI·시장 자금 — `scripts/update_data.py` 를 뒤에서 그대로 돌린다.
 
     브라우저를 닫거나 새로고침해도 이 스레드는 서버 프로세스가 살아 있는 한 계속 돈다
     (오너 요청 2026-08-22: "웹상에서 다 갱신 가능하도록, 끊겨도 문제없도록"). 겹침 방지는
@@ -117,7 +117,7 @@ def _run_heavy_update() -> None:
 
 @router.post("/api/data/update")
 def api_data_update() -> dict:
-    """나무 봉·KIS 수급·신용잔고 증분 — 종목당 호출이 많은(수천 건) **무거운** 갱신.
+    """봉·수급·신용잔고·VI·시장 자금 증분 — 종목당 호출이 많은 **무거운** 갱신.
 
     조회만 한다. 주문 없음. 서버 백그라운드 스레드로 돌아서 브라우저를 닫아도 계속
     진행된다 — 다시 열면 `/api/data/freshness` 의 `heavy` 필드로 진행 상황을 이어서 본다.

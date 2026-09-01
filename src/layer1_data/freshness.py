@@ -183,6 +183,20 @@ SOURCES: list[dict[str, Any]] = [
         "date_col": "deal_date",
     },
     {
+        "key": "market_funds",
+        "label": "시장 전체 예탁금·신용융자",
+        "why": "고객예탁금·파생상품 예수금·미수금·시장 전체 신용융자 흐름입니다.",
+        "dir": "market_funds",
+        "date_col": "date",
+    },
+    {
+        "key": "market_vi",
+        "label": "VI 발동 내역",
+        "why": "분봉 체결이 멈춘 때가 변동성완화장치(VI) 때문인지 확인할 때 씁니다.",
+        "dir": "market_state/vi",
+        "date_col": "bsop_date",
+    },
+    {
         "key": "members_daily",
         "label": "거래원(증권사별 매매)",
         "why": "어느 증권사 창구로 사고팔았나. KIS 가 260거래일치만 줘서 안 모으면 사라집니다.",

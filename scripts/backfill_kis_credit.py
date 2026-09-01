@@ -30,7 +30,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import backfill_kis_supply as base  # noqa: E402  (유니버스·클라이언트 재사용)
 
-from src.layer4_execution.brokers.kis.client import KisApiError, KisClient  # noqa: E402
+from src.layer4_execution.brokers.kis.client import (  # noqa: E402
+    CallPolicy,
+    KisApiError,
+    KisClient,
+)
 
 OUT_DIR = ROOT / "data" / "derived" / "credit"
 STATE_PATH = OUT_DIR / "_state.json"
@@ -44,7 +48,23 @@ CREDIT_TR = "FHPST04760000"
 FLOOR_DATE = "20070712"
 MAX_PAGES_PER_CODE = 300
 WORKERS = 5  # 신용잔고는 응답이 가벼워 3줄기에서 거절 0.03%뿐 — 오너 승인(2026-08-16)으로 상향
+CREDIT_RATE_PER_SECOND = 10.0
+CREDIT_POLICY = CallPolicy(
+    min_interval_sec=WORKERS / CREDIT_RATE_PER_SECOND,
+    max_attempts=5,
+    backoff_base_sec=2.0,
+)
 STATE_LOCK = threading.Lock()
+_LOCAL = threading.local()
+
+
+def _thread_client() -> KisClient:
+    """신용잔고 전용 초당 10건 정책. 수급용 고속 정책과 분리한다."""
+    got = getattr(_LOCAL, "client", None)
+    if got is None:
+        got = KisClient(*base.make_client_parts(), policy=CREDIT_POLICY)
+        _LOCAL.client = got
+    return got
 
 
 def load_state() -> dict:
@@ -105,7 +125,7 @@ def backfill_one(code: str, row: pd.Series, state: dict) -> None:
     df = None
     for net_retry in range(1, 11):
         try:
-            df = collect_code(base._thread_client(), code, first, last)
+            df = collect_code(_thread_client(), code, first, last)
             break
         except KisApiError as e:
             with STATE_LOCK:
@@ -117,7 +137,7 @@ def backfill_one(code: str, row: pd.Series, state: dict) -> None:
             wait = min(60 * net_retry, 600)
             print(f"  ~ 네트워크 오류({net_retry}/10), {wait}초 후 재시도: {e}", flush=True)
             time.sleep(wait)
-            base._LOCAL.client = None
+            _LOCAL.client = None
     if df is None:
         return
 

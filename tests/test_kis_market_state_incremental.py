@@ -48,6 +48,7 @@ def test_daily_update_runs_only_missing_vi_days(monkeypatch: pytest.MonkeyPatch,
     called: list[tuple[str, str]] = []
 
     monkeypatch.setattr(market_state, "all_codes", lambda: ["005930"])
+    monkeypatch.setattr(market_state, "listed_stock_codes", lambda: ["005930"])
     monkeypatch.setattr(
         market_state, "trading_days", lambda _since, _until: ["20260828", "20260831"]
     )
@@ -64,7 +65,7 @@ def test_daily_update_runs_only_missing_vi_days(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(
         market_state,
         "collect_day_vi",
-        lambda _codes, day: called.append(("vi", day)) or (3, 0, []),
+        lambda _codes, day, **_kwargs: called.append(("vi", day)) or (3, 0, []),
     )
 
     result = market_state.update_daily(
@@ -78,3 +79,49 @@ def test_daily_update_runs_only_missing_vi_days(monkeypatch: pytest.MonkeyPatch,
     ]
     assert result["vi"] == {"days": 1, "rows": 3, "errors": 0}
     assert notes.data["vi:20260831"]["done"] is True
+
+
+def test_flags_lane_uses_the_measured_optimal_rate() -> None:
+    import scripts.backfill_kis_market_state as market_state
+
+    workers, rate = market_state.LANES["flags"]
+    assert workers == 6
+    assert rate == 16.0
+
+
+def test_alphanumeric_stock_code_can_be_assigned_to_a_key() -> None:
+    import scripts.backfill_kis_market_state as market_state
+
+    assert market_state.key_index("0000D0", 3) in {0, 1, 2}
+
+
+def test_daily_update_retries_only_failed_vi_codes(monkeypatch, tmp_path) -> None:
+    import scripts.backfill_kis_market_state as market_state
+
+    notes = market_state.Notes(tmp_path / "state.json")
+    notes.data = {
+        "overtime:20260901": {"done": True, "errors": 0},
+        "flags:20260901": {"done": True, "errors": 0},
+        "vi:20260831": {
+            "done": False,
+            "errors": 2,
+            "failed_codes": ["0000D0", "00088K"],
+        },
+    }
+    called = []
+    monkeypatch.setattr(market_state, "all_codes", lambda: ["005930", "0000D0", "00088K"])
+    monkeypatch.setattr(market_state, "listed_stock_codes", lambda: ["005930"])
+    monkeypatch.setattr(market_state, "trading_days", lambda _since, _until: ["20260831"])
+    monkeypatch.setattr(
+        market_state,
+        "collect_day_vi",
+        lambda codes, day, **kwargs: called.append((codes, day, kwargs)) or (2, 0, []),
+    )
+
+    market_state.update_daily(
+        "20260831", notes=notes, today="20260901", prepare_credentials=False
+    )
+
+    assert called == [
+        (["0000D0", "00088K"], "20260831", {"merge_existing": True})
+    ]

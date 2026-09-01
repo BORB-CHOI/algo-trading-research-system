@@ -8,6 +8,7 @@
   분봉 — 1분봉만 받고 굵은 건 9종 전부 만들어 전수 대조 (ADR-0022·0023).
         그 1분봉은 **키움에서** 받는다 (ADR-0023) — 나무 20.9분 → 9.5분, 보관 39일 → 262일
   KIS 수급 · 거래원 상위5 · DART 공시(이번 달) · KIS 신용잔고
+  KIS VI·종목상태·시간외 · 금융투자협회 예탁금·선물예수금·미수금·신용융자
 
 **달력을 안 본다.** 무슨 요일에 켜든 같은 일을 한다. 무엇이 밀렸는지는 파일이 알고 있고,
 각 단계가 "저장된 마지막 날짜 < 시장 마지막 거래일"일 때만 받는다.
@@ -80,6 +81,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import backfill_dart_disclosures as disclosures  # noqa: E402
 import backfill_kis_credit as credit  # noqa: E402
+import backfill_kis_market_state as market_state  # noqa: E402
 import backfill_kis_supply as supply  # noqa: E402
 import collect_kis_members as members  # noqa: E402
 import collect_namuh_bars as bars  # noqa: E402
@@ -88,6 +90,7 @@ from src.layer1_data import (  # noqa: E402
     freshness,
     kis_snapshot,
     kiwoom_bars,
+    kofia_market_funds,
     krx_gapfill,
     krx_openapi,
     last_dates,
@@ -1062,6 +1065,16 @@ def _bars_since(market: str, code: str, gubun: str, xtick: str | None, since: st
 KIS_UPDATE_WORKERS = 5  # 오너 결정 2026-08-18: 5줄기(초당 10건, 한도 20). 거절은 재시도가 받는다.
 
 
+def kis_client_for(module):
+    """수집기별 호출 제한이 적용된 전용 클라이언트를 돌려준다."""
+    return getattr(module, "_thread_client", supply._thread_client)()
+
+
+def reset_kis_client(module) -> None:
+    local = getattr(module, "_LOCAL", supply._LOCAL)
+    local.client = None
+
+
 def update_kis(
     module,
     out_dir: Path,
@@ -1108,7 +1121,7 @@ def update_kis(
             return  # 마지막 거래일까지 이미 있다 — 파일도 안 열고 호출도 안 한다
         old = parquet_io.read(path)
         try:
-            new = module.collect_code(supply._thread_client(), code, since, today)
+            new = module.collect_code(kis_client_for(module), code, since, today)
         except module.KisApiError as e:
             # KIS 는 조회 가능 시각이 정해진 TR 이 있다(수급: OPSQ2001 "TIME LIMIT 00:00 ~ 15:40").
             # 시간 문제면 어느 종목을 불러도 똑같이 막히므로 첫 건에서 통째로 멈춘다 —
@@ -1121,13 +1134,13 @@ def update_kis(
             with lock:
                 totals["errors"] += 1
             time.sleep(5)
-            supply._LOCAL.client = None
+            reset_kis_client(module)
             return
         except OSError:
             with lock:
                 totals["errors"] += 1
             time.sleep(5)
-            supply._LOCAL.client = None
+            reset_kis_client(module)
             return
         grown = merge_save(path, old, new, [date_col])
         with lock:
@@ -1272,12 +1285,18 @@ def _kis_stream(last_day: str) -> dict:
         ("members", lambda: {"rows": members.snapshot_all()}),
         ("credit", lambda: update_kis(
             credit, credit.OUT_DIR, "deal_date", "신용잔고", last_day)),
+        ("market_state", lambda: market_state.update_daily(last_day)),
     ):
         try:
             out[name] = run()
         except Exception as e:  # noqa: BLE001 — 한 단계 때문에 회차를 버리지 않는다
             out[name] = {"error": f"{type(e).__name__}: {e}"}
     return out
+
+
+def update_market_funds() -> dict:
+    """금융투자협회 시장 전체 예탁금·미수금·신용융자. 과거와 증분이 같은 수집기다."""
+    return kofia_market_funds.update()
 
 
 def run_update(*, progress: ProgressFn | None = None) -> dict:
@@ -1325,6 +1344,8 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
     # 중간에 어디서 죽더라도 반드시 닫히게 try 밖에서 만든다.
     dart_pool = ThreadPoolExecutor(max_workers=1)
     dart_future = dart_pool.submit(update_disclosures)
+    funds_pool = ThreadPoolExecutor(max_workers=1)
+    funds_future = funds_pool.submit(update_market_funds)
     kis_pool = ThreadPoolExecutor(max_workers=1)
     try:
         last_day = market_last_trading_day()
@@ -1366,7 +1387,12 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
             last_day, progress=progress
         )
         step("③ KIS 수급·거래원·신용잔고 — 뒤에서 돌던 것 거두기...")
-        summary.update(kis_future.result(timeout=3600))
+        summary.update(kis_future.result())
+        step("③-2 금융투자협회 예탁금·미수금·신용융자 — 뒤에서 돌던 것 거두기...")
+        try:
+            summary["market_funds"] = funds_future.result(timeout=180)
+        except Exception as e:  # 시장자금 하나 때문에 나머지 갱신을 버리지 않는다
+            summary["market_funds"] = {"error": f"{type(e).__name__}: {e}"}
         step("③-3 DART 공시 — 뒤에서 돌던 것 거두기...")
         try:
             summary["disclosures"] = dart_future.result(timeout=600)
@@ -1382,6 +1408,7 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
         raise
     finally:
         dart_pool.shutdown(wait=False)
+        funds_pool.shutdown(wait=False)
         kis_pool.shutdown(wait=False)
         close_stage()
         summary["timing_sec"] = timing

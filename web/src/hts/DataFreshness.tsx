@@ -74,7 +74,7 @@ export function DataFreshness() {
   const others = RANK[data.worst] > RANK[chartGrade] ? data.worst : null
 
   // 버튼 하나로 끝낸다 — 무거운 갱신이 끝에 "어디까지 받았나"까지 다시 센다.
-  // 요일은 서버가 본다(토요일이면 분봉·신용잔고까지). 화면에서 고를 게 없다.
+  // 날짜와 장 상태는 서버가 본다. 화면에서 고를 게 없다.
   async function onUpdate() {
     setMsg('')
     try {
@@ -142,7 +142,7 @@ export function DataFreshness() {
             </button>
             <p className="hint">
               밀린 날짜만큼 따라잡습니다. <b>창을 닫아도 서버에서 계속 돕니다</b> — 다시 열면
-              여기서 이어서 보입니다. 토요일에 누르면 분봉·신용잔고까지 같이 받습니다.
+              여기서 이어서 보입니다. 일봉·분봉·수급·VI·시장 자금을 한 번에 갱신합니다.
             </p>
 
             {data.heavy.running && (
@@ -183,7 +183,6 @@ export function DataFreshness() {
             </div>
             {msg && <p className="hint">{msg}</p>}
           </div>
-        </div>
       )}
     </div>
   )
