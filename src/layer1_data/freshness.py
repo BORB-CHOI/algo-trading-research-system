@@ -63,7 +63,13 @@ def read_marks(*, root: Path = DEFAULT_ROOT) -> dict[str, dict]:
 
 
 def write_mark(
-    source: str, last_date: Any, *, n_symbols: int | None = None, root: Path = DEFAULT_ROOT
+    source: str,
+    last_date: Any,
+    *,
+    n_symbols: int | None = None,
+    root: Path = DEFAULT_ROOT,
+    availability: str | None = None,
+    note: str | None = None,
 ) -> None:
     """한 소스의 워터마크를 갱신한다. 다른 소스는 그대로 둔다."""
     root = Path(root)
@@ -75,6 +81,10 @@ def write_mark(
     }
     if n_symbols is not None:
         entry["n_symbols"] = int(n_symbols)
+    if availability is not None:
+        entry["availability"] = availability
+    if note is not None:
+        entry["note"] = note
     (root / MARK_FILE).write_text(
         json.dumps({**marks, source: entry}, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -197,10 +207,10 @@ SOURCES: list[dict[str, Any]] = [
         "date_col": "bsop_date",
     },
     {
-        "key": "members_daily",
+        "key": "members_snapshot",
         "label": "거래원(증권사별 매매)",
-        "why": "어느 증권사 창구로 사고팔았나. KIS 가 260거래일치만 줘서 안 모으면 사라집니다.",
-        "dir": "members/daily",
+        "why": "오늘 어느 증권사 창구의 매수·매도가 많았는지 보여 주는 전 종목 자료입니다.",
+        "dir": "members/snapshot",
         "date_col": "date",
     },
     {
@@ -220,14 +230,21 @@ def report(*, root: Path = DEFAULT_ROOT, today: pd.Timestamp | None = None) -> l
     for src in SOURCES:
         mark = marks.get(src["key"], {})
         last = mark.get("last_date") or None
+        availability = mark.get("availability")
+        unavailable = availability == "unavailable_now"
+        provider_latest = availability == "provider_latest"
         rows.append(
             {
                 "key": src["key"],
                 "label": src["label"],
                 "why": src["why"],
                 "last_date": last,
-                "days_behind": days_behind(last, today=today),
-                "grade": grade(last, today=today),
+                "days_behind": None if (unavailable or provider_latest) else days_behind(last, today=today),
+                "grade": (
+                    "unavailable" if unavailable else "ok" if provider_latest else grade(last, today=today)
+                ),
+                "availability": availability,
+                "note": mark.get("note"),
                 "n_symbols": mark.get("n_symbols"),
                 "checked_at": mark.get("checked_at"),
             }
@@ -235,7 +252,7 @@ def report(*, root: Path = DEFAULT_ROOT, today: pd.Timestamp | None = None) -> l
     return rows
 
 
-_GRADE_ORDER = {"ok": 0, "warn": 1, "stale": 2}
+_GRADE_ORDER = {"unavailable": -1, "ok": 0, "warn": 1, "stale": 2}
 
 
 def worst_grade(*, root: Path = DEFAULT_ROOT, today: pd.Timestamp | None = None) -> str:

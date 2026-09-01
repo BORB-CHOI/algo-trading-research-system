@@ -28,6 +28,7 @@ import json
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -103,15 +104,21 @@ def listed_codes() -> list[str]:
 # ── 당일 상위 5 ───────────────────────────────────────────────
 
 
-def snapshot_all() -> int:
+def snapshot_all(
+    *,
+    as_of: str | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> dict:
     """전 종목 당일 상위5 → snapshot/{YYYY-MM-DD}.parquet. 거래원 이름 사전도 채운다."""
     codes = listed_codes()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = as_of or datetime.now().strftime("%Y-%m-%d")
     names = _load(MEMBERS_PATH, {})
     rows: list[dict] = []
+    failed: list[str] = []
+    finished = 0
     print(f"당일 거래원 {len(codes)}종목, 병렬 {WORKERS}줄기", flush=True)
 
-    def one(code: str) -> None:
+    def fetch_one(code: str) -> None:
         try:
             body = (
                 _thread_client()
@@ -119,25 +126,59 @@ def snapshot_all() -> int:
                 .body
             )
         except (S.KisApiError, OSError):
+            with _LOCK:
+                failed.append(code)
             return
-        out = body.get("output") or []
-        o = out[0] if isinstance(out, list) and out else (out if isinstance(out, dict) else {})
-        if not o:
+        out = body.get("output")
+        if out is None or out == []:
+            with _LOCK:
+                failed.append(code)
+            return
+        if not isinstance(out, (list, dict)):
+            with _LOCK:
+                failed.append(code)
+            return
+        o = out[0] if isinstance(out, list) and out else out
+        if not isinstance(o, dict):
+            with _LOCK:
+                failed.append(code)
             return
         with _LOCK:
             rows.extend(parse_snapshot(o, code, today))
             names.update(merge_member_names(names, o))
 
+    def one(code: str) -> None:
+        nonlocal finished
+        try:
+            fetch_one(code)
+        finally:
+            with _LOCK:
+                finished += 1
+                now = finished
+            if progress and (now % 100 == 0 or now == len(codes)):
+                progress("거래원 전 종목 받는 중", now, len(codes))
+
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         list(pool.map(one, codes))
 
-    if rows:
+    if rows and not failed:
         SNAP_DIR.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(rows).to_parquet(SNAP_DIR / f"{today}.parquet", index=False)
     _save(MEMBERS_PATH, names)
     named = sum(1 for v in names.values() if v)
     print(f"저장 {len(rows):,}줄 · 거래원 이름 {named}/{len(names)}개 확보")
-    return len(rows)
+    if progress:
+        progress(
+            f"거래원 저장 완료: {len(rows):,}줄 · 이름 {named}/{len(names)}개 확인",
+            len(codes) - len(failed),
+            len(codes),
+        )
+    return {
+        "rows": len(rows),
+        "total_codes": len(codes),
+        "failed_codes": len(failed),
+        "complete": not failed,
+    }
 
 
 # ── 일자별 (종목 × 회원사) ────────────────────────────────────

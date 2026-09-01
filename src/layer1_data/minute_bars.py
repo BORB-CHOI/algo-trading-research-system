@@ -448,7 +448,11 @@ def build_one(job: tuple) -> dict:
                 was = seen.get(str(path))
                 if now and was and was[0] == now:
                     acc["cached"] += 1
-                    acc["bad"] += int(was[1])
+                    # was[1]은 덮기 전 저장본과 만든 값의 차이 수다. 그 회차에서 이미
+                    # 만든 값으로 덮었고 now가 같다면 현재 파일은 바로잡힌 상태다.
+                    # 옛 차이 수를 매 회차 다시 오류처럼 더하지 않는다.
+                    if int(was[1]):
+                        stamps[str(path)] = [now, 0]
                     continue
             stored = parquet_io.read(path)
             if stored is None or stored.empty:

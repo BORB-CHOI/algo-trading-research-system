@@ -1091,11 +1091,24 @@ def update_kis(
     master = bars.load_master("m_new_stock")
     today = datetime.now().strftime("%Y%m%d")
     codes = sorted({str(r.sCode) for r in master.itertuples()})
-    totals: dict = {"added": 0, "errors": 0, "skipped": 0, "called": 0}
+    totals: dict = {
+        "added": 0,
+        "errors": 0,
+        "skipped": 0,
+        "called": 0,
+        "missing_backfill": 0,
+        "known_no_data": 0,
+        "empty_responses": 0,
+        "observed_latest": "",
+    }
     lock = threading.Lock()
     done_n = 0
 
     stop = threading.Event()  # 시간 제한을 만나면 전 종목 헛호출을 멈춘다
+    try:
+        backfill_state = module.load_state()
+    except (AttributeError, OSError, ValueError):
+        backfill_state = {}
 
     def work(code: str) -> None:
         try:
@@ -1114,6 +1127,11 @@ def update_kis(
         path = out_dir / f"{code}.parquet"
         since = last_date_of(path, date_col)
         if not since:
+            with lock:
+                if backfill_state.get(code, {}).get("done"):
+                    totals["known_no_data"] += 1
+                else:
+                    totals["missing_backfill"] += 1
             return  # 백필이 아직 안 만든 종목 — 백필 몫이다
         if last_day and since >= last_day:
             with lock:
@@ -1142,10 +1160,18 @@ def update_kis(
             time.sleep(5)
             reset_kis_client(module)
             return
+        if new is None or new.empty or date_col not in new.columns:
+            with lock:
+                totals["called"] += 1
+                totals["empty_responses"] += 1
+            return
+        observed = max(str(v) for v in new[date_col].dropna().tolist()) if len(new) else ""
         grown = merge_save(path, old, new, [date_col])
         with lock:
             totals["added"] += grown
             totals["called"] += 1
+            if observed > totals["observed_latest"]:
+                totals["observed_latest"] = observed
 
     with ThreadPoolExecutor(max_workers=KIS_UPDATE_WORKERS) as pool:
         list(pool.map(work, codes))
@@ -1155,6 +1181,11 @@ def update_kis(
         "errors": totals["errors"],
         "skipped": totals["skipped"],
         "called": totals["called"],
+        "missing_backfill": totals["missing_backfill"],
+        "known_no_data": totals["known_no_data"],
+        "empty_responses": totals["empty_responses"],
+        "observed_latest": totals["observed_latest"],
+        "target_codes": len(codes),
     }
     if totals.get("blocked"):
         out["blocked"] = totals["blocked"]  # 조회 가능 시각이 아니었다 — 다음 회차에 받는다
@@ -1270,33 +1301,117 @@ def drop_lock() -> None:
     LOCK_PATH.unlink(missing_ok=True)
 
 
-def _kis_stream(last_day: str) -> dict:
-    """수급 → 거래원 → 신용잔고를 **한 갈래로 묶어** 나무 갈래와 같이 돌린다.
+def _kis_stream(last_day: str, progress: ProgressFn | None = None) -> dict:
+    """수급 판정 뒤 거래원·신용잔고를 함께 받고, 끝에 시장 상태를 받는다.
 
-    셋 다 KIS 서버라 서로 한도를 나눠 쓰므로 이 안에서는 차례로 간다. 대신 나무 갈래와는
-    한도가 따로 놀아 통째로 겹칠 수 있다.
+    거래원과 신용잔고는 각각 초당 10건으로 제한되어 둘을 합쳐도 KIS 한도 20건 안이다.
+    수급은 별도 정책이 더 빠르므로 먼저 끝내거나 조회 불가 시간임을 확인한 뒤 둘을 띄운다.
+    나무 갈래와는 한도가 따로 놀아 통째로 겹칠 수 있다.
 
     하나가 죽어도 나머지를 버리지 않는다 — 실패도 값으로 담아 돌려준다.
     """
     out: dict = {}
-    for name, run in (
-        ("supply", lambda: update_kis(
-            supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day)),
-        ("members", lambda: {"rows": members.snapshot_all()}),
-        ("credit", lambda: update_kis(
-            credit, credit.OUT_DIR, "deal_date", "신용잔고", last_day)),
-        ("market_state", lambda: market_state.update_daily(last_day)),
-    ):
+
+    def safely(name: str, run) -> None:
         try:
             out[name] = run()
         except Exception as e:  # noqa: BLE001 — 한 단계 때문에 회차를 버리지 않는다
             out[name] = {"error": f"{type(e).__name__}: {e}"}
+
+    safely("supply", lambda: update_kis(
+        supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day, progress=progress
+    ))
+    if progress:
+        if out["supply"].get("blocked"):
+            progress("수급: 현재 수집 가능 시간이 아니어서 제외", 0, 0)
+        else:
+            progress("수급 확인 완료", 1, 1)
+    as_of = f"{last_day[:4]}-{last_day[4:6]}-{last_day[6:]}" if last_day else None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {
+            "members": pool.submit(
+                safely,
+                "members",
+                lambda: members.snapshot_all(as_of=as_of, progress=progress),
+            ),
+            "credit": pool.submit(
+                safely,
+                "credit",
+                lambda: update_kis(
+                    credit, credit.OUT_DIR, "deal_date", "신용잔고", last_day,
+                    progress=progress,
+                ),
+            ),
+        }
+        for future in futures.values():
+            future.result()
+    if progress:
+        credit_result = out.get("credit", {})
+        progress(
+            f"신용잔고 완료: {credit_result.get('called', 0):,}종목 확인",
+            int(credit_result.get("called", 0)),
+            int(credit_result.get("called", 0)) + int(credit_result.get("errors", 0)),
+        )
+    safely("market_state", lambda: market_state.update_daily(last_day))
     return out
 
 
 def update_market_funds() -> dict:
     """금융투자협회 시장 전체 예탁금·미수금·신용융자. 과거와 증분이 같은 수집기다."""
     return kofia_market_funds.update()
+
+
+def web_update_problems(summary: dict) -> list[str]:
+    """웹 갱신에서 실제로 빠진 항목. 수급 조회 불가 시간만 완료 판정에서 뺀다."""
+    problems: list[str] = []
+    supply_result = summary.get("supply", {})
+    if not supply_result.get("blocked"):
+        if supply_result.get("error"):
+            problems.append(f"수급: {supply_result['error']}")
+        elif int(supply_result.get("errors", 0)):
+            problems.append(f"수급 {supply_result['errors']}종목을 받지 못했습니다.")
+
+    members_result = summary.get("members", {})
+    failed_members = int(members_result.get("failed_codes", 0))
+    if members_result.get("error"):
+        problems.append(f"거래원: {members_result['error']}")
+    elif failed_members:
+        problems.append(f"거래원 {failed_members}종목을 받지 못했습니다.")
+
+    for key, label in (("bars_daily", "일봉"), ("bars_period_made", "주·월봉 대조"),
+                       ("bars_period_namuh", "주·월봉"),
+                       ("bars_minutes_made", "굵은 분봉")):
+        errors = int(summary.get(key, {}).get("errors", 0))
+        if errors:
+            problems.append(f"{label} {errors}종목을 처리하지 못했습니다.")
+    minute_errors = sum(
+        int(result.get("errors", 0))
+        for result in summary.get("bars_min1", {}).values()
+        if isinstance(result, dict)
+    )
+    if minute_errors:
+        problems.append(f"1분봉 {minute_errors}종목을 받지 못했습니다.")
+
+    for key, label in (("credit", "신용잔고"), ("market_state", "시장 상태"),
+                       ("market_funds", "시장 자금"), ("disclosures", "공시")):
+        result = summary.get(key, {})
+        if result.get("error"):
+            problems.append(f"{label}: {result['error']}")
+        elif int(result.get("errors", 0)):
+            problems.append(f"{label} {result['errors']}건을 받지 못했습니다.")
+        elif result.get("skipped") and key == "disclosures":
+            problems.append(f"공시: {result['skipped']}")
+    return problems
+
+
+def credit_is_provider_latest(result: dict) -> bool:
+    """실제 응답 날짜를 빠짐없이 확인했을 때만 제공처 최신으로 인정한다."""
+    return bool(
+        int(result.get("called", 0))
+        and result.get("observed_latest")
+        and not int(result.get("errors", 0))
+        and not int(result.get("empty_responses", 0))
+    )
 
 
 def run_update(*, progress: ProgressFn | None = None) -> dict:
@@ -1362,7 +1477,7 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
         # 부를 동안 다른 쪽은 놀고 있다. 실측 2026-08-29: KIS 쪽 합이 약 7.5분인데
         # 나무 쪽이 26분이라, 겹치면 **KIS 시간이 통째로 사라진다.**
         # DART 는 이미 같은 방식으로 앞에서 띄워 뒀다.
-        kis_future = kis_pool.submit(_kis_stream, last_day)
+        kis_future = kis_pool.submit(_kis_stream, last_day, progress)
 
         # 일봉을 먼저 최신으로 만든 뒤에야 주·월봉을 그 일봉으로 만들 수 있다.
         step("① 나무 일봉 증분 — KIS 가 못 채운 것만...")
@@ -1401,7 +1516,42 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
 
         step("⑤ 어디까지 받았나 다시 세기...")
         summary["freshness"] = freshness.refresh_marks()
-        summary["ok"] = True
+        supply_result = summary.get("supply", {})
+        if supply_result.get("blocked"):
+            marks = freshness.read_marks()
+            last = marks.get("supply", {}).get("last_date")
+            freshness.write_mark(
+                "supply",
+                last,
+                n_symbols=marks.get("supply", {}).get("n_symbols"),
+                availability="unavailable_now",
+                note="현재 수집 가능 시간이 아닙니다.",
+            )
+        credit_result = summary.get("credit", {})
+        if credit_is_provider_latest(credit_result):
+            marks = freshness.read_marks()
+            last = marks.get("credit", {}).get("last_date")
+            freshness.write_mark(
+                "credit",
+                last,
+                n_symbols=marks.get("credit", {}).get("n_symbols"),
+                availability="provider_latest",
+                note=(
+                    "이번 증분 대상 종목에서 제공처가 돌려준 최신 날짜는 "
+                    f"{freshness._norm(credit_result['observed_latest'])}입니다. "
+                    f"사전 수집 자료가 없는 후보 {credit_result.get('missing_backfill', 0):,}종목은 "
+                    "별도 사전 수집 대상입니다."
+                ),
+            )
+        summary["precollection_needed"] = {
+            key: int(summary.get(key, {}).get("missing_backfill", 0))
+            for key in ("supply", "credit")
+        }
+        problems = web_update_problems(summary)
+        summary["problems"] = problems
+        summary["ok"] = not problems
+        if problems:
+            summary["error"] = " ".join(problems)
     except Exception as e:  # 요약 로그에 실패도 남긴다 — 조용히 죽으면 공백을 모른다
         summary["ok"] = False
         summary["error"] = f"{type(e).__name__}: {e}"
