@@ -1684,6 +1684,7 @@ table.grid.tight td {
 .g-ok    .dot, .g-ok    > .dot { background: #16a34a; }
 .g-warn  .dot, .g-warn  > .dot { background: #d97706; }
 .g-stale .dot, .g-stale > .dot { background: var(--hts-up); }
+.g-unavailable .dot, .g-unavailable > .dot { background: #64748b; }
 .fresh-pill.g-warn  { border-color: #fbbf24; background: #fffbeb; color: #92400e; }
 .fresh-pill.g-stale { border-color: #fca5a5; background: #fef2f2; color: #b91c1c; }
 
@@ -1709,14 +1710,21 @@ table.grid.tight td {
 }
 .fresh-list li:first-child { border-top: 0; }
 .fresh-list li .dot { margin-top: 4px; }
-.fresh-list .who { flex: 1; min-width: 0; }
-.fresh-list .who b { display: block; font-size: 12px; }
+.fresh-list .who { flex: 1 1 auto; min-width: 150px; }
+.fresh-list .who b { display: block; font-size: 12px; white-space: nowrap; }
 .fresh-list .who small { display: block; color: var(--hts-text-3); font-size: 11px; line-height: 1.4; }
-.fresh-list .when { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.fresh-list .when b { display: block; font-size: 12px; }
-.fresh-list .when small { display: block; font-size: 10px; color: var(--hts-text-3); }
+.fresh-list .when {
+  flex: 0 0 126px; min-width: 0; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.fresh-list .when b { display: block; font-size: 12px; white-space: nowrap; }
+.fresh-list .when small {
+  display: block; font-size: 10px; line-height: 1.35; color: var(--hts-text-3);
+  white-space: normal; overflow-wrap: anywhere;
+}
 .fresh-list li.g-warn  .when b { color: #b45309; }
 .fresh-list li.g-stale .when b { color: var(--hts-up); }
+.fresh-list li.g-unavailable .when b { color: #475569; }
 
 .fresh-act { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--hts-line); }
 .fresh-act button { width: 100%; }
@@ -1756,6 +1764,19 @@ table.grid.tight td {
   transition: width .3s ease-out;
 }
 .fresh-gauge .hint { margin: 6px 0 0; }
+.fresh-log {
+  margin-top: 8px; padding: 8px; max-height: 180px; overflow-y: auto;
+  border: 1px solid var(--hts-line); border-radius: 6px; background: var(--hts-bg);
+}
+.fresh-log > b { display: block; margin-bottom: 5px; font-size: 11px; }
+.fresh-log ol { list-style: none; margin: 0; padding: 0; }
+.fresh-log li {
+  display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 6px;
+  padding: 3px 0; font-size: 10px; color: var(--hts-text-2);
+}
+.fresh-log time, .fresh-log em {
+  color: var(--hts-text-3); font-style: normal; font-variant-numeric: tabular-nums;
+}
 
 
 /* ④ 백테스팅 — 고른 전략에 뭐가 걸려 있나 (펼쳐 보기). 보여주기 전용. */

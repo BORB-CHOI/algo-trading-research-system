@@ -853,7 +853,9 @@ export type DataSourceFreshness = {
   why: string // 이게 묵으면 뭐가 잘못되나
   last_date: string | null // 마지막으로 들어온 날. 받은 적 없으면 null
   days_behind: number | null
-  grade: 'ok' | 'warn' | 'stale'
+    grade: 'ok' | 'warn' | 'stale' | 'unavailable'
+    availability?: 'unavailable_now' | 'provider_latest' | null
+    note?: string | null
   n_symbols?: number | null
   checked_at?: string | null
 }
@@ -870,8 +872,20 @@ export type HeavyUpdateStatus = {
   phase: string
   done: number
   total: number
+  events: Array<{
+    at: string
+    message: string
+    done: number
+    total: number
+  }>
   finished_at: string | null
-  result: { ok?: boolean; error?: string; skipped?: string } | null
+  result: {
+    ok?: boolean
+    error?: string
+    skipped?: string
+    last_trading_day?: string
+    freshness?: Record<string, string>
+  } | null
 }
 
 export type DataFreshness = {

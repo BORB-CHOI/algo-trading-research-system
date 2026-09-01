@@ -11,15 +11,23 @@ import { fetchFreshness, startHeavyUpdate, type DataFreshness as Fresh } from '.
 
 const POLL_MS = 60_000
 
-const RANK: Record<string, number> = { ok: 0, warn: 1, stale: 2 }
+const RANK: Record<string, number> = { unavailable: -1, ok: 0, warn: 1, stale: 2 }
 
 const GRADE_WORD: Record<string, string> = {
   ok: '최신',
   warn: '조금 밀림',
   stale: '묵음',
+  unavailable: '지금은 받을 수 없음',
 }
 
-function behindText(s: { last_date: string | null; days_behind: number | null }): string {
+function behindText(s: {
+  last_date: string | null
+  days_behind: number | null
+  availability?: 'unavailable_now' | 'provider_latest' | null
+  note?: string | null
+}): string {
+  if (s.availability === 'provider_latest') return '제공처 최신 확인'
+  if (s.note) return s.note
   if (!s.last_date) return '받은 적 없음'
   if (!s.days_behind) return '최신'
   return `${s.days_behind}거래일 밀림`
@@ -45,7 +53,7 @@ export function DataFreshness() {
     return () => clearInterval(t)
   }, [load])
 
-  // 받아오는 동안엔 자주 확인한다. 데이터 받기는 수 분~수십 분이라 2초 주기 —
+  // 받아오는 동안엔 자주 확인한다. 현재 저장 상태의 전체 갱신은 약 5분이라 2초 주기 —
   // 창을 닫았다 열어도 서버가 계속 돌고 있으면 여기서 이어서 보인다(오너 요청 2026-08-22).
   // (`refreshing` 은 서버가 켜질 때 스스로 도는 가벼운 세기다 — 버튼과는 무관하다.)
   useEffect(() => {
@@ -120,7 +128,7 @@ export function DataFreshness() {
                   <b>{s.label}</b>
                   <small>{s.why}</small>
                 </div>
-                <div className="when">
+                <div className="when" title={s.note ?? undefined}>
                   <b>{s.last_date ?? '—'}</b>
                   <small>{behindText(s)}</small>
                 </div>
@@ -169,11 +177,36 @@ export function DataFreshness() {
               </div>
             )}
 
+            {data.heavy.events.length > 0 && (
+              <div className="fresh-log" aria-live="polite">
+                <b>갱신 진행 기록</b>
+                <ol>
+                  {data.heavy.events.slice().reverse().map((event, index) => (
+                    <li key={`${event.at}-${event.message}-${index}`}>
+                      <time>{event.at.slice(11, 19)}</time>
+                      <span>{event.message}</span>
+                      {event.total > 0 && (
+                        <em>{event.done.toLocaleString()} / {event.total.toLocaleString()}</em>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
             {!data.heavy.running && data.heavy.result?.error != null && (
               <p className="hint warn">지난번 오류: {data.heavy.result.error}</p>
             )}
             {!data.heavy.running && data.heavy.result?.skipped != null && (
               <p className="hint">지난번: {data.heavy.result.skipped}</p>
+            )}
+            {!data.heavy.running && data.heavy.result?.ok && (
+              <p className="hint">
+                지난번 완료: {data.heavy.finished_at?.replace('T', ' ').replace('+00:00', ' UTC')}
+                {data.heavy.result.last_trading_day && (
+                  <> · 확인한 마지막 거래일 {data.heavy.result.last_trading_day}</>
+                )}
+              </p>
             )}
 
               <p className="hint">
