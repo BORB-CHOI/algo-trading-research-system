@@ -33,8 +33,9 @@ load_dotenv(
 #
 # **서버를 켤 때는 빠른 것만 한다**: marcap `git pull`(몇 초) → marcap 뒤쪽 공백을 KRX 로
 # 채우기(날짜당 3콜, 몇 초) → 프로세스 캐시 비우기.
-# 차트 일봉의 정본이 그 깃 복제본이라, 그것만 당기면 차트 오른쪽 끝이 어제쯤 되고,
-# KRX 공백 채우기까지 하면 오늘(장 마감 후)까지 온다.
+# 시가총액과 상장폐지 종목 일봉의 정본이 그 깃 복제본이다. 나무 일봉이 없는 종목은
+# 이걸로 차트를 그리니, 그것만 당기면 오른쪽 끝이 어제쯤 되고 KRX 공백 채우기까지
+# 하면 오늘(장 마감 후)까지 온다.
 # 나무 봉·KIS 수급 증분은 호출 한도를 크게 태우므로 **서버가 멋대로 시작하지 않는다** —
 # 그건 사람이 `scripts/update_data.py` 로 돌린다.
 
@@ -71,7 +72,7 @@ def run_refresh(*, rescan: bool) -> dict:
         if REFRESH_STATE["running"]:
             return {"skipped": "이미 갱신 중입니다."}
         REFRESH_STATE["running"] = True
-    REFRESH_STATE.update(phase="차트 일봉 받는 중", done=0, total=0)
+    REFRESH_STATE.update(phase="시가총액 자료 받는 중", done=0, total=0)
 
     def progress(label: str, done: int, total: int) -> None:
         REFRESH_STATE.update(phase=f"{label} 훑는 중", done=done, total=total)
@@ -105,6 +106,6 @@ def startup_refresh() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """켜자마자 차트 일봉을 최신으로 — 뒤에서. 서버 뜨는 걸 막지 않는다."""
+    """켜자마자 시가총액 자료를 최신으로 — 뒤에서. 서버 뜨는 걸 막지 않는다."""
     threading.Thread(target=startup_refresh, daemon=True).start()
     yield

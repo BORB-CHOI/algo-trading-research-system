@@ -16,6 +16,18 @@ def test_freshness_reports_vi_and_market_funds() -> None:
     assert by_key["market_funds"]["date_col"] == "date"
 
 
+def test_freshness_uses_the_same_daily_sources_as_the_chart() -> None:
+    from src.layer1_data.freshness import SOURCES
+
+    by_key = {source["key"]: source for source in SOURCES}
+
+    assert by_key["namuh_day"]["label"] == "차트 일봉"
+    assert by_key["namuh_day"]["dir"] == "namuh_bars/krx/day"
+    assert by_key["namuh_unt_day"]["label"] == "통합·NXT 거래량"
+    assert by_key["namuh_unt_day"]["dir"] == "namuh_bars/unt/day"
+    assert by_key["marcap"]["label"] == "시가총액·상장폐지 종목 일봉"
+
+
 def test_web_members_freshness_uses_daily_snapshot_not_slow_backfill() -> None:
     from src.layer1_data.freshness import SOURCES
 

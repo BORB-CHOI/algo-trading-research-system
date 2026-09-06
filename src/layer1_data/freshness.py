@@ -166,16 +166,23 @@ def scan_last_date(
 SOURCES: list[dict[str, Any]] = [
     {
         "key": "marcap",
-        "label": "차트 일봉",
-        "why": "차트에 그려지는 일봉·시가총액입니다. 이게 묵으면 차트 오른쪽 끝이 과거입니다.",
+        "label": "시가총액·상장폐지 종목 일봉",
+        "why": "시가총액과 상장폐지 종목에 쓰는 자료입니다. 상장 종목 차트는 나무 일봉을 먼저 씁니다.",
         "dir": None,  # 연도별 한 파일 — 아래 refresh_marks 가 따로 다룬다
         "date_col": "Date",
     },
     {
         "key": "namuh_day",
-        "label": "통합·NXT 거래량",
-        "why": "KRX 말고 NXT까지 합친 거래량입니다. 없으면 KRX 체결만 보게 됩니다.",
+        "label": "차트 일봉",
+        "why": "상장 종목 차트와 분석에 실제로 쓰는 수정주가 일봉입니다.",
         "dir": "namuh_bars/krx/day",
+        "date_col": "bsop_date",
+    },
+    {
+        "key": "namuh_unt_day",
+        "label": "통합·NXT 거래량",
+        "why": "KRX와 NXT 체결을 합친 거래량입니다. 없으면 KRX 체결만 보게 됩니다.",
+        "dir": "namuh_bars/unt/day",
         "date_col": "bsop_date",
     },
     {
@@ -333,7 +340,7 @@ def _scan_marcap(marcap_dir: Path, recent_dir: Path | None = None) -> tuple[str 
     """marcap 은 연도별 한 파일이다 — 가장 늦은 연도 파일의 날짜 열만 본다.
 
     marcap 뒤쪽 공백을 KRX 로 채운 보충 파일(`recent/YYYY-MM-DD.parquet`)이 있으면 그 날짜가
-    차트 일봉의 실제 오른쪽 끝이다 — 파일 이름이 날짜라 열지 않고도 안다.
+    marcap 의 실제 오른쪽 끝이다 — 파일 이름이 날짜라 열지 않고도 안다.
     """
     import pyarrow.parquet as pq
 

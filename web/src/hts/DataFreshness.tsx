@@ -77,7 +77,7 @@ export function DataFreshness() {
   // 알약에 적힌 날짜는 **차트 일봉**의 날짜다. 그러니 알약 색도 차트 일봉 등급이어야 한다 —
   // 차트가 최신인데 수급이 묵었다고 알약이 빨개지면 "차트가 묵었나?"로 잘못 읽힌다.
   // 다른 소스가 더 나쁘면 옆에 작은 점을 하나 더 붙여 "열어 보라"고만 알린다.
-  const chart = data.sources.find((s) => s.key === 'marcap')
+  const chart = data.sources.find((s) => s.key === 'namuh_day')
   const chartGrade = chart?.grade ?? 'stale'
   const others = RANK[data.worst] > RANK[chartGrade] ? data.worst : null
 
