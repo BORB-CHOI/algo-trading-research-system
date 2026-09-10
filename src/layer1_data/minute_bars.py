@@ -431,8 +431,32 @@ def build_one(job: tuple) -> dict:
     found: list[tuple[str, int]] = []
     stamps: dict[str, list] = {}
     src = root / market / "min1" / f"{code}.parquet"
+    # ── **캐시를 먼저 확인한다** (2026-09-07) ────────────────────────────────
+    # 전에는 `stored_floor` 로 굵은 봉 8개 파일의 날짜 열을 다 읽은 **뒤에** 캐시를
+    # 확인했다. 캐시가 다 맞으면 그 읽기는 통째로 헛일이다. 실측(200종목 환산,
+    # 단일 스레드): stored_floor 519초 · 캐시 확인 12.5초 · 1분봉 읽기 58초.
+    # 할 일이 하나도 없는 회차가 147초씩 걸리던 게 이것 때문이다.
+    todo: list = list(widths)
+    if not full:  # 통째로 다시 만들 땐 캐시를 믿지 않는다
+        todo = []
+        for width in widths:
+            path = root / market / f"min{width}" / f"{code}.parquet"
+            now = stamp_of(src, path)
+            was = seen.get(str(path))
+            if now and was and was[0] == now:
+                acc["cached"] += 1
+                # was[1]은 덮기 전 저장본과 만든 값의 차이 수다. 그 회차에서 이미
+                # 만든 값으로 덮었고 now가 같다면 현재 파일은 바로잡힌 상태다.
+                # 옛 차이 수를 매 회차 다시 오류처럼 더하지 않는다.
+                if int(was[1]):
+                    stamps[str(path)] = [now, 0]
+                continue
+            todo.append(width)
+        if not todo:  # 굵기 8종이 다 캐시에 맞는다 — 파일을 하나도 안 연다
+            return {**acc, "worst": found, "stamps": stamps}
+    # 바닥 날짜도 **다시 만들 굵기만** 보고 정한다 — 안 건드릴 굵기의 파일은 안 연다.
     one = parquet_io.read(src) if full else parquet_io.read(
-        src, since=stored_floor(root, market, code, widths)
+        src, since=stored_floor(root, market, code, todo)
     )
     if one is None or one.empty:
         return {**acc, "worst": found, "stamps": stamps}
@@ -440,20 +464,9 @@ def build_one(job: tuple) -> dict:
     if not days:
         return {**acc, "worst": found, "stamps": stamps}
     prep: dict[str, tuple] = {}
-    for width in widths:
+    for width in todo:
         path = root / market / f"min{width}" / f"{code}.parquet"
         try:
-            if not full:  # 통째로 다시 만들 땐 "안 바뀌었다"는 쪽지를 믿지 않는다
-                now = stamp_of(src, path)
-                was = seen.get(str(path))
-                if now and was and was[0] == now:
-                    acc["cached"] += 1
-                    # was[1]은 덮기 전 저장본과 만든 값의 차이 수다. 그 회차에서 이미
-                    # 만든 값으로 덮었고 now가 같다면 현재 파일은 바로잡힌 상태다.
-                    # 옛 차이 수를 매 회차 다시 오류처럼 더하지 않는다.
-                    if int(was[1]):
-                        stamps[str(path)] = [now, 0]
-                    continue
             stored = parquet_io.read(path)
             if stored is None or stored.empty:
                 if not full:
