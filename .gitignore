@@ -6,7 +6,10 @@ secrets/
 config/credentials.json
 
 # KIS API 인증 관련
-kis_token.json
+# 계좌를 여러 개 물리면 토큰 파일도 계좌마다 따로 생긴다(kis_accounts.token_cache).
+# 이름을 하나만 막아 두면 둘째 계좌 토큰이 그대로 커밋된다 — 실제로 kis_token_2.json 과
+# kis_token_38e011fe8bee.json 이 안 걸려 있었다(2026-09-10 확인).
+kis_token*.json
 kis_credentials.*
 
 # NH QV OpenAPI SDK — NH투자증권 소유 바이너리. 재배포 라이선스 불명 → 커밋 ❌
