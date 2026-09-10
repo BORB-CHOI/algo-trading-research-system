@@ -106,6 +106,35 @@ def days_behind(last_date: Any, *, today: pd.Timestamp | None = None) -> int | N
     return max(elapsed - 1, 0)
 
 
+AHEAD_WARN_DAYS = 30  # 앞날이 이만큼도 안 남으면 주의
+
+
+def days_ahead(last_date: Any, *, today: pd.Timestamp | None = None) -> int | None:
+    """**앞으로 며칠까지** 덮여 있나. 장 달력처럼 앞날을 미리 받아 두는 자료에 쓴다.
+
+    다른 자료는 "며칠 밀렸나"를 보지만 달력은 반대다 — 지난 날짜는 이미 우리 일봉이
+    갖고 있고, 모자라면 곤란한 건 **앞날**이다. 밀림으로 재면 늘 0 이 나와 모자란 걸
+    영영 못 본다.
+    """
+    day = _norm(last_date)
+    if not day:
+        return None
+    now = pd.Timestamp(today) if today is not None else pd.Timestamp.today()
+    return (pd.Timestamp(day) - now.normalize()).days
+
+
+def grade_ahead(last_date: Any, *, today: pd.Timestamp | None = None) -> str:
+    """앞날 자료의 등급 — 남은 날이 적을수록 나쁘다."""
+    left = days_ahead(last_date, today=today)
+    if left is None:
+        return "stale"
+    if left < 0:
+        return "stale"
+    if left < AHEAD_WARN_DAYS:
+        return "warn"
+    return "ok"
+
+
 def grade(last_date: Any, *, today: pd.Timestamp | None = None) -> str:
     """'ok' · 'warn' · 'stale'. 받은 적이 없으면 'stale'."""
     behind = days_behind(last_date, today=today)
@@ -214,6 +243,59 @@ SOURCES: list[dict[str, Any]] = [
         "date_col": "bsop_date",
     },
     {
+        "key": "market_overtime",
+        "label": "시간외 단일가",
+        "why": "장 끝나고 16~18시에 붙은 체결입니다. KIS 가 최근 30일만 줘서 매일 쌓습니다.",
+        "dir": "market_state/overtime",
+        "date_col": "stck_bsop_date",
+    },
+    {
+        "key": "market_flags",
+        "label": "종목 상태(경보·정지·과열)",
+        "why": "투자경고·거래정지·단기과열입니다. KIS 가 오늘 것만 줘서 매일 쌓습니다.",
+        "dir": "market_state/flags",
+        "date_col": None,
+        "scan": "filename",  # 날짜가 파일 이름이다 — 안에는 날짜 열이 없다
+    },
+    {
+        "key": "extra_loan",
+        "label": "대차거래(빌려 간 주식)",
+        "why": "공매도보다 먼저 움직입니다. 빌려 놓고 아직 안 판 물량입니다.",
+        "dir": "extra_supply/loan",
+        "date_col": None,
+        "scan": "filename",  # 날짜별 한 파일 — 그 날 전 종목이 들어 있다
+    },
+    {
+        "key": "extra_short",
+        "label": "공매도",
+        "why": "빌려 판 물량이 쌓이면 되돌림 구간에서 위로 눌립니다.",
+        "dir": "extra_supply/short_sale",
+        "date_col": "stck_bsop_date",
+    },
+    {
+        "key": "extra_program",
+        "label": "프로그램매매",
+        "why": "사람이 산 건지 기계가 산 건지 가릅니다.",
+        "dir": "extra_supply/program",
+        "date_col": "stck_bsop_date",
+    },
+    {
+        "key": "corp_actions",
+        "label": "액면분할·합병·증자 일정",
+        "why": "수정주가를 맞출 때 씁니다. 없으면 가격이 튄 날을 보고 짐작하는 수밖에 없습니다.",
+        "dir": "corp_actions",
+        "date_col": "record_date",
+        "ahead": True,  # 앞으로 잡힌 일정까지 들어 있다
+    },
+    {
+        "key": "market_calendar",
+        "label": "장 달력(휴장일)",
+        "why": "다음 거래일이 언제인지, 내일 장이 열리는지 봅니다. 앞날까지 미리 받아 둡니다.",
+        "dir": "market_state/calendar",
+        "date_col": "bass_dt",
+        "ahead": True,  # 앞날 자료다 — 늦었나가 아니라 언제까지 덮였나를 본다
+    },
+    {
         "key": "members_snapshot",
         "label": "거래원(증권사별 매매)",
         "why": "오늘 어느 증권사 창구의 매수·매도가 많았는지 보여 주는 전 종목 자료입니다.",
@@ -226,6 +308,22 @@ SOURCES: list[dict[str, Any]] = [
         "why": "종목 화면에 뜨는 공시 목록입니다.",
         "dir": "disclosures",
         "date_col": "rcept_dt",
+    },
+    {
+        "key": "financials",
+        "label": "재무제표(DART)",
+        "why": "매출·이익·자산입니다. 종목 화면과 재무 조건을 걸 때 씁니다.",
+        "dir": "dart",
+        "date_col": "rcept_dt",
+        "scan": "nested",  # 종목마다 폴더가 하나씩 — 한 겹 더 들어가야 파일이 나온다
+    },
+    {
+        "key": "adjusted",
+        "label": "수정주가 일봉",
+        "why": "백테스트와 조건검색이 실제로 읽는 파일입니다. 낡으면 화면만 최신입니다.",
+        "dir": "adjusted",
+        "date_col": None,
+        "scan": "meta",  # 파일을 다 열지 않는다 — 만들 때 적어 둔 meta.json 을 본다
     },
 ]
 
@@ -240,18 +338,33 @@ def report(*, root: Path = DEFAULT_ROOT, today: pd.Timestamp | None = None) -> l
         availability = mark.get("availability")
         unavailable = availability == "unavailable_now"
         provider_latest = availability == "provider_latest"
+        ahead = bool(src.get("ahead"))
+        left = days_ahead(last, today=today) if ahead else None
+        if unavailable:
+            row_grade = "unavailable"
+        elif provider_latest:
+            row_grade = "ok"
+        elif ahead:
+            row_grade = grade_ahead(last, today=today)
+        else:
+            row_grade = grade(last, today=today)
+        note = mark.get("note")
+        if ahead and left is not None:
+            note = f"앞으로 {left:,}일치가 들어 있습니다"
         rows.append(
             {
                 "key": src["key"],
                 "label": src["label"],
                 "why": src["why"],
                 "last_date": last,
-                "days_behind": None if (unavailable or provider_latest) else days_behind(last, today=today),
-                "grade": (
-                    "unavailable" if unavailable else "ok" if provider_latest else grade(last, today=today)
+                "days_behind": (
+                    None if (unavailable or provider_latest or ahead)
+                    else days_behind(last, today=today)
                 ),
+                "days_ahead": left,
+                "grade": row_grade,
                 "availability": availability,
-                "note": mark.get("note"),
+                "note": note,
                 "n_symbols": mark.get("n_symbols"),
                 "checked_at": mark.get("checked_at"),
             }
@@ -303,7 +416,11 @@ def refresh_marks(
 
     last_dates.ensure_loaded(Path(root) / "_last_dates.json")
     counts = {
-        s["key"]: (1 if s["key"] == "marcap" else count_files(Path(root) / s["dir"]))
+        s["key"]: (
+            1
+            if s["key"] == "marcap" or s.get("scan") in ("meta", "nested", "filename")
+            else count_files(Path(root) / s["dir"])
+        )
         for s in SOURCES
     }
     total = sum(counts.values())
@@ -324,6 +441,15 @@ def refresh_marks(
         if src["key"] == "marcap":
             last, n = _scan_marcap(Path(marcap_dir), recent_dir=Path(root) / "recent")
             step()
+        elif src.get("scan") == "meta":
+            last, n = _scan_meta(Path(root) / src["dir"])
+            step()
+        elif src.get("scan") == "filename":
+            last, n = _scan_filename(Path(root) / src["dir"])
+            step()
+        elif src.get("scan") == "nested":
+            last, n = _scan_nested(Path(root) / src["dir"], src["date_col"])
+            step()
         else:
             last, n = scan_last_date(Path(root) / src["dir"], src["date_col"], on_file=step)
         if last is None:
@@ -334,6 +460,70 @@ def refresh_marks(
     if on_progress is not None:
         on_progress("끝", total, total)
     return written
+
+
+def _scan_filename(dirpath: Path) -> tuple[str | None, int]:
+    """날짜가 **파일 이름**인 자료 — 파일을 아예 안 연다.
+
+    종목 상태(`market_state/flags`)가 이 꼴이다. 그 날 전 종목을 한 파일에 담고 파일
+    이름이 `20260902.parquet` 이라 안에는 날짜 열이 없다. 날짜 열을 찾는 평소 방식으로
+    훑으면 전부 빈손이라 화면에 "받은 적 없음"으로 뜬다(실측 2026-09-10).
+    """
+    dirpath = Path(dirpath)
+    if not dirpath.is_dir():
+        return None, 0
+    days = [
+        p.stem for p in dirpath.glob("*.parquet")
+        if len(p.stem) == 8 and p.stem.isdigit()
+    ]
+    if not days:
+        return None, 0
+    return _norm(max(days)), len(days)
+
+
+def _scan_meta(dirpath: Path) -> tuple[str | None, int]:
+    """만들 때 적어 둔 `meta.json` 하나만 읽는다 — 파일 5천 개를 열지 않는다.
+
+    수정주가 일봉이 이 꼴이다. 소스(marcap)의 마지막 거래일이 곧 이 파일들의 기준일이다.
+    """
+    from .derived import META_NAME  # 여기서만 — 위에서 부르면 서로 물고 돈다
+
+    meta_path = dirpath / META_NAME
+    if not meta_path.exists():
+        return None, 0
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, 0
+    last = meta.get("source_last_date")
+    return (_norm(last) if last else None), int(meta.get("n_codes") or 0)
+
+
+def _scan_nested(dirpath: Path, date_col: str) -> tuple[str | None, int]:
+    """종목마다 폴더가 하나씩인 자료 — 한 겹 더 들어가 본다(재무제표가 이 꼴이다).
+
+    파일이 종목당 여러 개(연도×분기)라 전부 열면 오래 걸린다. `last_dates` 캐시가
+    안 바뀐 파일은 다시 안 열어 주므로 그대로 쓴다.
+    """
+    from . import last_dates
+
+    if not dirpath.exists():
+        return None, 0
+    best = ""
+    n = 0
+    for sub in dirpath.iterdir():
+        if not sub.is_dir():
+            continue
+        got = ""
+        for path in sub.glob("*.parquet"):
+            raw = last_dates.of(path, date_col)
+            if raw and _norm(raw) > got:
+                got = _norm(raw)
+        if got:
+            n += 1
+            if got > best:
+                best = got
+    return (best or None), n
 
 
 def _scan_marcap(marcap_dir: Path, recent_dir: Path | None = None) -> tuple[str | None, int]:

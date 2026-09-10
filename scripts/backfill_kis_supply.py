@@ -8,6 +8,10 @@
 - 저장: data/derived/supply/<종목코드>.parquet — API 원본 필드 + 요청일·수집시각.
 - 중단·재시작 안전: data/derived/supply/_state.json 에 종목 단위 완료 기록.
 - 조회만 한다. 주문 없음. KIS 실전(real) 키 필요 — 이 TR 은 모의투자에 없다.
+- **15:40 이후에만 돌아간다.** 그 전에 부르면 종목 불문 `OPSQ2001 TIME LIMIT 00:00 ~ 15:40`
+  으로 막힌다. 문구의 00:00~15:40 은 받을 수 있는 구간이 아니라 **막히는 구간**이다
+  (2026-09-10 실측: 11:59 두 계좌 모두 막힘 / 회차 기록 01:21~05:00 12번 전부 막힘,
+  16:44·22:59 만 성공). 새벽에 걸어 두면 한 건도 못 받는다.
 - 스로틀·재시도(EGW00201)·토큰 캐시는 기존 KIS 클라이언트가 맡는다.
 - 병렬 3줄기 — 줄기마다 클라이언트를 따로 두고(스레드 안전 아님) 각자 간격을 지킨다.
   합산 초당 약 19.65건 — KIS 문서 한도(초당 20건) 바로 아래(2026-08-28 실측).
@@ -31,6 +35,8 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.layer1_data import kis_accounts  # noqa: E402 — 계좌를 여러 개 물린다
+from src.layer1_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
 from src.layer1_data.marcap_loader import available_years, load_years, normalize_code  # noqa: E402
 from src.layer4_execution.brokers.kis.auth import KisCredentials, get_access_token  # noqa: E402
 from src.layer4_execution.brokers.kis.client import (  # noqa: E402
@@ -151,25 +157,94 @@ def collect_code(client: KisClient, code: str, first_date: str, last_date: str) 
     )
 
 
-def make_client_parts() -> tuple[KisCredentials, object]:
-    """실전 자격증명 + 토큰. 다른 호출 정책으로 클라이언트를 만들 때 쓴다(멀티시세 등)."""
-    load_dotenv(ROOT / ".env")
-    import os
+# ── 낮에도 되는 대체 창구 ─────────────────────────────────────────────────────
+#
+# 정본(FHPTJ04160001)은 15:40 이후에만 열린다. 낮에 밀린 걸 급히 채워야 할 때 쓰는 게
+# `주식현재가 투자자`(FHKST01010900)다 — 한 콜에 최근 30거래일을 준다.
+#
+# 정본과 견주면:
+#   같은 값  겹치는 21일 × 21개 항목이 전부 일치했다 (005930, 2026-09-10 대조, 불일치 0)
+#   빠진 값  기관 세부(증권·투신·은행·보험·연기금), 외국인 등록/미등록 구분,
+#            시가·고가·저가·거래량 — 정본 100개 중 21개만 온다
+#
+# 그래서 이걸로 채운 행은 **반쪽**이다. 행에 `_src` 로 TR 을 적어 두고, 어느 종목을 어느
+# 날짜부터 반쪽으로 채웠는지 `_partial.json` 에 남긴다. 다음 정본 회차가 그 날짜부터
+# 다시 받아 덮는다 — `update_data.update_kis` 가 이 파일을 읽어 시작 날짜를 앞당긴다.
+QUICK_PATH = "/uapi/domestic-stock/v1/quotations/inquire-investor"
+QUICK_TR = "FHKST01010900"
+PARTIAL_PATH = OUT_DIR / "_partial.json"
+_PARTIAL_LOCK = threading.Lock()
 
-    creds = KisCredentials(
-        app_key=os.environ["KIS_APP_KEY"].strip(),
-        app_secret=os.environ["KIS_APP_SECRET"].strip(),
-        env=os.environ.get("KIS_ENV", "vts").strip(),
-    )
-    if creds.env != "real":
-        raise SystemExit("이 TR 은 실전(real) 전용이다. .env 의 KIS_ENV=real 확인.")
+# 이 셋이 다 비어 오면 아직 안 나온 날이다(장중에 부르면 오늘 행이 그렇게 온다).
+_NTBY_COLS = ["prsn_ntby_qty", "frgn_ntby_qty", "orgn_ntby_qty"]
+
+
+def load_partial() -> dict[str, str]:
+    """반쪽으로 채운 종목 → **정본을 다시 받기 시작할 날짜**(반쪽 직전, 정본이 확실한 마지막 날)."""
+    try:
+        return json.loads(PARTIAL_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_partial(state: dict[str, str]) -> None:
+    """빈 표가 되면 파일을 지운다 — 남겨 두면 정본이 매 회차 헛되이 과거를 다시 받는다."""
+    with _PARTIAL_LOCK:
+        if state:
+            PARTIAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            PARTIAL_PATH.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        else:
+            PARTIAL_PATH.unlink(missing_ok=True)
+
+
+def fetch_quick(client: KisClient, code: str) -> list[dict]:
+    """대체 창구 한 콜 — 최근 30거래일."""
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
+    rows = client.get(QUICK_PATH, QUICK_TR, params).body.get("output") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    return [r for r in rows if isinstance(r, dict) and r.get("stck_bsop_date")]
+
+
+def collect_quick(client: KisClient, code: str, since: str) -> pd.DataFrame:
+    """한 종목 — `since` 다음 거래일부터 반쪽으로 채운다. 값이 안 나온 날은 빼고 담는다."""
+    rows = fetch_quick(client, code)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df = df[df["stck_bsop_date"].astype(str) > since]
+    if df.empty:
+        return pd.DataFrame()
+    got = df.reindex(columns=_NTBY_COLS).apply(lambda s: s.astype(str).str.strip() != "")
+    df = df[got.any(axis=1)]
+    if df.empty:
+        return pd.DataFrame()
+    df = df.astype(str)
+    df["_src"] = QUICK_TR  # 이 행은 반쪽이다 — 정본이 오면 덮인다
+    df["_req_date"] = datetime.now().strftime("%Y%m%d")
+    df["_collected_at"] = datetime.now().isoformat(timespec="seconds")
+    return df.sort_values("stck_bsop_date").reset_index(drop=True)
+
+
+def make_client_parts(account: int | None = None) -> tuple[KisCredentials, object]:
+    """실전 자격증명 + 토큰. 다른 호출 정책으로 클라이언트를 만들 때 쓴다(멀티시세 등).
+
+    `account` 를 안 주면 **이 스레드에 배정된 계좌**를 쓴다. 호출 제한이 앱키마다 따로 걸려서,
+    .env 에 계좌를 더 넣으면 그만큼 빨라진다(`src/layer1_data/kis_accounts.py`).
+    계좌가 하나뿐이면 지금까지와 똑같이 돈다.
+    """
+    load_dotenv(ROOT / ".env")
+
+    index = kis_accounts.my_index() if account is None else int(account)
+    creds = kis_accounts.credentials(index)
     # **한 줄기씩 줄 세워 받는다.** KIS 토큰 발급은 **1분에 1회**다. 줄기 5개가 동시에
     # 시작하면 캐시가 아직 비어 있어 다섯이 한꺼번에 발급을 요청하고, 하나만 성공하고
     # 나머지는 403(EGW00133)으로 죽는다 — 실제 사고 2026-08-29 04:26, 수급 단계가
     # 0.9초 만에 회차째 끝났다.
     # 앞선 줄기가 받아 캐시에 적어 두면 뒤 줄기들은 발급 없이 그걸 읽는다.
+    # 토큰 파일은 **계좌마다 따로**다 — 같이 쓰면 서로 덮어써서 매번 다시 발급한다.
     with _TOKEN_LOCK:
-        return creds, get_access_token(creds, cache_path=TOKEN_CACHE)
+        return creds, get_access_token(creds, cache_path=kis_accounts.token_cache(index))
 
 
 def make_client() -> tuple[KisClient, object]:
@@ -177,7 +252,12 @@ def make_client() -> tuple[KisClient, object]:
     return KisClient(creds, token, policy=POLICY), token
 
 
-WORKERS = 5  # 위 표 참조 — 5줄기 × 간격 0.2초 = 합산 초당 19.65건, 실패 0 (2026-08-28 실측)
+# 위 표 참조 — 계좌 하나당 스레드 5개 × 간격 0.2초 = 합산 초당 19.65건, 실패 0 (2026-08-28 실측).
+# 계좌를 더 물리면 그 배수로 늘린다. 제한이 앱키마다 따로 걸리기 때문이다.
+# 스레드 하나는 계좌 하나만 쓴다(`kis_accounts.my_index`) — 옮겨 다니면 간격이 안 맞는다.
+WORKERS_PER_ACCOUNT = 5
+load_dotenv(ROOT / ".env")  # 스레드 수를 정하려면 .env 를 **여기서** 읽어야 한다
+WORKERS = WORKERS_PER_ACCOUNT * kis_accounts.count()
 STATE_LOCK = threading.Lock()
 _LOCAL = threading.local()
 
@@ -215,7 +295,7 @@ def backfill_one(code: str, row: pd.Series, state: dict) -> None:
 
     if not df.empty:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(OUT_DIR / f"{code}.parquet", index=False)
+        parquet_io.save(df, OUT_DIR / f"{code}.parquet")
     entry = {
         "done": True,
         "rows": int(len(df)),

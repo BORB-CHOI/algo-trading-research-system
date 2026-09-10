@@ -41,6 +41,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import backfill_kis_supply as S  # noqa: E402
 
+from src.layer1_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
+
 from src.layer1_data.marcap_loader import available_years, load_years  # noqa: E402
 from src.layer1_data.members import (  # noqa: E402
     DAILY_DIR,
@@ -59,10 +61,13 @@ DAILY_URL = "/uapi/domestic-stock/v1/quotations/inquire-member-daily"
 DAILY_TR = "FHPST04540000"
 
 STATE_PATH = MEMBERS_PATH.parent / "_state.json"
-WORKERS = 5  # 오너 결정 2026-08-18: 5줄기(초당 10건, 한도 20). 거절은 재시도가 받는다.
-MEMBER_RATE_PER_SECOND = 10.0
+# 오너 결정 2026-08-18: 계좌 하나당 스레드 5개(초당 10건, 한도 20). 거절은 재시도가 받는다.
+# 계좌를 더 물리면 스레드를 그 배수로 늘리고 **간격은 그대로 둔다**(계좌마다 초당 10건).
+WORKERS_PER_ACCOUNT = 5
+WORKERS = WORKERS_PER_ACCOUNT * S.kis_accounts.count()
+MEMBER_RATE_PER_SECOND = 10.0  # 계좌 하나 기준
 MEMBER_POLICY = CallPolicy(
-    min_interval_sec=WORKERS / MEMBER_RATE_PER_SECOND,
+    min_interval_sec=WORKERS_PER_ACCOUNT / MEMBER_RATE_PER_SECOND,
     max_attempts=5,
     backoff_base_sec=2.0,
 )
@@ -104,12 +109,56 @@ def listed_codes() -> list[str]:
 # ── 당일 상위 5 ───────────────────────────────────────────────
 
 
+REFERENCE_CODE = "005930"  # 값이 나와 있나 볼 때 쓰는 기준 종목
+
+
+def snapshot_ready() -> tuple[bool, str]:
+    """지금 거래원 값이 나와 있나 — 기준 종목 **한 콜**로 본다.
+
+    KIS 당일 거래원은 새벽에 리셋되고 그 뒤로는 **전 종목이 0 으로 온다**(실측 2026-09-07:
+    03:14 에는 값이 있었고 05:30 에는 전부 0). 리셋 시각을 정확히 모르므로 시계로 막지
+    않는다 — 시계로 막으면 못 박은 시각이 틀렸을 때 멀쩡한 회차를 통째로 버린다.
+    **값을 보고 판단한다.** 0 이면 그 회차는 거래원을 건너뛴다(전 종목 4,300 콜 아낀다).
+
+    돌려주는 것은 (받을 때인가, 건너뛸 이유).
+    """
+    try:
+        body = (
+            _thread_client()
+            .get(SNAP_URL, SNAP_TR, {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": REFERENCE_CODE})
+            .body
+        )
+    except (S.KisApiError, OSError) as e:
+        return False, f"기준 종목을 못 불렀습니다: {type(e).__name__}"
+    out = body.get("output")
+    o = out[0] if isinstance(out, list) and out else out
+    if not isinstance(o, dict):
+        return False, "기준 종목 응답이 비어 있습니다"
+    rows = parse_snapshot(o, REFERENCE_CODE, "")
+    if not rows:
+        return False, "상위5 자리가 비어 있습니다"
+    if all(int(r["qty"] or 0) == 0 for r in rows):
+        return False, "값이 전부 0 입니다 — 새벽 리셋 뒤라 아직 안 나왔습니다"
+    return True, ""
+
+
 def snapshot_all(
     *,
     as_of: str | None = None,
     progress: Callable[[str, int, int], None] | None = None,
 ) -> dict:
-    """전 종목 당일 상위5 → snapshot/{YYYY-MM-DD}.parquet. 거래원 이름 사전도 채운다."""
+    """전 종목 당일 상위5 → snapshot/{YYYY-MM-DD}.parquet. 거래원 이름 사전도 채운다.
+
+    **값이 나와 있을 때만 돈다.** 새벽에 돌리면 전 종목이 0 으로 와서 4,300 콜을 쓰고
+    빈 표를 남긴다 — 그래서 기준 종목 한 콜로 먼저 확인한다(`snapshot_ready`).
+    """
+    ready, why = snapshot_ready()
+    if not ready:
+        print(f"거래원: 지금은 받을 때가 아닙니다 — {why}", flush=True)
+        if progress:
+            progress(f"거래원: {why}", 0, 0)
+        return {"rows": 0, "total_codes": 0, "failed_codes": 0,
+                "complete": False, "blocked": why}
     codes = listed_codes()
     today = as_of or datetime.now().strftime("%Y-%m-%d")
     names = _load(MEMBERS_PATH, {})
@@ -163,7 +212,7 @@ def snapshot_all(
 
     if rows and not failed:
         SNAP_DIR.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(rows).to_parquet(SNAP_DIR / f"{today}.parquet", index=False)
+        parquet_io.save(pd.DataFrame(rows), SNAP_DIR / f"{today}.parquet")
     _save(MEMBERS_PATH, names)
     named = sum(1 for v in names.values() if v)
     print(f"저장 {len(rows):,}줄 · 거래원 이름 {named}/{len(names)}개 확보")
@@ -223,7 +272,7 @@ def backfill_one(code: str, members: list[str], state: dict) -> None:
     if not df.empty:
         df = df.sort_values(["date", "member_code"]).reset_index(drop=True)
         DAILY_DIR.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(DAILY_DIR / f"{code}.parquet", index=False)
+        parquet_io.save(df, DAILY_DIR / f"{code}.parquet")
     with _LOCK:
         state[code] = {
             "done": True,

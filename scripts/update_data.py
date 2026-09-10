@@ -16,8 +16,11 @@
 ⚠️ **돌리는 시각은 20:05 이후** — 통합·NXT 일봉은 NXT 애프터마켓(~20:00)이 끝나야 확정이고,
    KIS 멀티시세는 "지금 값"이라 그 전에 부르면 미완성 봉이 들어간다. 시각 관문(`kis_bars_ready`)
    에 걸리면 일봉은 예전처럼 나무 경로로 받는다(느리지만 맞다).
-   KIS 수급도 조회 가능 시각이 있다 — `OPSQ2001 TIME LIMIT 00:00 ~ 15:40`. 시간에 걸리면
-   첫 종목에서 멈추고 요약에 `blocked` 로 남긴다(헛호출 금지).
+   KIS 수급도 같은 시간대라야 받아진다. 에러 문구 `OPSQ2001 TIME LIMIT 00:00 ~ 15:40` 의
+   00:00~15:40 은 **받을 수 있는 구간이 아니라 막히는 구간**이다 — 수급은 **15:40 이후**
+   에만 열린다(2026-09-10 실측: 11:59 막힘. 지난 회차도 01:21~05:00 은 12번 모두 막혔고,
+   16:44 와 22:59 만 실제로 받아졌다).
+   막히면 첫 종목에서 멈추고 요약에 `blocked` 로 남긴다(헛호출 금지).
 
 호출을 아끼는 방법:
   0. marcap 뒤쪽 공백은 KRX Open API 로 날짜당 3콜에 채운다(`krx_gapfill`, 2026-08-18).
@@ -79,15 +82,24 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import backfill_dart as financials  # noqa: E402 — 재무제표. 속도 조절기·차단 감지를 그대로 쓴다
+import backfill_dart_multi as financials_multi  # noqa: E402 — 한 콜에 100 법인
 import backfill_dart_disclosures as disclosures  # noqa: E402
 import backfill_kis_credit as credit  # noqa: E402
 import backfill_kis_market_state as market_state  # noqa: E402
+import backfill_kis_corp_actions as corp_actions_backfill  # noqa: E402 — 예탁원 사건
+import backfill_kis_extra_supply as extra_supply  # noqa: E402 — 공매도·대차·프로그램매매
 import backfill_kis_supply as supply  # noqa: E402
 import collect_kis_members as members  # noqa: E402
+import build_adjusted  # noqa: E402 — 수정주가 일봉 만들기(호출 0)
 import collect_namuh_bars as bars  # noqa: E402
 
 from src.layer1_data import (  # noqa: E402
+    derived,
+    kis_corp_actions as corp_actions,
+    kis_extra_supply as extra_flows,
     freshness,
+    kis_accounts,
     kis_snapshot,
     kiwoom_bars,
     kofia_market_funds,
@@ -127,6 +139,11 @@ MIN1_INTERVALS = [i for i in bars.INTERVALS if i[0] == "min1"]
 #   **완전일치 100.00%** (단 `minute_bars._pre_market_fold` 를 꺼야 한다. 켜면 NXT 90.91%)
 # 그래서 이 단계를 통째로 없앴다 — 나무 1,216콜 · 4.8분이 그대로 빠진다.
 MADE_WIDTHS = [3, 5, 10, 15, 30, 60, 120, 240]
+
+# 재무제표(DART)에 한 회차에 쓰는 시간. 못 끝내면 다음 회차가 이어받는다(받은 건 건너뛴다).
+# 사전 수집이 끝나면 새 분기가 나온 날만 실제로 부르므로 거의 안 쓴다.
+# 지금은 사전 수집이 진행 중이라(2026-09-07 기준 94/3,989 종목) 회차마다 이만큼씩 채워진다.
+FINANCIALS_BUDGET_SEC = 600.0
 # ─────────────────────────────────────────────────────────────────────────────
 # 줄기(스레드)냐 프로세스냐 — **일의 성격으로 정한다**
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,8 +235,21 @@ def is_fresh(folder: str, since: str, last_day: str) -> bool:
     return since >= last_day
 
 
-def merge_save(path: Path, old: pd.DataFrame | None, new: pd.DataFrame, keys: list[str]) -> int:
-    """새 조각을 기존 파일에 이어붙인다. 같은 봉은 새 값으로 덮는다. 늘어난 행 수 반환."""
+def merge_save(
+    path: Path,
+    old: pd.DataFrame | None,
+    new: pd.DataFrame,
+    keys: list[str],
+    *,
+    force: bool = False,
+) -> int:
+    """새 조각을 기존 파일에 이어붙인다. 같은 봉은 새 값으로 덮는다. 늘어난 행 수 반환.
+
+    행 수가 그대로면 평소엔 저장하지 않는다 — 같은 값을 다시 쓰느라 파일 수천 개를
+    헛되이 건드리지 않으려는 것이다. 그런데 **날짜는 그대로인데 내용만 바뀌는 경우**가
+    하나 있다: 낮에 대체 창구로 채워 둔 반쪽 행을 정본으로 덮을 때다(`_src` 표시).
+    그때는 `force=True` 로 불러 반드시 저장한다 — 안 그러면 반쪽 행이 영영 남는다.
+    """
     if new.empty:
         return 0
     frames = [old, new] if old is not None and not old.empty else [new]
@@ -230,7 +260,7 @@ def merge_save(path: Path, old: pd.DataFrame | None, new: pd.DataFrame, keys: li
         .reset_index(drop=True)
     )
     grown = len(merged) - (len(old) if old is not None else 0)
-    if grown != 0 or old is None:
+    if grown != 0 or old is None or force:
         parquet_io.save(merged, path)  # 반쯤 쓰이다 만 파일이 안 남게
     return max(grown, 0)
 
@@ -353,6 +383,7 @@ def update_min1_kiwoom(
     *,
     progress: ProgressFn | None = None,
     label: str = "② 1분봉 키움 몫",
+    on_saved: Callable[[str, str], None] | None = None,
 ) -> dict:
     """키움 몫 1분봉 증분 — 저장된 마지막 날짜 이후만 받아 이어붙인다.
 
@@ -375,7 +406,13 @@ def update_min1_kiwoom(
         new = kiwoom_bars.collect(market.lower(), code, since)
         if new.empty:
             return "0"
-        return str(merge_save(path, stored, new, ["bsop_date", "bsop_time"]))
+        grown = merge_save(path, stored, new, ["bsop_date", "bsop_time"])
+        # 이 종목 1분봉이 방금 새로 저장됐다 — **굵은 봉을 지금 만들라고 알린다.**
+        # 전 종목을 다 받고 나서 만들면 그 시간이 통째로 뒤에 붙는다(실측 394초).
+        # 받는 동안 만들면 호출을 기다리는 시간에 계산이 들어가 회차에서 사라진다.
+        if on_saved is not None:
+            on_saved(code, market.lower())
+        return str(grown)
 
     def work(job: tuple[str, list[str]]) -> None:
         code, markets = job
@@ -405,8 +442,8 @@ def update_min1_kiwoom(
         if progress and (n % 20 == 0 or n == len(jobs)):
             progress(label, n, len(jobs))
 
-    with ThreadPoolExecutor(max_workers=KIWOOM_WORKERS) as pool:
-        list(pool.map(work, jobs))
+    with ThreadPoolExecutor(max_workers=KIWOOM_WORKERS) as kiwoom_pool:
+        list(kiwoom_pool.map(work, jobs))
     out = {
         "added_rows": totals["added"],
         "errors": totals["errors"],
@@ -441,24 +478,81 @@ def update_min1_both(last_day: str, *, progress: ProgressFn | None = None) -> di
 
         return fn
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        namuh = pool.submit(
-            update_bars,
-            MIN1_INTERVALS,
-            last_day,
-            progress=report("namuh"),
-            label="② 1분봉 나무 몫",
-            jobs=lanes["namuh"],
+    # ── 받는 동안 굵은 봉을 만든다 (2026-09-07) ──────────────────────────────
+    # 1분봉은 **호출을 기다리는** 일이고 굵은 봉 만들기는 **계산하는** 일이라, 둘은
+    # 서로 다른 자원을 쓴다. 차례로 돌리면 계산 394초(실측)가 받는 시간 뒤에 그대로
+    # 붙는다. 받자마자 그 종목만 프로세스에 넘기면 그 394초가 회차에서 사라진다.
+    #
+    # 여기서 못 만든 종목(나무 몫·이미 최신이라 안 받은 종목)은 뒤따르는 ②-2 가
+    # 맡는다. 거기는 캐시가 다 맞으면 9.5초라 두 번 해도 값이 안 든다.
+    made = dict.fromkeys(
+        ("made", "written", "unchanged", "cached", "no_stored", "errors", "checked", "bad"), 0
+    )
+    made_worst: list[tuple[str, int]] = []
+    pending: list = []
+    pend_lock = threading.Lock()
+    cpu_pool: ProcessPoolExecutor | None = None
+    try:
+        cpu_pool = ProcessPoolExecutor(
+            max_workers=CPU_WORKERS,
+            initializer=minute_bars.start_worker,
+            initargs=(_MIN_STATE,),
         )
-        kiwoom = pool.submit(
-            update_min1_kiwoom, lanes["kiwoom"], last_day, progress=report("kiwoom")
-        )
-        got_n, got_k = namuh.result(), kiwoom.result()
+    except (OSError, ValueError):
+        cpu_pool = None  # 프로세스를 못 띄우는 자리 — ②-2 가 전부 맡는다
+
+    def on_saved(code: str, market: str) -> None:
+        if cpu_pool is None:
+            return
+        job = (str(bars.OUT_DIR), market, code, MADE_WIDTHS, False)
+        try:
+            fut = cpu_pool.submit(minute_bars.build_one, job)
+        except (RuntimeError, BrokenProcessPool):
+            return  # 풀이 죽었으면 조용히 넘긴다 — ②-2 가 다시 만든다
+        with pend_lock:
+            pending.append(fut)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            namuh = pool.submit(
+                update_bars,
+                MIN1_INTERVALS,
+                last_day,
+                progress=report("namuh"),
+                label="② 1분봉 나무 몫",
+                jobs=lanes["namuh"],
+            )
+            kiwoom = pool.submit(
+                update_min1_kiwoom,
+                lanes["kiwoom"],
+                last_day,
+                progress=report("kiwoom"),
+                on_saved=on_saved if cpu_pool is not None else None,
+            )
+            got_n, got_k = namuh.result(), kiwoom.result()
+        # 받기가 끝났다 — 아직 만들고 있는 것만 거둔다.
+        for fut in list(pending):
+            try:
+                got = fut.result()
+            except (BrokenProcessPool, OSError, EOFError) as e:  # noqa: PERF203
+                made["errors"] += 1
+                _ = e
+                continue
+            for k in made:
+                made[k] += got[k]
+            made_worst.extend(got["worst"])
+            _MIN_STATE.update(got["stamps"])
+    finally:
+        if cpu_pool is not None:
+            cpu_pool.shutdown(wait=True)
+
+    made_worst.sort(key=lambda x: -x[1])
     return {
         "namuh": got_n,
         "kiwoom": got_k,
         "jobs": {k: len(v) for k, v in lanes.items()},
         "estimate_sec": min1_lanes.estimate_sec(lanes),
+        "made_while_fetching": {**made, "worst": made_worst[:10]},
     }
 
 
@@ -657,18 +751,112 @@ def _check_kis_against_namuh(appended: list[tuple[str, str]], since: str, day: s
 
 KIS_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 KIS_CHART_TR = "FHKST03010100"
-KIS_PERIOD_WORKERS = 5
+# 계좌 하나당 스레드 5개 → 초당 ~16 (간격 0.2 로 낮추면 EGW00201 거절이 섞인다, 실측).
+# 계좌를 더 물리면 스레드를 그 배수로 늘리고 **간격은 그대로 둔다**.
+KIS_PERIOD_WORKERS_PER_ACCOUNT = 5
+KIS_PERIOD_WORKERS = KIS_PERIOD_WORKERS_PER_ACCOUNT * kis_accounts.count()
 KIS_PERIOD_POLICY = CallPolicy(
     min_interval_sec=0.3, max_attempts=5, backoff_base_sec=2.0
-)  # 5줄기 → 초당 ~16 (20이면 EGW00201 거절이 섞인다, 실측)
+)
 _KIS_LOCAL = threading.local()
 
 
-def _kis_period_client(creds, token) -> KisClient:
-    """줄기마다 KIS 클라이언트 하나 — KisClient 는 스레드 안전이 아니다."""
+def _kis_period_client(creds=None, token=None) -> KisClient:
+    """스레드마다 KIS 클라이언트 하나 — KisClient 는 스레드 안전이 아니다.
+
+    인자를 안 주면 **이 스레드에 배정된 계좌**로 만든다(`kis_accounts.my_index`).
+    계좌가 여럿이면 스레드가 계좌에 고르게 나뉘어 호출 제한이 계좌 수만큼 커진다.
+    """
     if getattr(_KIS_LOCAL, "client", None) is None:
+        if creds is None or token is None:
+            creds, token = supply.make_client_parts()
         _KIS_LOCAL.client = KisClient(creds, token, policy=KIS_PERIOD_POLICY)
     return _KIS_LOCAL.client
+
+
+def update_day_bars_kis_period(
+    last_day: str, *, progress: ProgressFn | None = None
+) -> tuple[dict, set[tuple[str, str, str]]]:
+    """일봉을 **KIS 기간별시세**(`FHKST03010100`)로 받는다 — 며칠 밀려도 한 번에 따라잡는다.
+
+    ## 왜 이걸로 바꿨나 (2026-09-07)
+
+    전에는 KIS **멀티시세**(`FHKST11300006`)로 받았다. 그건 "지금 시세" 스냅샷이라
+    **오늘 하루치밖에 못 준다.** 그래서 저장본이 딱 하루 전일 때만 쓸 수 있었고, 며칠
+    밀리면 통째로 건너뛰고 나무로 떨어졌다. 나무는 초당 3.62건이라 전 종목 25분이다
+    (실측 2026-09-07 — 5거래일 밀린 회차에서 이 단계에만 150분이 걸렸다).
+
+    기간별시세는 시작일·종료일을 받아 한 콜에 100건까지 준다. 며칠이 밀렸든 종목당 한
+    콜이면 끝이고, 계좌 2개로 초당 44.3건이라 전 종목 **2분**이다.
+
+    ## 나무 값과 같은가 (실측 2026-09-07, 60종목 × 최근 30봉 = 10,074개 값)
+
+        완전 일치 98.10%  ·  거래대금 100.00%
+
+    어긋난 191개 중 179개(93.7%)는 **1원·1주 차이**다 — 수정주가 보정의 반올림이다.
+    나머지는 **거래가 없던 날**인데, 나무는 시·고·저를 0 으로 주고 KIS 는 종가를 채워
+    준다(008600 2026-09-04: 나무 0, KIS 2,620). 그 자리는 **KIS 쪽이 맞다.**
+
+    돌려주는 것: (요약, 이번에 채운 (시장, 종목, "day") 집합).
+    뒤따르는 나무 경로가 그 집합을 건너뛴다.
+    """
+    try:
+        supply.make_client_parts()  # 실전 키가 있는지 여기서 한 번 확인한다
+    except (SystemExit, KeyError):
+        return {"skipped": "KIS 실전 키 없음"}, set()
+    if not last_day:
+        return {"skipped": "마지막 거래일을 몰라 건너뜁니다."}, set()
+
+    jobs: list[tuple[str, str, str]] = []  # (시장, 종목, 언제부터)
+    for code, markets in all_jobs():
+        for market in markets:
+            path = bars.OUT_DIR / market.lower() / "day" / f"{code}.parquet"
+            since = last_date_of(path, "bsop_date")
+            if not since:
+                continue  # 저장본이 없는 종목은 나무가 전체를 받는다 — 여기서 안 건드린다
+            if since >= last_day:
+                continue
+            jobs.append((market.lower(), code, since))
+
+    out = {"added": 0, "called": 0, "errors": 0, "targets": len(jobs), "skipped_no_file": 0}
+    done: set[tuple[str, str, str]] = set()
+    lock = threading.Lock()
+    done_n = 0
+
+    def work(job: tuple[str, str, str]) -> None:
+        market, code, since = job
+        try:
+            client = _kis_period_client()
+            rows = _kis_period_rows(client, market, code, "D", since, last_day)
+            if rows:
+                frame = pd.DataFrame(
+                    [_kis_row_to_namuh(r, str(r["stck_bsop_date"])) for r in rows]
+                )
+                path = bars.OUT_DIR / market / "day" / f"{code}.parquet"
+                grew = merge_save(path, parquet_io.read(path), frame, ["bsop_date"])
+            else:
+                grew = 0
+            with lock:
+                out["added"] += grew
+                out["called"] += 1
+                done.add((market, code, "day"))
+        except Exception as e:  # noqa: BLE001 — 종목 하나 때문에 회차를 버리지 않는다
+            with lock:
+                out["errors"] += 1
+                out.setdefault("broke", [])
+                if len(out["broke"]) < 20:
+                    out["broke"].append(f"{market}/day/{code} {type(e).__name__}: {e}")
+        finally:
+            nonlocal done_n
+            with lock:
+                done_n += 1
+                n = done_n
+            if progress and (n % 100 == 0 or n == len(jobs)):
+                progress("①-0 일봉 (KIS 기간별시세)", n, len(jobs))
+
+    with ThreadPoolExecutor(max_workers=KIS_PERIOD_WORKERS) as pool:
+        list(pool.map(work, jobs))
+    return out, done
 
 
 def _monday(day: str) -> date:
@@ -1062,7 +1250,9 @@ def _bars_since(market: str, code: str, gubun: str, xtick: str | None, since: st
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-KIS_UPDATE_WORKERS = 5  # 오너 결정 2026-08-18: 5줄기(초당 10건, 한도 20). 거절은 재시도가 받는다.
+# 오너 결정 2026-08-18: 계좌 하나당 스레드 5개(초당 10건, 한도 20). 거절은 재시도가 받는다.
+# 호출 제한이 앱키마다 따로 걸려서, .env 에 계좌를 더 넣으면 스레드도 그만큼 늘린다.
+KIS_UPDATE_WORKERS = 5 * kis_accounts.count()
 
 
 def kis_client_for(module):
@@ -1110,6 +1300,15 @@ def update_kis(
     except (AttributeError, OSError, ValueError):
         backfill_state = {}
 
+    # 낮에 대체 창구로 반쪽만 채워 둔 종목 — 정본은 **그 앞 날짜부터 다시** 받아 덮는다.
+    # 안 그러면 저장된 마지막 날짜가 이미 최신이라 그 종목을 건너뛰고, 항목이 21개뿐인
+    # 반쪽 행이 그대로 굳는다(수급만 해당 — 신용잔고 모듈엔 이 표가 없다).
+    try:
+        redo = dict(module.load_partial())
+    except (AttributeError, OSError, ValueError):
+        redo = {}
+    redone: set[str] = set()
+
     def work(code: str) -> None:
         try:
             _do(code)
@@ -1126,6 +1325,9 @@ def update_kis(
             return
         path = out_dir / f"{code}.parquet"
         since = last_date_of(path, date_col)
+        redo_from = redo.get(code)
+        if redo_from and since:
+            since = redo_from  # 반쪽 구간을 다시 받으러 뒤로 물린다
         if not since:
             with lock:
                 if backfill_state.get(code, {}).get("done"):
@@ -1141,7 +1343,9 @@ def update_kis(
         try:
             new = module.collect_code(kis_client_for(module), code, since, today)
         except module.KisApiError as e:
-            # KIS 는 조회 가능 시각이 정해진 TR 이 있다(수급: OPSQ2001 "TIME LIMIT 00:00 ~ 15:40").
+            # KIS 는 시간대로 막는 TR 이 있다. 수급이 그렇다 — OPSQ2001 "TIME LIMIT 00:00 ~ 15:40".
+            # 이 문구의 00:00~15:40 은 **막히는 구간**이고, 열리는 건 15:40 이후다
+            # (2026-09-10 실측: 11:59 막힘 / 회차 기록도 01:21~05:00 은 전부 막힘, 16:44·22:59 만 성공).
             # 시간 문제면 어느 종목을 불러도 똑같이 막히므로 첫 건에서 통째로 멈춘다 —
             # 안 그러면 4,000번을 실패하며 헛돈다(실측 2026-08-17 새벽).
             if "TIME LIMIT" in str(e) or "OPSQ2001" in str(e):
@@ -1166,17 +1370,22 @@ def update_kis(
                 totals["empty_responses"] += 1
             return
         observed = max(str(v) for v in new[date_col].dropna().tolist()) if len(new) else ""
-        grown = merge_save(path, old, new, [date_col])
+        grown = merge_save(path, old, new, [date_col], force=bool(redo_from))
         with lock:
             totals["added"] += grown
             totals["called"] += 1
+            if redo_from:
+                redone.add(code)  # 반쪽을 정본으로 덮었다 — 표에서 뺀다
             if observed > totals["observed_latest"]:
                 totals["observed_latest"] = observed
 
     with ThreadPoolExecutor(max_workers=KIS_UPDATE_WORKERS) as pool:
         list(pool.map(work, codes))
+    if redone:  # 덮은 종목만 표에서 뺀다 — 못 덮은 건 다음 회차가 다시 시도한다
+        module.save_partial({c: d for c, d in redo.items() if c not in redone})
     out = {
         "label": label,
+        "repaired_partial": len(redone),
         "added_rows": totals["added"],
         "errors": totals["errors"],
         "skipped": totals["skipped"],
@@ -1229,6 +1438,64 @@ def update_disclosures() -> dict:
         new["_collected_at"] = datetime.now().isoformat(timespec="seconds")
         added += merge_save(path, old, new, ["rcept_no"])
     return {"added_rows": added, "errors": errors}
+
+
+def update_financials(budget_sec: float = FINANCIALS_BUDGET_SEC) -> dict:
+    """DART 재무제표 증분 — **다중회사 주요계정으로 한 콜에 100 법인씩** 받는다.
+
+    전에는 종목마다 단일회사 전체 재무제표를 불렀다. 3,989 종목 × 2년 × 4분기 =
+    최대 3만 콜이라 회차마다 시간 예산을 정해 놓고 나눠 받아야 했고, 그래도 하루 한도에
+    걸려 2026-09-07 에 616 종목에서 멈춰 있었다.
+
+    다중회사(`fnlttMultiAcnt`)는 40 묶음 × 8 분기 = **320 콜**이면 같은 범위를 덮는다.
+    값이 같은지 먼저 확인했다 — 이미 받아 둔 전체 재무제표 100 종목과 맞춰 보니
+    읽개가 쓰는 계정 6개 590 건이 **전부 일치**(2026-09-10).
+
+    전체 재무제표가 이미 있는 자리는 안 덮는다(계정이 더 많다). 접수번호가 같으면
+    내용이 그대로라 다시 쓰지도 않는다.
+
+    DART 는 KIS·키움과 **다른 서버**라 한도가 따로 논다 — 공시와 같이 뒤에서 돌리면
+    회차 시간에 거의 안 더한다. 속도 조절기와 차단 감지는 `backfill_dart` 것을 그대로 쓴다.
+    """
+    key = os.environ.get("DART_API_KEY", "").strip()
+    if not key:
+        return {"skipped": "DART_API_KEY 없음"}
+
+    today = date.today()
+    # 올해와 작년 — 4분기(사업보고서)는 이듬해 3월에 나오므로 작년 것이 아직 안 왔을 수 있다.
+    years = [y for y in (today.year - 1, today.year) if y >= financials.FIRST_YEAR]
+
+    try:
+        return financials_multi.collect_years(key, years)
+    except (OSError, ValueError, RuntimeError) as e:
+        return {"error": f"재무제표를 못 받았습니다 — {type(e).__name__}: {e}"}
+
+
+def update_adjusted(marcap_last: str | None) -> dict:
+    """수정주가 일봉(`data/derived/adjusted/`)을 marcap 최신으로 다시 만든다 — 호출 0.
+
+    **이게 갱신에서 통째로 빠져 있었다**(실측 2026-09-07: marcap 은 2026-08-31 까지인데
+    수정주가는 2026-08-03 기준에 멈춰 있었다). 백테스트·조건검색·시뮬레이션이 이 파일을
+    읽으므로, 여기가 낡으면 화면은 최신인데 검사 결과만 한 달 전 자료로 나온다.
+
+    marcap 이 앞으로 나갔을 때만 만든다. 전체 재생성이지만 증권사 호출이 0 이고
+    실측 7년 46초라 전 구간(1995~)도 몇 분이면 끝난다.
+    """
+    if not marcap_last:
+        return {"skipped": "marcap 마지막 날짜를 몰라 건너뜁니다."}
+    have = derived.derived_last_date()
+    have_s = have.strftime("%Y-%m-%d") if have is not None else None
+    if have_s and have_s >= str(marcap_last):
+        return {"skipped": f"이미 {have_s} 기준입니다.", "last_date": have_s}
+    started = time.monotonic()
+    rc = build_adjusted.main([])
+    after = derived.derived_last_date()
+    return {
+        "rc": rc,
+        "was": have_s,
+        "last_date": after.strftime("%Y-%m-%d") if after is not None else None,
+        "sec": round(time.monotonic() - started, 1),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1356,6 +1623,72 @@ def _kis_stream(last_day: str, progress: ProgressFn | None = None) -> dict:
     return out
 
 
+def update_corp_actions() -> dict:
+    """예탁원 종목 사건 증분 — **올해치만** 다시 받는다.
+
+    일정은 앞당겨지거나 미뤄지므로 지난 것도 값이 바뀔 수 있다. 다만 바뀌는 건 늘 최근
+    것이라 해를 통째로 거슬러 오를 필요가 없다. 올해 한 해면 사건 5종 합쳐 20콜 안팎이다
+    (실측 2026-09-10: 1995~2026 전 기간이 330콜·79초였다).
+
+    KIS 를 쓰지만 수급·거래원과 시간대가 겹치지 않는다 — 시간 제한이 없는 TR 이다.
+    """
+    year = datetime.now().year
+    client = corp_actions_backfill.make_client()
+    out: dict = {}
+    for spec in corp_actions.SPECS:
+        try:
+            out[spec.key] = corp_actions_backfill.collect_spec(client, spec, year, year)
+        except Exception as e:  # noqa: BLE001 — 사건 한 종류 때문에 회차를 버리지 않는다
+            out[spec.key] = {"error": f"{type(e).__name__}: {e}"}
+    out["rows"] = sum(int(v.get("rows", 0)) for v in out.values() if isinstance(v, dict))
+    out["calls"] = sum(int(v.get("calls", 0)) for v in out.values() if isinstance(v, dict))
+    return out
+
+
+def update_extra_supply(last_day: str, *, progress: ProgressFn | None = None) -> dict:
+    """기타 수급 증분 — 공매도·대차거래·프로그램매매.
+
+    **대차거래는 날짜별 대량**(키움 `ka90012`)이라 하루가 36콜이면 끝난다. 종목별로 돌면
+    하루에 4,306콜이다(실측 2026-09-10, 120배). 게다가 그 날 거래된 종목이 통째로 와서
+    상장폐지 종목이 저절로 들어온다 — 종목별로 돌면 지금 상장된 목록만 훑는다.
+
+    공매도·프로그램매매는 **어느 창구에도 전 종목 대량 조회가 없다**(KRX·KIS·키움·나무
+    전부 확인). 종목당 1콜씩이라 둘이 합쳐 약 8,600콜·8분이다. 그래도 **갱신에서 같이
+    돌린다** — 안 그러면 이 둘만 갱신 밖에 남아 사전 수집을 손으로 돌려야 최신이 된다.
+    """
+    if not last_day:
+        return {"skipped": "마지막 거래일을 몰라 건너뜁니다."}
+    out: dict = {}
+    try:
+        days = extra_supply.trading_days(EXTRA_SUPPLY_SINCE, last_day)
+        have = {p.stem for p in (extra_supply.OUT_DIR / "loan").glob("*.parquet")}
+        left = [d for d in days if d not in have]
+        if progress:
+            progress(f"대차거래 {len(left)}일치", 0, len(left))
+        out["loan"] = extra_supply.run_loan(left) if left else {"skipped": "이미 다 있습니다."}
+    except Exception as e:  # noqa: BLE001 — 한 갈래 때문에 회차를 버리지 않는다
+        out["loan"] = {"error": f"{type(e).__name__}: {e}"}
+
+    # 공매도·프로그램매매 — 종목별이라 콜이 든다. 저장본 뒤쪽만 채운다.
+    codes = sorted({str(r.sCode) for r in bars.load_master("m_new_stock").itertuples()})
+    state = extra_supply.load_state()
+    for flow in extra_flows.FLOWS:
+        try:
+            if progress:
+                progress(f"{flow.label} {len(codes):,}종목", 0, len(codes))
+            out[flow.key] = extra_supply.run_flow(
+                flow, codes, EXTRA_SUPPLY_SINCE, last_day, state
+            )
+        except Exception as e:  # noqa: BLE001
+            out[flow.key] = {"error": f"{type(e).__name__}: {e}"}
+    extra_supply.save_state(state)
+    return out
+
+
+# 갱신에서 대차거래를 어디까지 거슬러 채울까 — 사전 수집이 과거를 맡고, 갱신은 최근만 본다.
+EXTRA_SUPPLY_SINCE = "20260101"
+
+
 def update_market_funds() -> dict:
     """금융투자협회 시장 전체 예탁금·미수금·신용융자. 과거와 증분이 같은 수집기다."""
     return kofia_market_funds.update()
@@ -1373,7 +1706,9 @@ def web_update_problems(summary: dict) -> list[str]:
 
     members_result = summary.get("members", {})
     failed_members = int(members_result.get("failed_codes", 0))
-    if members_result.get("error"):
+    if members_result.get("blocked"):
+        pass  # 값이 아직 안 나온 시간대다 — 잘못된 게 아니라 다음 회차 몫이다
+    elif members_result.get("error"):
         problems.append(f"거래원: {members_result['error']}")
     elif failed_members:
         problems.append(f"거래원 {failed_members}종목을 받지 못했습니다.")
@@ -1401,6 +1736,22 @@ def web_update_problems(summary: dict) -> list[str]:
             problems.append(f"{label} {result['errors']}건을 받지 못했습니다.")
         elif result.get("skipped") and key == "disclosures":
             problems.append(f"공시: {result['skipped']}")
+
+    # 재무는 **한 회차에 못 끝내는 게 정상**이다(사전 수집이 끝날 때까지). 그래서
+    # "이어받습니다"는 문제로 세지 않는다 — 아예 못 부른 것만 문제다.
+    fin = summary.get("financials", {})
+    if fin.get("error"):
+        problems.append(f"재무제표: {fin['error']}")
+    elif fin.get("skipped"):
+        problems.append(f"재무제표: {fin['skipped']}")
+    elif int(fin.get("failed", 0)):
+        problems.append(f"재무제표 {fin['failed']}건을 받지 못했습니다.")
+
+    adj = summary.get("adjusted", {})
+    if adj.get("error"):
+        problems.append(f"수정주가 일봉: {adj['error']}")
+    elif adj.get("rc"):
+        problems.append("수정주가 일봉을 다시 만들지 못했습니다.")
     return problems
 
 
@@ -1461,6 +1812,12 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
     dart_future = dart_pool.submit(update_disclosures)
     funds_pool = ThreadPoolExecutor(max_workers=1)
     funds_future = funds_pool.submit(update_market_funds)
+    # 재무제표도 DART 다 — 공시와 같은 서버지만 부르는 곳이 달라 따로 띄운다.
+    # KIS·키움 한도와 무관하므로 회차 시간에 거의 안 더한다.
+    fin_pool = ThreadPoolExecutor(max_workers=1)
+    fin_future = fin_pool.submit(update_financials)
+    adj_pool = ThreadPoolExecutor(max_workers=1)
+    adj_future = None
     kis_pool = ThreadPoolExecutor(max_workers=1)
     try:
         last_day = market_last_trading_day()
@@ -1468,9 +1825,19 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
         summary["last_trading_day"] = last_day
         step("⓪-2 marcap 뒤쪽 공백 (KRX)...")
         summary["recent"] = krx_gapfill.fill_marcap_gap()
+        # 수정주가 일봉은 marcap 을 읽어 만든다 — 공백을 채운 **뒤에** 띄운다.
+        # 호출이 0 이라 증권사 한도와 무관하고, 봉 받는 동안 뒤에서 끝난다.
+        adj_future = adj_pool.submit(update_adjusted, summary["recent"].get("marcap_last"))
 
         step("①-0 오늘 일봉 (KIS 멀티시세, 30종목/콜)...")
         summary["bars_day_kis"] = update_day_bars_kis(last_day)
+        # 멀티시세는 **오늘 하루치만** 준다. 며칠 밀렸으면 위에서 통째로 건너뛰므로,
+        # 기간별시세로 그 공백을 메운다 — 종목당 한 콜에 100건, 계좌 2개로 전 종목 2분.
+        # 전에는 이 자리가 없어서 나무로 떨어졌고 25분이 걸렸다(실측 2026-09-07).
+        step("①-0b 밀린 일봉 (KIS 기간별시세)...")
+        summary["bars_day_period"], day_done = update_day_bars_kis_period(
+            last_day, progress=progress
+        )
 
         # 여기서부터 **나무 갈래와 KIS 갈래를 같이 돌린다.**
         # 두 증권사는 한도가 따로 논다(나무 초당 4.5 · KIS 초당 20). 차례로 돌리면 한쪽이
@@ -1482,7 +1849,7 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
         # 일봉을 먼저 최신으로 만든 뒤에야 주·월봉을 그 일봉으로 만들 수 있다.
         step("① 나무 일봉 증분 — KIS 가 못 채운 것만...")
         summary["bars_daily"] = update_bars(
-            DAY_INTERVALS, last_day, progress=progress, label="① 나무 일봉 증분"
+            DAY_INTERVALS, last_day, day_done, progress=progress, label="① 나무 일봉 증분"
         )
         step("①-1 주·월봉 — 일봉으로 채우고 전수 대조 (호출 0)...")
         summary["bars_period_made"], made_done = update_period_bars_from_daily(
@@ -1503,6 +1870,16 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
         )
         step("③ KIS 수급·거래원·신용잔고 — 뒤에서 돌던 것 거두기...")
         summary.update(kis_future.result())
+        step("③-1a 기타 수급 — 대차거래(키움 대량)·공매도·프로그램매매...")
+        try:
+            summary["extra_supply"] = update_extra_supply(last_day, progress=progress)
+        except Exception as e:  # noqa: BLE001 — 한 단계 때문에 회차를 버리지 않는다
+            summary["extra_supply"] = {"error": f"{type(e).__name__}: {e}"}
+        step("③-1b 예탁원 액면분할·합병·증자 일정 (올해치)...")
+        try:
+            summary["corp_actions"] = update_corp_actions()
+        except Exception as e:  # noqa: BLE001 — 일정 하나 때문에 회차를 버리지 않는다
+            summary["corp_actions"] = {"error": f"{type(e).__name__}: {e}"}
         step("③-2 금융투자협회 예탁금·미수금·신용융자 — 뒤에서 돌던 것 거두기...")
         try:
             summary["market_funds"] = funds_future.result(timeout=180)
@@ -1513,6 +1890,16 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
             summary["disclosures"] = dart_future.result(timeout=600)
         except Exception as e:  # 공시 하나 때문에 나머지 갱신을 버리지 않는다
             summary["disclosures"] = {"error": f"{type(e).__name__}: {e}"}
+        step("③-4 DART 재무제표 — 뒤에서 돌던 것 거두기...")
+        try:
+            summary["financials"] = fin_future.result(timeout=FINANCIALS_BUDGET_SEC + 300)
+        except Exception as e:  # 재무 하나 때문에 나머지 갱신을 버리지 않는다
+            summary["financials"] = {"error": f"{type(e).__name__}: {e}"}
+        step("④ 수정주가 일봉 — 뒤에서 돌던 것 거두기...")
+        try:
+            summary["adjusted"] = adj_future.result(timeout=1800) if adj_future else {}
+        except Exception as e:  # 수정주가 하나 때문에 나머지 갱신을 버리지 않는다
+            summary["adjusted"] = {"error": f"{type(e).__name__}: {e}"}
 
         step("⑤ 어디까지 받았나 다시 세기...")
         summary["freshness"] = freshness.refresh_marks()
@@ -1559,6 +1946,8 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
     finally:
         dart_pool.shutdown(wait=False)
         funds_pool.shutdown(wait=False)
+        fin_pool.shutdown(wait=False)
+        adj_pool.shutdown(wait=False)
         kis_pool.shutdown(wait=False)
         close_stage()
         summary["timing_sec"] = timing

@@ -185,3 +185,80 @@ def test_members_and_credit_run_together_after_supply(monkeypatch) -> None:
 
     assert result["supply"]["blocked"] == "TIME LIMIT"
     assert most_active == 2
+
+
+def test_force_save_rewrites_file_even_when_row_count_is_unchanged(tmp_path) -> None:
+    """반쪽 행을 정본으로 덮을 때는 날짜가 그대로여서 행 수가 안 늘어난다.
+
+    평소 규칙(행 수가 그대로면 저장 안 함)에 맡기면 반쪽이 영영 남는다.
+    """
+    import scripts.update_data as update_data
+
+    path = tmp_path / "000001.parquet"
+    old = pd.DataFrame({"date": ["20260901"], "value": ["반쪽"], "_src": ["FHKST01010900"]})
+    old.to_parquet(path, index=False)
+    new = pd.DataFrame({"date": ["20260901"], "value": ["정본"]})
+
+    assert update_data.merge_save(path, old, new, ["date"]) == 0
+    assert pd.read_parquet(path)["value"].tolist() == ["반쪽"]  # 아직 안 덮였다
+
+    update_data.merge_save(path, old, new, ["date"], force=True)
+    assert pd.read_parquet(path)["value"].tolist() == ["정본"]
+
+
+def test_partially_filled_days_are_refetched_by_the_full_source(monkeypatch, tmp_path) -> None:
+    """낮에 대체 창구로 채운 구간을 정본 회차가 다시 받아 덮는지."""
+    import scripts.update_data as update_data
+
+    class Master:
+        def itertuples(self):
+            return iter([type("Row", (), {"sCode": "000001"})()])
+
+    monkeypatch.setattr(update_data.bars, "load_master", lambda _name: Master())
+
+    path = tmp_path / "000001.parquet"
+    pd.DataFrame(
+        {
+            "date": ["20260828", "20260901"],
+            "value": ["정본", "반쪽"],
+            "_src": [None, "FHKST01010900"],
+        }
+    ).to_parquet(path, index=False)
+
+    asked: list[str] = []
+    saved: list[dict] = []
+
+    class FakeModule:
+        KisApiError = RuntimeError
+        OUT_DIR = tmp_path
+
+        @staticmethod
+        def load_state() -> dict:
+            return {}
+
+        @staticmethod
+        def load_partial() -> dict:
+            return {"000001": "20260828"}
+
+        @staticmethod
+        def save_partial(state: dict) -> None:
+            saved.append(state)
+
+        @staticmethod
+        def _thread_client():
+            return object()
+
+        @staticmethod
+        def collect_code(_client, _code, since, _today):
+            asked.append(since)
+            return pd.DataFrame({"date": ["20260901"], "value": ["정본"]})
+
+    # 저장된 마지막 날짜(20260901)가 마지막 거래일과 같다 — 고치기 전이면 통째로 건너뛰었다.
+    result = update_data.update_kis(FakeModule, tmp_path, "date", "수급", "20260901")
+
+    assert asked == ["20260828"], "반쪽 앞 날짜부터 다시 받아야 한다"
+    assert result["called"] == 1 and result["skipped"] == 0
+    assert result["repaired_partial"] == 1
+    assert saved == [{}], "덮은 종목은 반쪽 표에서 빠져야 한다"
+    after = pd.read_parquet(path)
+    assert after.loc[after["date"] == "20260901", "value"].tolist() == ["정본"]
