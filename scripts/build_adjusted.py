@@ -51,7 +51,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.layer1_data import marcap_loader  # noqa: E402
-from src.layer1_data.adjust import apply_split_adjustment  # noqa: E402
+from src.layer1_data.derived import NAMUH_BARS_DIR  # noqa: E402 — 락 표시를 읽을 자리
+from src.layer1_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
+from src.layer1_data.adjust import apply_split_adjustment, broker_factor  # noqa: E402
 from src.layer1_data.derived import ADJUSTED_DIR, META_NAME  # noqa: E402
 from src.layer1_data.marcap_loader import available_years, normalize_code  # noqa: E402
 
@@ -115,9 +117,15 @@ def collect_by_code(
 
 
 def write_adjusted(chunks: dict[str, list[pd.DataFrame]], out_dir: Path) -> int:
-    """종목별로 이어붙여 보정(ADR-0006 정본 재사용) 후 parquet 저장. 저장 종목 수 반환."""
+    """종목별로 이어붙여 보정(ADR-0006 정본 재사용) 후 parquet 저장. 저장 종목 수 반환.
+
+    **조정할 날은 우리 일봉의 락 표시가 정한다**(`ex_rights_days`, 호출 0). 일봉이 없는
+    상폐 종목만 옛 짐작 규칙으로 떨어진다 — 몇 종목이 어느 길로 갔는지 끝에 찍는다.
+    """
     total = len(chunks)
     state = {"next": PROGRESS_STEP}
+    by_flag = 0
+    by_guess = 0
     for n, code in enumerate(sorted(chunks), start=1):
         parts = chunks.pop(code)  # 처리 즉시 메모리 반환
         df = pd.concat(parts, ignore_index=True).sort_values("Date").reset_index(drop=True)
@@ -125,9 +133,17 @@ def write_adjusted(chunks: dict[str, list[pd.DataFrame]], out_dir: Path) -> int:
         # 조용히 한 행을 고르지 않고 즉시 실패시킨다 (HistPanel 과 동일 정책).
         if df["Date"].duplicated().any():
             raise ValueError(f"{code}: 같은 날짜 중복 행 — marcap 데이터 무결성 확인 필요")
-        adjusted = apply_split_adjustment(df)  # 정본은 layer1 (ADR-0006)
-        adjusted[OUT_COLS].to_parquet(out_dir / f"{code}.parquet", index=False)
+        # 증권사 수정주가에서 뽑은 계수 — 일봉이 없는 상폐 종목이면 None
+        factor = broker_factor(df, code, NAMUH_BARS_DIR)
+        if factor is None:
+            by_guess += 1
+        else:
+            by_flag += 1
+        adjusted = apply_split_adjustment(df, factor)  # 정본은 layer1 (ADR-0006)
+        parquet_io.save(adjusted[OUT_COLS], out_dir / f"{code}.parquet")
         _progress(n, total, state, "저장")
+    print(f"[보정] 증권사 수정주가로 {by_flag:,}종목 · 일봉이 없어 옛 짐작으로 {by_guess:,}종목",
+          flush=True)
     return total
 
 
