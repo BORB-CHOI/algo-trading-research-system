@@ -136,7 +136,7 @@ git 이력에만 보존한다(위 맥락 절의 복원 명령 참조).
 - 조건검색식에 순위 기준 추가 (시총 상위 N% · 거래대금 상위 N위) — 화면 선택지
 - 체결이 얼마나 아슬아슬했는지 기록 (`fills.py` · `strategy_one.py`)
 - 실험 산출물에 체결 내역 추가 (`run_store.py`)
-- 데이터 창구 분리 + 수급 결손 알림 (`layer1_data/provider.py`)
+- 데이터 창구 분리 + 수급 결손 알림 (`layer1_market_data/provider.py`)
 - 레포 이름 `algo-trading-research-system` 으로 변경
 
 ### 이 결정으로 드러난 데이터 사실 (고치지 않고 기록)

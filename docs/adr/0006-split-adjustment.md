@@ -98,7 +98,7 @@ BORB-30 에서 **marcap 은 원주가(raw)** 로 확정됐다 — 삼성전자 2
 
 ## 무엇을 고쳤나
 
-- `src/layer1_data/adjust.py` — `broker_factor()` 새로. 일봉이 없으면 `None`
+- `src/layer1_market_data/adjust.py` — `broker_factor()` 새로. 일봉이 없으면 `None`
 - `split_adjustment()` 는 **상폐 종목 전용**으로 남겼다. 임계값 셋은 그대로 placeholder다
 - `scripts/build_adjusted.py` — 종목마다 계수를 뽑아 넘기고 어느 길로 갔는지 찍는다
 

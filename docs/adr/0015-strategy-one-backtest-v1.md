@@ -1,6 +1,6 @@
 # ADR-0015: ④ 백테스팅 — 전략 1호 전수 검사 v1
 
-- **상태:** 수락 (구현 완료 — `layer4_execution/strategy_one.py` / `POST /api/backtest` / ④ 탭)
+- **상태:** 수락 (구현 완료 — `layer2_backtest/strategy_one.py` / `POST /api/backtest` / ④ 탭)
 - **날짜:** 2026-08-06
 - **관련:** ADR-0007(백테스트 골격), ADR-0013·0014(전략 1호 정의), ADR-0004(거래비용)
 

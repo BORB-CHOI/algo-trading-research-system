@@ -11,7 +11,7 @@ CLAUDE.md 확정: **메인 엔진 = 자체 구현, 얇게.** vectorbt/backtestin
 
 ## 결정 (Decision)
 
-`src/layer4_execution/backtest.py` — 한 종목 일봉 단위의 결정론적 엔진.
+`src/layer2_backtest/backtest.py` — 한 종목 일봉 단위의 결정론적 엔진.
 
 1. **체결 규칙**: 신호일(t)의 **다음 날(t+1) 이후 첫 거래 가능일 시가** 체결.
    "신호 계산 시점 < 체결 시점" 불변식이 엔진 구조로 강제된다.
@@ -22,7 +22,7 @@ CLAUDE.md 확정: **메인 엔진 = 자체 구현, 얇게.** vectorbt/backtestin
 4. **3분할 가드**: §4.1 구간(Train 2020~2023 / Validate 2024 / Test 2025)을 상수로 박고,
    Test 는 `i_know_test_is_once=True` 명시 없이 못 자른다.
 5. **신뢰 플래그**: 요약에 `n_trades` 와 `reliable(N≥30)` 을 함께 낸다.
-6. **수정주가 정본 이동**: ADR-0006 보정 로직을 `api/main.py` → `src/layer1_data/adjust.py` 로
+6. **수정주가 정본 이동**: ADR-0006 보정 로직을 `api/main.py` → `src/layer1_market_data/adjust.py` 로
    이관. 차트와 엔진이 같은 정본을 쓴다.
 7. **전량 진입/전량 청산** 단순 모델. 포지션 크기·분할 매매·복수 종목 포트폴리오는
    전략 확정 후 확장한다.

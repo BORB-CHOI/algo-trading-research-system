@@ -80,7 +80,7 @@ marcap 대비 이점 적고 백필 콜 부담. **보조/교차검증용으로만
 **결정:** marcap 최신 거래일 **이후 구간만** 네이버 종목시세(`m.stock.naver.com/api/stock`)로 채운다.
 
 - `scripts/update_recent.py` → `data/derived/recent/{YYYY-MM-DD}.parquet` (marcap 스키마 호환).
-- `src/layer1_data/recent.py` 의 `merge_with_marcap()` 이 `marcap["Date"].max()` 이후 행만 이어붙인다.
+- `src/layer1_market_data/recent.py` 의 `merge_with_marcap()` 이 `marcap["Date"].max()` 이후 행만 이어붙인다.
 - **marcap 이 정본이다** — 같은 날짜가 양쪽에 있으면 marcap 을 쓴다. 저장소가 따라잡으면
   보충분은 자동으로 밀려난다(수동 정리 불필요).
 
@@ -117,7 +117,7 @@ pykrx 를 재검토하지 않은 이유는 위 "검토한 선택지"와 같다 �
 **결정:** 보충 소스를 KRX 일별매매정보(유가증권 `stk_bydd_trd` · 코스닥 `ksq_bydd_trd` ·
 코넥스 `knx_bydd_trd`)로 바꾼다. 날짜당 3콜이면 전 종목이 온다(전엔 네이버 종목별 4천 콜).
 
-- 로직은 `src/layer1_data/krx_gapfill.py::fill_marcap_gap()` 한 벌. 부르는 곳 셋 —
+- 로직은 `src/layer1_market_data/krx_gapfill.py::fill_marcap_gap()` 한 벌. 부르는 곳 셋 —
   `scripts/update_recent.py`(수동), `scripts/update_data.py`(저녁 갱신 ⓪-2),
   화면의 빠른 갱신(`api/main.py::_run_refresh`, `git pull` 다음). 결과 파일·읽는 쪽(`recent.py`)은 그대로.
 - **거래대금·시가총액·상장주식수가 거래소 값 그대로다** → `amount_is_approx: false`.

@@ -142,7 +142,7 @@
 
 1. **오너에게 확인** — 위 "찾은 시작점"의 날짜가 실제로 의도한 지점이 맞는지. 가격만 듣고
    자동 탐색한 값이라 어긋났을 수 있다(첫 시도에서 삼성전자를 2018년, 현대차를 2014년으로 잡았다).
-2. 확정되면 `find_cycle_low`(`src/layer3_strategy/surge.py`)에 **지속 기간 조건**을 넣는다.
+2. 확정되면 `find_cycle_low`(`src/layer2_backtest/surge.py`)에 **지속 기간 조건**을 넣는다.
    지금은 낙폭만 본다. 파라미터는 ADR-0009 대로 요청 데이터로 받는다 — 하드코딩 ❌.
 3. `strategyOne.ts` 의 `cycleDropPct: 50` 교체. 화면 문구(`SimStep.tsx` "사이클 -N%")도 같이.
 4. 세 종목 이상으로 화면 확인 — ③ 시뮬레이션에 종목 선택이 붙어 있다(커밋 `b385ce0`).
@@ -302,7 +302,7 @@ Smart Money Concepts 의 표준 개념:
 ## 결정
 
 피보나치 파동은 **TradingView 내장 "Auto Fib Retracement"** 규격으로 찾는다.
-포팅본은 `src/layer3_strategy/zigzag.py`, 시험은 `tests/test_zigzag.py`.
+포팅본은 `src/layer2_backtest/zigzag.py`, 시험은 `tests/test_zigzag.py`.
 
 원본(Pine v5, 오픈소스. 미러: `TWODS-CAPITAL/Trading-View-Indicators`):
 
@@ -425,7 +425,7 @@ pivotFound: 같은 방향이면 더 극단일 때만 끝을 늘리고,
 
 ## 새 규칙 — 시장 구조 (업계 표준)
 
-`src/layer3_strategy/market_structure.py`, 시험 `tests/test_market_structure.py` 14건.
+`src/layer2_backtest/market_structure.py`, 시험 `tests/test_market_structure.py` 14건.
 
 - **상승 전환**: 하락(또는 미정) 상태에서 **종가가 마지막 꺾임 꼭대기를 넘으면**
 - **상승 계속**: 이미 상승 상태에서 같은 일이 일어나면
@@ -549,7 +549,7 @@ pivotFound: 같은 방향이면 더 극단일 때만 끝을 늘리고,
 3. 그 뒤 `bars` 봉 평균 거래대금 ≥ 구간 평균 × `keep_mult`
 4. 그 뒤 종가가 구간 고가 아래로 다시 안 내려온다
 
-구현 `src/layer3_strategy/base_breakout.py`. 6차 규칙은 화면에서 '상승 전환'으로 그대로
+구현 `src/layer2_backtest/base_breakout.py`. 6차 규칙은 화면에서 '상승 전환'으로 그대로
 고를 수 있다 — 두 방식을 눈으로 대조할 수 있어야 한다.
 
 ### 실측 (기준일 2026-08-04)

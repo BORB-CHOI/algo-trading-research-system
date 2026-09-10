@@ -22,7 +22,7 @@
 
 ## 결정 (Decision)
 
-`src/layer4_execution/brokers/kis/` — 조회 전용 어댑터. 브로커 연동은 Layer 4 다.
+`src/layer1_market_data/brokers/kis/` — 조회 전용 어댑터. 브로커 연동은 Layer 4 다.
 
 1. **세 겹으로 나눈다.** `auth`(토큰 발급·캐싱) / `client`(헤더 조립·실패 판정) /
    `quotes`(TR 별 응답 파싱). KIS 는 엔드포인트가 200 개가 넘는데 인증 헤더와 실패 규칙은

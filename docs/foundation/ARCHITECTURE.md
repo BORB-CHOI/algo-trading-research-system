@@ -5,36 +5,56 @@
 ## 전략 9단 계층과 코드의 대응 (ADR-0019)
 
 ```
-종목 선정   → layer3 conditions.py · screening.py · exclusions.py(layer1)
+종목 선정   → 2단계 conditions.py · screening.py · exclusions.py(1단계)
 시장 상황   → (미구현)
 전략군      → 상승 사이클 눌림매매
-모양        → layer3 market_structure.py · zigzag.py · surge.py
-진입        → layer3 fibonacci.py · entry_levels.py · fib_zone.py · tick_size.py
+모양        → 2단계 market_structure.py · zigzag.py · surge.py
+진입        → 2단계 fibonacci.py · entry_levels.py · fib_zone.py · tick_size.py
 비중        → (백테스트는 "돈 무한" 전제 — 자본 배분 미구현)
-청산        → layer3 support_resistance.py · layer4 fills.py · stops.py
-위험 관리   → layer4 stops.py (하루·누적 한도는 미구현)
-실행        → layer4 strategy_one.py · walk_forward.py · brokers/
+청산        → 2단계 support_resistance.py · fills.py · stops.py
+위험 관리   → 2단계 stops.py (하루·누적 한도는 미구현)
+실행        → 2단계 strategy_one.py · walk_forward.py (백테스트) / 5단계 (실매매, 미구현)
 ```
 
 "전략 1호 = 피보나치"가 아니다 — **상승 사이클 눌림매매의 진입 방법 하나가 피보나치**다.
 같은 전략군에 형제 진입 방법(전고점 지지 / 이동평균 / 거래대금 기반)을 끼워 넣을 수 있다.
 
-## 레이어 구조 (§3.3)
+## 5단계 구조 (§3.3, ADR-0024 — 2026-09-11 개정)
 
 ```
 src/
-├── layer1_data/        데이터 수집·정제·당시 기준 저장 (+ freshness/refresh — 어디까지 받았나)
-│                        (marcap 로더, 종목 마스터, 향후 수급/뉴스)
-├── layer2_llm_reading/ 글 해석 — LLM이 들어가는 유일한 자리 (2단계~, 지금 비어 있음)
-│                        (지금은 비어 있음. Phase 1은 정량 신호만)
-├── layer3_strategy/    포트폴리오/매매 전략 — 결정론적 룰
-│                        (universe filter, 랭킹, conviction, 청산, 회피 패턴)
-└── layer4_execution/   백테스트 엔진 + (향후) 실행
-                         (자체 엔진 "얇게", 지표, 거래비용, 3분할)
+├── layer1_market_data/   1단계 정량 데이터 모으기
+│                         가격·시총·거래대금(marcap) · 수정주가 일봉 · 분봉 · 주월봉
+│                         수급 · 거래원 · 신용잔고 · 공시/재무(DART) · 종목 마스터
+│                         freshness/refresh(어디까지 받았나) · brokers/(KIS 조회 창구)
+├── layer2_backtest/      2단계 통계
+│                         조건검색식 · 지표(피보나치·지지저항·파동·급등)
+│                         백테스트 엔진 · 체결 흉내 · 거래비용 · 슬리피지 · 손절
+│                         → 승률 · 손익비 · 기대값을 여기서 낸다. 결정론적 코드만
+├── layer3_text_data/     3단계 주관적 데이터 모으기
+│                         뉴스 · 시황 · 유튜브 자막 · 테마 (사람이 한 말)
+├── layer4_llm_reading/   4단계 LLM (지금 비어 있음)
+│                         질문에 답하기 · 국면 해석 · 시나리오 짜기
+└── layer5_execution/     5단계 시나리오 제안 → 승인 → 예약 주문 (지금 비어 있음)
 ```
 
-**의존 방향은 한 방향:** `layer4 → layer3 → layer2 → layer1`. 상위 레이어가 하위를 부른다.
-하위가 상위를 참조하지 않는다. LLM은 layer2에서 멈춘다 — layer3(매매 결정)은 항상 결정론적 코드.
+**부르는 방향:** 큰 번호가 작은 번호를 부른다. 작은 쪽이 큰 쪽을 부르지 않는다.
+
+**끊어 둔 곳 하나:** **4단계는 5단계를 부를 수 없다.** LLM 은 시나리오를 글로 낼 뿐이고,
+주문으로 바뀌는 것은 사람이 승인한 뒤 5단계가 한다. 옛 구조의 가드("LLM 이 사슬 아래에
+있어서 실행을 못 부른다")를 이 자리로 옮긴 것이다.
+
+### 옛 이름 → 새 이름
+
+| 옛 이름 | 새 이름 |
+|---|---|
+| `layer1_data` | `layer1_market_data` (뉴스 `news.py`·테마 `themes.py` 는 3단계로) |
+| `layer3_strategy` | `layer2_backtest` |
+| `layer4_execution` | 백테스트 8개 파일 → `layer2_backtest` / `brokers/` → `layer1_market_data/brokers` |
+| `layer2_llm_reading` | `layer4_llm_reading` |
+
+`brokers/` 가 1단계로 간 이유: 이름은 "주문 창구"인데 실제로 쓰는 곳 11군데가 전부
+데이터를 받아오는 스크립트였다. 주문 코드는 하나도 없었다 (실측 2026-09-11).
 
 ## 백테스트 데이터 흐름 (Phase 1, 정량만)
 
@@ -89,10 +109,12 @@ WRL / IC / Expectancy / Skewness / 분위수익률 (§6.1)
 walking skeleton(정량 신호 1개 end-to-end)이 각 레이어를 얇게 관통한 뒤 살을 붙인다.
 전체 레이어 동시 구현 ❌ (§3.13).
 
-- layer1 — marcap 로더·제외 규칙·분할 보정·파생 사전 계산까지 **가동 중**.
-- layer2 — 여전히 비어 있다. LLM 은 Backtest Phase 2 에서 들어온다.
-- layer3 — 조건검색 엔진 + 전략 카탈로그(이평 교차 예시·피보나치 되돌림). 확정 전략은 아직 없다.
-- layer4 — 거래비용·슬리피지·단일종목 엔진·멀티종목 러너 골격. 포트폴리오 자본 배분은 미구현.
+- 1단계 — marcap 로더·제외 규칙·분할 보정·파생 사전 계산·수급·분봉까지 **가동 중** (6,295줄).
+- 2단계 — 조건검색 엔진 + 전략 카탈로그 + 백테스트 골격 **가동 중** (7,235줄).
+  확정 전략은 아직 없고, 포트폴리오 자본 배분도 미구현.
+- 3단계 — 뉴스 수집기(표시 전용)와 테마 분류만 있다. 시황·자막은 아직 없다.
+- 4단계 — **비어 있다.** ADR-0024 로 자리와 경계만 잡아 뒀다.
+- 5단계 — **비어 있다.** 화면과 같이 만들어야 한다.
 
 레이어 밖으로 케이스 검사기 웹(`api/` + `web/`, ADR-0005·0008)이 있다. 탐색용 도구이고
 매매 판단은 하지 않는다 — 그리는 것만 한다.

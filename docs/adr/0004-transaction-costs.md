@@ -36,7 +36,7 @@ CLAUDE.md 도 "거래비용·슬리피지 처음부터 포함"을 못박았다.
 
 ## 결정 (Decision)
 
-**A 를 1단계로 채택.** §6.4 정액률 다단계 모델을 `src/layer4_execution/costs.py` 에 구현한다.
+**A 를 1단계로 채택.** §6.4 정액률 다단계 모델을 `src/layer2_backtest/costs.py` 에 구현한다.
 
 - `CostModel(round_trip_rate)` — 왕복(매수+매도) 총 비용률, 체결금액 대비. **전부 placeholder.**
 - §6.4 수준(placeholder 시나리오): 0=0.0% / 1=0.3% / 2=0.5% / 3=0.8%.
@@ -57,7 +57,7 @@ CLAUDE.md 도 "거래비용·슬리피지 처음부터 포함"을 못박았다.
 ## 미해결 (Open questions)
 
 1. ~~주문 크기 의존 슬리피지 곡선~~ → **해소 (2026-07-24, BORB-31).**
-   `src/layer4_execution/slippage.py` — 제곱근 충격 모델: 편도 슬리피지율 = k·sqrt(주문금액/ADV).
+   `src/layer2_backtest/slippage.py` — 제곱근 충격 모델: 편도 슬리피지율 = k·sqrt(주문금액/ADV).
    주문 4배 → 슬리피지 2배. k 는 placeholder(낙관 0.05 / 기본 0.1 / 보수 0.2 시나리오 손잡이),
    모의투자(단계 5) 체결 기록으로 실측 추정해 대체한다. 엔진(backtest.py)이 신호일까지의
    20일 ADV 로(미래 유동성 참조 ❌) 왕복 슬리피지를 물리며, ADV≈0 이면 체결 불가로 신호를 버린다.

@@ -142,7 +142,7 @@ KRX 58종목 155,210봉, 거래가 활발한 정도로 열 구간:
 2.9분을 벌자고 종목마다 규칙을 달리 만드는 건 안 맞는다. **한도를 제대로 쓰고 나니
 섞어서 얻을 것도 얼마 없어졌다.**
 
-창구는 `src/layer1_data/min1_lanes.py` 의 `BROKER` 표 하나로 정한다.
+창구는 `src/layer1_market_data/min1_lanes.py` 의 `BROKER` 표 하나로 정한다.
 
 ```python
 BROKER = {"krx": "kiwoom", "nxt": "kiwoom", "unt": "kiwoom"}
@@ -310,10 +310,10 @@ krx 표본 294종목 중 **80종목(27.2%)** 이 그렇다. 어느 쪽이 맞나
 
 | 파일 | 무엇 |
 |---|---|
-| `src/layer1_data/kiwoom_bars.py` | 새로. 토큰 캐시·초당 10건 조절·429 재시도·페이징·14열 옮기기·빈 분 채우기. 조회 전용 빗장 |
-| `src/layer1_data/min1_lanes.py` | 새로. 시장마다 창구를 하나씩 적는 `BROKER` 표 |
+| `src/layer1_market_data/kiwoom_bars.py` | 새로. 토큰 캐시·초당 10건 조절·429 재시도·페이징·14열 옮기기·빈 분 채우기. 조회 전용 빗장 |
+| `src/layer1_market_data/min1_lanes.py` | 새로. 시장마다 창구를 하나씩 적는 `BROKER` 표 |
 | `scripts/backfill_kiwoom_min1.py` | 새로. 한 번 다시 받기(끊겨도 이어받는다) |
 | `scripts/update_data.py` | ② 단계가 `update_min1_both` 로 두 몫을 동시에 돌린다 |
 | `scripts/collect_namuh_bars.py` | 이중 조절을 걷어내 나무를 SDK 상한(초당 5)까지 쓴다 |
-| `src/layer1_data/minute_bars.py` | 프리마켓 합치기를 껐다 · 1분봉을 날짜로 걸러 읽는다 |
-| `src/layer1_data/parquet_io.py` | `read(since=...)` — 필요한 날짜부터만 읽는다 |
+| `src/layer1_market_data/minute_bars.py` | 프리마켓 합치기를 껐다 · 1분봉을 날짜로 걸러 읽는다 |
+| `src/layer1_market_data/parquet_io.py` | `read(since=...)` — 필요한 날짜부터만 읽는다 |

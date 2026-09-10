@@ -182,7 +182,7 @@ LonesomeTheBlue **"Support Resistance Channels"** (MPL-2.0) 를 그대로 포팅
 일봉뿐이라 근사밖에 안 되고 교과서·논문 비교 기준선에도 없어 채택하지 않았다.
 최소 꺾인 지점 수는 **1개**(원본 기본값, 오너 확정).
 
-**새 전략 "지지저항만 보기"** (`sr_only`, `src/layer3_strategy/sr_overlay.py`).
+**새 전략 "지지저항만 보기"** (`sr_only`, `src/layer2_backtest/sr_overlay.py`).
 오너 요청: "지금까지의 피보나치와 아예 상관없이 기준일 기준 왼쪽으로(미래는 못본다)
 지지저항만 볼 수 있는 것도 가능한가?" → 별도 전략으로 추가. 찾는 함수는 피보나치 쪽과
 **같은 `find_channels`** 다. 존마다 그 안의 라운드 피겨를 라벨에 싣는다.
@@ -315,7 +315,7 @@ API 계약도 따라 바뀐다 — `top`/`bottom` 은 이제 `kind: "fib"` 에 �
 겹치지 않으므로 **따로 켜고 끈다**(오너 결정). 도구 막대에 `[지지저항] [오더블록]
 [가격 빈틈]` 세 버튼, 색은 회색 / 보라 / 청록.
 
-구현 `src/layer3_strategy/price_zones.py`, 조회 `GET /api/price-zones?kind=...`.
+구현 `src/layer2_backtest/price_zones.py`, 조회 `GET /api/price-zones?kind=...`.
 정의는 공개된 표준을 보고 직접 구현했다 — **LuxAlgo Pine 소스는 안 봤다**(CC BY-NC-SA).
 
 - 오더블록 = 세게 밀어낸 봉 **직전의 마지막 반대색 봉**. 되돌아와 반대편으로 완전히

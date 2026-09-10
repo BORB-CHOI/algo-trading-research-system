@@ -112,7 +112,7 @@ KIS 와의 차이 중 결정에 영향을 준 것:
    두 회사가 통합 대금을 다르게 계산한다. 일봉 멀티시세의 0.003% 와 같은 성격.
 3. **장중엔 전 종목 갱신하지 않는다.** 어제까지가 정본. 차트를 연 종목만 나무 실시간
    체결(WebSocket `oc`/`mc`/`nc`, 조회 전용)로 오늘 봉을 진행형으로 그린다 — 파일엔 안 쓴다.
-   (`src/layer1_data/namuh_live.py`, `/api/live/bar`, `web/src/liveBar.ts`)
+   (`src/layer1_market_data/namuh_live.py`, `/api/live/bar`, `web/src/liveBar.ts`)
    실측: 접속 경로는 `wss://api.nhplug.com:7070/websocket` — SDK `ws_url()` 값(경로 없음)으로는
    악수가 안 끝난다. 15:20~15:30 동시호가·NXT 휴지 시간엔 체결 푸시가 없는 게 정상.
 4. KIS 수급·거래원 줄기 3 → 5 (초당 10건, 한도 20). 거절은 재시도가 받는다.
@@ -200,5 +200,5 @@ KIS 로 받는다. 전 종목을 나무에서 다시 받아도 62분, KIS 로는
 
 ### 되돌리려면
 
-`src/layer1_data/min1_lanes.py` 의 `BROKER` 표를 `"namuh"` 로 바꾸고 그 시장을 한 번 다시
+`src/layer1_market_data/min1_lanes.py` 의 `BROKER` 표를 `"namuh"` 로 바꾸고 그 시장을 한 번 다시
 받는다. 안 다시 받으면 한 파일에 두 창구 값이 날짜로 섞인다.
