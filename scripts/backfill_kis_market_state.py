@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -79,6 +79,9 @@ LANES = {           # 무엇 → (줄기 수, 목표 초당)
     "flags": (6, 16.0),
     "overtime": (4, 8.0),
     "vi": (16, 20.0),
+    # 장 달력은 한 줄기로 천천히 간다. 속도가 문제가 아니라 **적게 부르는 게 문제**다 —
+    # KIS 가 "원장 서비스와 얽혀 있으니 하루 1회 정도만" 이라고 못 박은 TR 이다.
+    "calendar": (1, 2.0),
 }
 _LANE = "flags"     # 지금 도는 몫 — main 에서 갈아 끼운다
 
@@ -315,6 +318,79 @@ def collect_overtime(codes: list[str], day: str) -> tuple[int, int]:
     return kept, errors[0]
 
 
+def collect_calendar(since: str, until: str) -> tuple[int, int]:
+    """장 달력 — 기준일부터 24일씩 이어받아 **해마다 한 파일**로 담는다.
+
+    돌려주는 것은 (담은 날 수, 개장 안 하는 날 수). 종목과 무관해서 병렬이 없다 —
+    이어받기 열쇠를 앞 장에서 받아야 다음 장을 부를 수 있는 구조라 어차피 줄 서야 한다.
+    """
+    globals()["_LANE"] = "calendar"
+    rows: list[dict] = []
+    fk = nk = ""
+    day = since
+    seen: set[str] = set()
+    for _ in range(400):  # 24일씩 × 400장 ≈ 26년. 넘칠 일 없는 안전핀
+        got, fk, nk = state.fetch_calendar(client("000000"), day, fk, nk)
+        fresh = [r for r in got if r["bass_dt"] not in seen]
+        if not fresh:
+            break  # 같은 장이 다시 왔다 = 더 없다
+        seen.update(r["bass_dt"] for r in fresh)
+        rows.extend(r for r in fresh if r["bass_dt"] <= until)
+        newest = max(r["bass_dt"] for r in fresh)
+        if newest >= until:
+            break
+        if not fk:  # 이어받기가 끊겼으면 다음 날부터 새로 연다
+            day = (datetime.strptime(newest, "%Y%m%d") + timedelta(days=1)).strftime("%Y%m%d")
+    if not rows:
+        return 0, 0
+    frame = state.to_frame(rows)
+    closed = 0
+    for year, part in frame.groupby(frame["bass_dt"].str[:4]):
+        path = OUT_DIR / "calendar" / f"{year}.parquet"
+        old = parquet_io.read(path)
+        merged = part if old is None or old.empty else (
+            pd.concat([old, part], ignore_index=True)
+            .drop_duplicates(subset=["bass_dt"], keep="last")
+        )
+        parquet_io.save(merged.sort_values("bass_dt").reset_index(drop=True), path)
+        closed += int((part["opnd_yn"] == "N").sum())
+    return len(frame), closed
+
+
+def calendar_covered_through() -> str:
+    """저장된 장 달력이 **어느 날까지** 있나. 없으면 빈 문자열."""
+    days = []
+    for path in sorted((OUT_DIR / "calendar").glob("*.parquet")):
+        got = parquet_io.read(path)
+        if got is not None and not got.empty and "bass_dt" in got.columns:
+            days.append(str(got["bass_dt"].max()))
+    return max(days, default="")
+
+
+CALENDAR_HORIZON_DAYS = 90  # 앞으로 이만큼이 덮여 있으면 다시 안 부른다
+
+
+def update_calendar(today: str) -> dict:
+    """장 달력 증분 — **앞날이 충분히 덮여 있으면 한 콜도 안 쓴다.**
+
+    달력은 한 번 받으면 안 바뀌고, KIS 가 "하루 1회 정도만" 이라고 못 박은 TR 이다.
+    그래서 날짜로 세지 않고 **앞으로 90일이 덮였나**만 본다. 보통은 통째로 건너뛴다.
+    """
+    covered = calendar_covered_through()
+    horizon = (datetime.strptime(today, "%Y%m%d") + timedelta(days=CALENDAR_HORIZON_DAYS)).strftime("%Y%m%d")
+    if covered >= horizon:
+        return {"skipped": f"{covered} 까지 있음", "covered_through": covered}
+    since = (
+        (datetime.strptime(covered, "%Y%m%d") + timedelta(days=1)).strftime("%Y%m%d")
+        if covered
+        else f"{int(today[:4])}0101"
+    )
+    until = f"{int(horizon[:4]) + 1}1231"  # 넉넉히 내년 말까지 한 번에 받아 둔다
+    days, closed = collect_calendar(since, until)
+    return {"days": days, "closed": closed, "since": since, "until": until,
+            "covered_through": calendar_covered_through()}
+
+
 def missing_vi_days(notes: dict, days: list[str]) -> list[str]:
     """안 받은 날과 오류가 남은 날만. 깨끗하게 끝난 날은 다시 부르지 않는다."""
     return [
@@ -346,6 +422,12 @@ def update_daily(
         "codes": len(codes),
         "current_codes": len(current_codes),
     }
+
+    # 장 달력이 먼저다 — 보통 한 콜도 안 쓰고 끝나고, 다음 거래일 판정에 쓰인다.
+    try:
+        result["calendar"] = update_calendar(today)
+    except Exception as e:  # noqa: BLE001 — 달력 하나 때문에 시장상태 전체를 버리지 않는다
+        result["calendar"] = {"error": f"{type(e).__name__}: {e}"}
 
     for what, run in (("overtime", collect_overtime), ("flags", collect_flags)):
         key = f"{what}:{today}"
@@ -402,10 +484,12 @@ def update_daily(
 def main() -> int:
     global _CLIENT_PARTS
     ap = argparse.ArgumentParser(description="VI·종목상태·시간외 받아 쌓기 (조회 전용)")
-    ap.add_argument("--what", choices=("vi", "flags", "overtime", "all"), required=True,
-                    help="all 이면 시간외 → 상태 → VI 차례로 돈다(VI 가 제일 오래 걸린다)")
-    ap.add_argument("--since", default="", help="이 날짜부터 (VI 만 씀, YYYYMMDD)")
-    ap.add_argument("--until", default="", help="이 날짜까지 (VI 만 씀)")
+    ap.add_argument("--what", choices=("vi", "flags", "overtime", "calendar", "all"),
+                    required=True,
+                    help="all 이면 시간외 → 상태 → VI 차례로 돈다(VI 가 제일 오래 걸린다). "
+                         "calendar 는 장 달력 — 따로 부른다")
+    ap.add_argument("--since", default="", help="이 날짜부터 (VI·달력이 씀, YYYYMMDD)")
+    ap.add_argument("--until", default="", help="이 날짜까지 (VI·달력이 씀)")
     ap.add_argument("--codes", default="", help="이 종목만 (쉼표로 여럿)")
     ap.add_argument("--restart", action="store_true", help="쪽지를 버리고 처음부터")
     args = ap.parse_args()
@@ -417,6 +501,23 @@ def main() -> int:
         codes = [c for c in codes if c in want]
     notes = Notes(STATE_PATH, restart=args.restart)
     today = datetime.now().strftime("%Y%m%d")
+
+    if args.what == "calendar":
+        since = args.since or f"{int(today[:4])}0101"
+        until = args.until or f"{int(today[:4]) + 1}1231"
+        print(f"[장 달력] {since}~{until} · 한 콜에 24일", flush=True)
+        t = time.time()
+        days, closed = collect_calendar(since, until)
+        print(
+            f"[장 달력] 끝. 담은 날 {days:,} · 장 안 여는 날 {closed:,} · "
+            f"{time.time() - t:.0f}초 · 저장 {OUT_DIR / 'calendar'}",
+            flush=True,
+        )
+        notes.mark(f"calendar:{today}", {"done": True, "rows": days, "errors": 0,
+                                         "since": since, "until": until,
+                                         "at": datetime.now().isoformat(timespec="seconds")})
+        notes.save(force=True)
+        return 0
 
     # 짧은 것부터 — 시간외(최근 30일이 한 콜에) → 오늘 상태 → VI(제일 오래 걸린다)
     quick = ["overtime", "flags"] if args.what == "all" else (

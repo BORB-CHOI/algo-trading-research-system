@@ -62,6 +62,16 @@
     data/derived/market_state/vi/YYYYMMDD.parquet        그 날 VI 발동·해제
     data/derived/market_state/flags/YYYYMMDD.parquet     그 날 종목 상태
     data/derived/market_state/overtime/YYYYMMDD.parquet  그 날 시간외 단일가
+    data/derived/market_state/calendar/YYYY.parquet      그 해 장 달력(개장일·휴장일)
+
+## 장 달력은 왜 따로 받나 — 과거는 우리 일봉이 정본이다
+
+지난 거래일이 언제였나는 물어볼 필요가 없다. **우리 일봉에 찍힌 날짜가 곧 거래일**이다
+(`backfill_kis_market_state.trading_days` 가 그렇게 쓴다). 물어야 하는 건 **앞날**이다 —
+다음 거래일이 언제인지, 내일 장이 열리는지는 지난 데이터로 알 수 없다.
+
+`CTCA0903R` 은 한 콜에 24일씩 주고 2015~2027 까지 답한다(실측 2026-09-10). 달력은 한 번
+받으면 안 바뀌므로 창을 정해 한 번만 훑고, KIS 안내대로 **하루 1회**만 다시 본다.
 
 **받은 그대로 담는다.** 가공은 나중에 파일에서 한다 — 계산식이 바뀌어도 다시 안 받게.
 
@@ -78,6 +88,8 @@ PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
 PRICE_TR = "FHKST01010100"
 OVERTIME_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-overtimeprice"
 OVERTIME_TR = "FHPST02320000"
+CALENDAR_PATH = "/uapi/domestic-stock/v1/quotations/chk-holiday"
+CALENDAR_TR = "CTCA0903R"
 
 # VI 한 줄에서 담을 것 — 받은 이름 그대로 둔다(나중에 뜻이 바뀌어도 원본이 남게).
 VI_COLS = [
@@ -107,6 +119,16 @@ FLAG_COLS = [
 OVERTIME_COLS = [
     "stck_bsop_date", "ovtm_untp_prpr", "ovtm_untp_vol", "ovtm_untp_tr_pbmn",
     "ovtm_untp_prdy_vrss", "ovtm_untp_prdy_ctrt", "stck_clpr", "acml_vol",
+]
+
+# 장 달력에서 담을 것. 종목과 무관한 시장 전체 자료다.
+CALENDAR_COLS = [
+    "bass_dt",       # 기준일자
+    "wday_dvsn_cd",  # 요일 (01 일 ~ 07 토)
+    "bzdy_yn",       # 영업일 — 금융기관이 업무를 하는 날
+    "tr_day_yn",     # 거래일 — 증권 업무가 가능한 날
+    "opnd_yn",       # 개장일 — **실제로 장이 열리는 날. 휴장 판정은 이걸 본다**
+    "sttl_day_yn",   # 결제일 — 실제 주식 대금이 오가는 날
 ]
 
 
@@ -164,6 +186,30 @@ def fetch_overtime(client, code: str, market: str = "J") -> list[dict]:
     return out
 
 
+def fetch_calendar(client, bass_dt: str, fk: str = "", nk: str = "") -> tuple[list[dict], str, str]:
+    """장 달력 한 장 — 기준일부터 24일치가 온다. 다음 장이 있으면 이어받기 열쇠를 같이 준다.
+
+    돌려주는 것은 (줄, 다음 fk, 다음 nk). 다음 fk 가 빈 문자열이면 마지막 장이다.
+
+    ⚠️ KIS 안내: 이 TR 은 원장 서비스와 얽혀 있어 **하루 1회 정도**만 부르라고 못 박아 뒀다.
+    한 번 받아 두면 달력은 안 바뀌므로, 부르는 쪽에서 날짜 창을 정해 한 번만 훑는다.
+    """
+    res = client.get(
+        CALENDAR_PATH, CALENDAR_TR,
+        {"BASS_DT": bass_dt, "CTX_AREA_FK": fk, "CTX_AREA_NK": nk},
+        tr_cont="N" if fk else "",
+    )
+    rows = [
+        {c: str(r.get(c, "")).strip() for c in CALENDAR_COLS}
+        for r in _rows(res.body, "output")
+        if str(r.get("bass_dt", "")).strip()
+    ]
+    more = str(res.headers.get("tr_cont", "")).strip() in ("M", "F")
+    next_fk = str(res.body.get("ctx_area_fk") or "").strip() if more else ""
+    next_nk = str(res.body.get("ctx_area_nk") or "").strip() if more else ""
+    return rows, next_fk, next_nk
+
+
 def to_frame(rows: list[dict]) -> pd.DataFrame:
     """받은 줄을 표로. 전부 글자로 담는다 — 원본을 그대로 남기려고."""
     if not rows:
@@ -172,6 +218,6 @@ def to_frame(rows: list[dict]) -> pd.DataFrame:
 
 
 __all__ = [
-    "FLAG_COLS", "OVERTIME_COLS", "VI_COLS",
-    "fetch_flags", "fetch_overtime", "fetch_vi", "to_frame",
+    "CALENDAR_COLS", "FLAG_COLS", "OVERTIME_COLS", "VI_COLS",
+    "fetch_calendar", "fetch_flags", "fetch_overtime", "fetch_vi", "to_frame",
 ]
