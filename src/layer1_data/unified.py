@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.layer1_data import parquet_io
+
 from src.layer1_data.derived import DERIVED_DIR, NAMUH_BARS_DIR, load_namuh_bars
 
 # 넥스트레이드 개장일. 이 앞 날짜는 통합 = KRX 라 볼 필요가 없다.
@@ -112,7 +114,7 @@ def unified_ratios(market: str = "unt", bars_dir: Path = NAMUH_BARS_DIR) -> pd.D
     out = _build_ratios(market, bars_dir)
     if not out.empty:
         UNIFIED_DIR.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(cache, index=False)
+        parquet_io.save(out, cache)
         meta.write_text(json.dumps(stamp), encoding="utf-8")
     return out
 

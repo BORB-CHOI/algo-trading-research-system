@@ -19,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.layer1_data import krx_openapi as krx
+from src.layer1_data import parquet_io
 from src.layer1_data.marcap_loader import available_years, load_years
 from src.layer1_data.recent import RECENT_DIR
 
@@ -93,7 +94,7 @@ def fill_marcap_gap(
         called += 1
         if df.empty:
             continue  # 휴장일이거나 아직 집계 전
-        df.to_parquet(path, index=False)
+        parquet_io.save(df, path)
         saved.append(d.isoformat())
 
     dates = sorted(f.stem for f in out_dir.glob("*.parquet"))

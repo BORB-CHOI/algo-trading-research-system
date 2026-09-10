@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.layer1_data import parquet_io
+
 DART_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "derived" / "dart"
 
 # 어느 표(sj_div)에서 뽑을지까지 못 박는다. 같은 계정명이 여러 표에 **다른 값으로** 나오기 때문이다.
@@ -137,7 +139,7 @@ def build_summary() -> pd.DataFrame:
 def save_summary(df: pd.DataFrame | None = None) -> Path:
     df = build_summary() if df is None else df
     SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(SUMMARY_PATH, index=False)
+    parquet_io.save(df, SUMMARY_PATH)
     return SUMMARY_PATH
 
 

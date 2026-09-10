@@ -30,20 +30,44 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pandas as pd
 
 
+# 윈도우에서 이름 바꾸기가 간헐적으로 튕긴다 — 다시 해 보는 횟수와 사이 간격.
+#
+# `os.replace` 는 원자적이지만 **윈도우에서는 그 순간 파일을 잡고 있는 다른 프로그램이
+# 있으면 `PermissionError [WinError 5]` 로 거절한다.** 백신 실시간 검사나 검색 인덱서가
+# 방금 쓴 임시 파일을 열어 보는 사이에 걸린다. 리눅스에는 없는 문제라 놓치기 쉽다.
+#
+# 실제 사고 2026-09-10 17:55 — 대차거래 백필이 2,869일 중 712일(26%)에서 이걸로 죽었다.
+# 55분 동안 받은 건 남았지만 거기서 멈췄다. 잡고 있는 쪽은 곧 놓으므로 잠깐 쉬었다 다시
+# 하면 거의 다 통과한다.
+RENAME_RETRY = 8
+RENAME_SLEEP = 0.25
+
+
 def save(df: pd.DataFrame, path: Path) -> None:
-    """옆에 다 쓴 뒤 이름을 바꿔 끼운다 — 도중에 죽어도 반쪽 파일이 안 남는다."""
+    """옆에 다 쓴 뒤 이름을 바꿔 끼운다 — 도중에 죽어도 반쪽 파일이 안 남는다.
+
+    이름 바꾸기가 거절당하면 잠깐 쉬었다 다시 한다(위 주석 참조).
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # 같은 폴더에 둬야 이름 바꾸기가 한 번에 끝난다(다른 드라이브면 복사가 된다).
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         df.to_parquet(tmp, index=False)
-        os.replace(tmp, path)
+        for attempt in range(RENAME_RETRY):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == RENAME_RETRY - 1:
+                    raise
+                time.sleep(RENAME_SLEEP * (attempt + 1))
     finally:
         if tmp.exists():
             tmp.unlink(missing_ok=True)

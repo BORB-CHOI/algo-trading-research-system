@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import backfill_kis_supply as base  # noqa: E402  (유니버스·클라이언트 재사용)
 
+from src.layer1_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
 from src.layer4_execution.brokers.kis.client import (  # noqa: E402
     CallPolicy,
     KisApiError,
@@ -47,10 +48,14 @@ CREDIT_TR = "FHPST04760000"
 # 나무 PLUG 에는 종목별 신용잔고 조회 API 자체가 없다(신용 매수/매도 주문만) — 대체 창구 없음.
 FLOOR_DATE = "20070712"
 MAX_PAGES_PER_CODE = 300
-WORKERS = 5  # 신용잔고는 응답이 가벼워 3줄기에서 거절 0.03%뿐 — 오너 승인(2026-08-16)으로 상향
-CREDIT_RATE_PER_SECOND = 10.0
+# 신용잔고는 응답이 가벼워 스레드 3개에서 거절 0.03%뿐 — 오너 승인(2026-08-16)으로 상향.
+# 계좌를 더 물리면 스레드를 그 배수로 늘린다. **간격은 그대로 둔다** — 스레드 하나는
+# 계좌 하나만 쓰므로(`kis_accounts.my_index`), 계좌마다 초당 10건이 유지된다.
+WORKERS_PER_ACCOUNT = 5
+WORKERS = WORKERS_PER_ACCOUNT * base.kis_accounts.count()
+CREDIT_RATE_PER_SECOND = 10.0  # 계좌 하나 기준
 CREDIT_POLICY = CallPolicy(
-    min_interval_sec=WORKERS / CREDIT_RATE_PER_SECOND,
+    min_interval_sec=WORKERS_PER_ACCOUNT / CREDIT_RATE_PER_SECOND,
     max_attempts=5,
     backoff_base_sec=2.0,
 )
@@ -143,7 +148,7 @@ def backfill_one(code: str, row: pd.Series, state: dict) -> None:
 
     if not df.empty:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(OUT_DIR / f"{code}.parquet", index=False)
+        parquet_io.save(df, OUT_DIR / f"{code}.parquet")
     entry = {
         "done": True,
         "rows": int(len(df)),

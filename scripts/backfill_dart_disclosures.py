@@ -30,6 +30,11 @@ import requests
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.layer1_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
+
 OUT_DIR = ROOT / "data" / "derived" / "disclosures"
 STATE_PATH = OUT_DIR / "_state.json"
 
@@ -164,7 +169,7 @@ def main() -> int:
             )
             merged["_collected_at"] = datetime.now().isoformat(timespec="seconds")
             OUT_DIR.mkdir(parents=True, exist_ok=True)
-            merged.to_parquet(path, index=False)
+            parquet_io.save(merged, path)
         save_state(state)
         print(
             f"[{datetime.now():%H:%M:%S}] {ym}: {len(merged):,}건 (누적 호출 {calls:,})", flush=True

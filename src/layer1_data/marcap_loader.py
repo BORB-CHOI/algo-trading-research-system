@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.layer1_data import parquet_io
+
 MARCAP_DIR = Path("data/marcap/data")
 
 # 백테스트 구간 (CLAUDE.md: 2017-01 ~ 현재)
@@ -94,7 +96,7 @@ def symbol_master(
     m["Delisted"] = m["LastDate"] < m["LastDate"].max()
     if cache is not None:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        m.to_parquet(cache, index=False)
+        parquet_io.save(m, cache)
     return m
 
 
