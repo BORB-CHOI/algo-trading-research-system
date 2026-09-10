@@ -41,7 +41,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import backfill_kis_supply as supply  # noqa: E402
 import collect_namuh_bars as bars  # noqa: E402
 import update_data  # noqa: E402 — merge_save 는 여기가 정본이다. 다시 만들지 않는다
-from src.layer1_data import last_dates, parquet_io  # noqa: E402
+from src.layer1_market_data import last_dates, parquet_io  # noqa: E402
 
 DATE_COL = "stck_bsop_date"
 

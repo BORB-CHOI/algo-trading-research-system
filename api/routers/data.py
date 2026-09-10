@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter
 
 from api.refresh import REFRESH_STATE, clear_data_caches, run_refresh
-from src.layer1_data import freshness
+from src.layer1_market_data import freshness
 
 load_dotenv(
     Path(__file__).resolve().parents[1] / ".env"
@@ -130,7 +130,7 @@ def _run_heavy_update(run_id: int) -> None:
     def progress(label: str, done: int, total: int) -> None:
         _record_update_progress(label, done, total, run_id=run_id)
 
-    kis_logger = logging.getLogger("src.layer4_execution.brokers.kis.client")
+    kis_logger = logging.getLogger("src.layer1_market_data.brokers.kis.client")
     frontend_handler = _FrontendLogHandler(run_id)
     kis_logger.addHandler(frontend_handler)
     try:

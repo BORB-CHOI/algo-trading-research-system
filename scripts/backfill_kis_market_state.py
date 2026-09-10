@@ -1,7 +1,7 @@
 """VI·종목상태·시간외를 KIS 에서 받아 **날짜별로 쌓는다** — 조회 전용.
 
 받은 그대로 담고 가공은 안 한다(계산식이 바뀌어도 다시 안 받게). 무엇을 왜 받는지는
-`src/layer1_data/kis_market_state.py` 독스트링에 적어 뒀다.
+`src/layer1_market_data/kis_market_state.py` 독스트링에 적어 뒀다.
 
 ## 부르는 법
 
@@ -46,14 +46,14 @@ for _stream in (sys.stdout, sys.stderr):
 import backfill_kis_supply as supply  # noqa: E402
 import collect_namuh_bars as bars  # noqa: E402
 
-from src.layer1_data import kis_market_state as state  # noqa: E402
-from src.layer1_data import parquet_io  # noqa: E402
-from src.layer1_data.marcap_loader import available_years, load_years  # noqa: E402
-from src.layer4_execution.brokers.kis.auth import (  # noqa: E402
+from src.layer1_market_data import kis_market_state as state  # noqa: E402
+from src.layer1_market_data import parquet_io  # noqa: E402
+from src.layer1_market_data.marcap_loader import available_years, load_years  # noqa: E402
+from src.layer1_market_data.brokers.kis.auth import (  # noqa: E402
     KisCredentials,
     get_access_token,
 )
-from src.layer4_execution.brokers.kis.client import CallPolicy, KisApiError, KisClient  # noqa: E402
+from src.layer1_market_data.brokers.kis.client import CallPolicy, KisApiError, KisClient  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "derived" / "market_state"
 STATE_PATH = OUT_DIR / "_state.json"

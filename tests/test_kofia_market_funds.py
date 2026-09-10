@@ -6,7 +6,7 @@ import pandas as pd
 
 
 def test_market_funds_rows_use_official_column_meanings() -> None:
-    from src.layer1_data.kofia_market_funds import MARKET_FUNDS_COLUMNS, rows_to_frame
+    from src.layer1_market_data.kofia_market_funds import MARKET_FUNDS_COLUMNS, rows_to_frame
 
     frame = rows_to_frame(
         [
@@ -37,7 +37,7 @@ def test_market_funds_rows_use_official_column_meanings() -> None:
 
 
 def test_credit_rows_are_joined_by_date_without_losing_market_funds() -> None:
-    from src.layer1_data.kofia_market_funds import (
+    from src.layer1_market_data.kofia_market_funds import (
         CREDIT_COLUMNS,
         MARKET_FUNDS_COLUMNS,
         merge_official_tables,
@@ -61,7 +61,7 @@ def test_credit_rows_are_joined_by_date_without_losing_market_funds() -> None:
 
 
 def test_update_replaces_recent_dates_and_is_safe_to_run_twice(tmp_path: Path) -> None:
-    from src.layer1_data.kofia_market_funds import Service, update
+    from src.layer1_market_data.kofia_market_funds import Service, update
 
     calls: list[tuple[str, str, str]] = []
 
@@ -85,7 +85,7 @@ def test_update_replaces_recent_dates_and_is_safe_to_run_twice(tmp_path: Path) -
 
 
 def test_empty_official_response_does_not_erase_saved_data(tmp_path: Path) -> None:
-    from src.layer1_data.kofia_market_funds import Service, update
+    from src.layer1_market_data.kofia_market_funds import Service, update
 
     path = tmp_path / "daily.parquet"
     pd.DataFrame([{"date": "20260828", "customer_deposits_million_won": 100}]).to_parquet(

@@ -23,7 +23,7 @@ def _bars(tmp_path, code: str, dates: list[str], adj: list[float]) -> None:
 
 def test_factor_comes_from_the_broker_series(tmp_path) -> None:
     """004090 실측 그대로 — 주식수는 10배인데 실제 조정 배수는 19.31 이다."""
-    from src.layer1_data.adjust import apply_split_adjustment, broker_factor
+    from src.layer1_market_data.adjust import apply_split_adjustment, broker_factor
 
     df = _marcap(["2021-04-09", "2021-04-15"], [281000.0, 18900.0], [655200.0, 6552000.0])
     _bars(tmp_path, "004090", ["20210409", "20210415"], [14550.0, 18900.0])
@@ -40,7 +40,7 @@ def test_factor_comes_from_the_broker_series(tmp_path) -> None:
 
 def test_missing_bar_days_carry_the_nearest_factor(tmp_path) -> None:
     """marcap 에 있는데 일봉엔 없는 날이 1% 있다 — 그 날을 잃으면 안 된다."""
-    from src.layer1_data.adjust import broker_factor
+    from src.layer1_market_data.adjust import broker_factor
 
     df = _marcap(
         ["2021-04-08", "2021-04-09", "2021-04-15"],
@@ -57,7 +57,7 @@ def test_missing_bar_days_carry_the_nearest_factor(tmp_path) -> None:
 
 def test_delisted_stocks_fall_back_to_the_old_guess(tmp_path) -> None:
     """일봉이 없으면 None — 그래야 부르는 쪽이 옛 짐작으로 떨어진다."""
-    from src.layer1_data.adjust import apply_split_adjustment, broker_factor
+    from src.layer1_market_data.adjust import apply_split_adjustment, broker_factor
 
     df = _marcap(["2021-04-09", "2021-04-15"], [1000.0, 100.0], [100.0, 1000.0])
 
@@ -68,7 +68,7 @@ def test_delisted_stocks_fall_back_to_the_old_guess(tmp_path) -> None:
 
 def test_volume_survives_a_zero_factor(tmp_path) -> None:
     """계수가 0 이면 나눌 수 없다 — 거래량을 무한대로 만들지 않는다."""
-    from src.layer1_data.adjust import apply_split_adjustment
+    from src.layer1_market_data.adjust import apply_split_adjustment
 
     df = _marcap(["2021-04-09", "2021-04-15"], [1000.0, 100.0], [100.0, 1000.0])
     out = apply_split_adjustment(df, pd.Series([0.0, 1.0], index=df.index))

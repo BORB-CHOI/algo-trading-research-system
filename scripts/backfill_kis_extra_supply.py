@@ -5,7 +5,7 @@
       .venv/Scripts/python scripts/backfill_kis_extra_supply.py --codes 005930 --since 20240101
       .venv/Scripts/python scripts/backfill_kis_extra_supply.py --estimate --since 20150101
 
-무엇을 왜 받는지는 `src/layer1_data/kis_extra_supply.py` 독스트링에 적어 뒀다.
+무엇을 왜 받는지는 `src/layer1_market_data/kis_extra_supply.py` 독스트링에 적어 뒀다.
 
 ## 어떻게 훑나
 
@@ -44,9 +44,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 import backfill_kis_supply as supply  # noqa: E402
 import collect_namuh_bars as bars  # noqa: E402
-from src.layer1_data import kis_extra_supply as flows  # noqa: E402
-from src.layer1_data import kiwoom_extra_supply as kiwoom_flows  # noqa: E402 — 대차 대량
-from src.layer1_data import last_dates, parquet_io  # noqa: E402
+from src.layer1_market_data import kis_extra_supply as flows  # noqa: E402
+from src.layer1_market_data import kiwoom_extra_supply as kiwoom_flows  # noqa: E402 — 대차 대량
+from src.layer1_market_data import last_dates, parquet_io  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "derived" / "extra_supply"
 STATE_PATH = OUT_DIR / "_state.json"
@@ -57,6 +57,8 @@ CALLS_PER_SEC = 17.5
 # 대차거래는 키움 대량이다 — 실측 2026-09-10: 하루 36콜 · 1,745종목 · 6초.
 LOAN_CALLS_PER_DAY = 36
 KIWOOM_CALLS_PER_SEC = 10.0
+# 키움 한도는 초당 10 이다(ADR-0023 실측). 줄기를 그보다 많이 둬도 속도 조절기가 막는다.
+KIWOOM_WORKERS = 8
 
 
 def load_state() -> dict:
@@ -247,6 +249,60 @@ def run_loan(days: list[str]) -> dict:
                 f"{el / 60:.0f}분 지남 · 남은 시간 약 {el / i * (len(days) - i) / 3600:.1f}시간",
                 flush=True,
             )
+    return stat
+
+
+def run_short_kiwoom(codes: list[str], since: str, until: str) -> dict:
+    """공매도 증분 — **키움으로** 받는다(`ka10014`, 한 콜에 372 거래일).
+
+    KIS 와 창구가 달라 **프로그램매매와 동시에 돌 수 있다.** 갱신에서 둘을 줄 세우면
+    합쳐 12.8분인데(실측 2026-09-10), 나눠 돌리면 긴 쪽 하나로 줄어든다.
+
+    키움은 2025-03-05 가 바닥이라 그보다 과거는 못 준다 — 깊은 백필은 KIS 몫이다.
+    """
+    out_dir = OUT_DIR / "short_sale"
+    lock = threading.Lock()
+    stat = {"filled": 0, "rows": 0, "skipped": 0, "empty": 0, "errors": 0}
+    done = 0
+
+    def one(code: str) -> None:
+        nonlocal done
+        try:
+            path = out_dir / f"{code}.parquet"
+            have = last_dates.of(path, "stck_bsop_date")
+            if have and have >= until:
+                with lock:
+                    stat["skipped"] += 1
+                return
+            got = kiwoom_flows.short_code(code, since, until)
+            if got.empty:
+                with lock:
+                    stat["empty"] += 1
+                return
+            # 키움 열 이름을 KIS 쪽에 맞춘다 — 한 파일에 두 모양이 섞이면 못 읽는다.
+            got = got.rename(columns={"dt": "stck_bsop_date"})
+            old = parquet_io.read(path)
+            merged = got if old is None or old.empty else (
+                pd.concat([old, got], ignore_index=True)
+                .drop_duplicates(subset=["stck_bsop_date"], keep="first")  # 저장본 우선
+                .sort_values("stck_bsop_date")
+                .reset_index(drop=True)
+            )
+            parquet_io.save(merged, path)
+            with lock:
+                stat["filled"] += 1
+                stat["rows"] += len(got)
+        except Exception as e:  # noqa: BLE001 — 한 종목 때문에 전체를 버리지 않는다
+            with lock:
+                stat["errors"] += 1
+                if stat["errors"] <= 3:
+                    print(f"    {code}: {type(e).__name__} {e}", flush=True)
+        finally:
+            with lock:
+                done += 1
+
+    with ThreadPoolExecutor(max_workers=KIWOOM_WORKERS) as pool:
+        list(pool.map(one, codes))
     return stat
 
 

@@ -51,7 +51,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.layer1_data import marcap_loader, parquet_io  # noqa: E402
+from src.layer1_market_data import marcap_loader, parquet_io  # noqa: E402
 
 BARS = ROOT / "data" / "derived" / "namuh_bars"
 MARKETS = ("krx", "unt", "nxt")

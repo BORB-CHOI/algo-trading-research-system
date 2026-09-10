@@ -36,7 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
-from src.layer1_data import parquet_io  # noqa: E402
+from src.layer1_market_data import parquet_io  # noqa: E402
 
 BASE = os.environ.get("KIWOOM_BASE_URL", "https://api.kiwoom.com").rstrip("/")
 CHART_PATH = "/api/dostk/chart"

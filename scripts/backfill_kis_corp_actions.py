@@ -4,7 +4,7 @@
       .venv/Scripts/python scripts/backfill_kis_corp_actions.py --what rev_split
       .venv/Scripts/python scripts/backfill_kis_corp_actions.py --since 2026 --until 2026
 
-무엇을 왜 받는지는 `src/layer1_data/kis_corp_actions.py` 독스트링에 적어 뒀다.
+무엇을 왜 받는지는 `src/layer1_market_data/kis_corp_actions.py` 독스트링에 적어 뒀다.
 
 ## 어떻게 훑나 — 해 단위로 묻고, 천장에 닿으면 반으로 쪼갠다
 
@@ -34,9 +34,9 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 import backfill_kis_supply as supply  # noqa: E402
-from src.layer1_data import kis_corp_actions as ca  # noqa: E402
-from src.layer1_data import parquet_io  # noqa: E402
-from src.layer4_execution.brokers.kis.client import KisClient  # noqa: E402
+from src.layer1_market_data import kis_corp_actions as ca  # noqa: E402
+from src.layer1_market_data import parquet_io  # noqa: E402
+from src.layer1_market_data.brokers.kis.client import KisClient  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "derived" / "corp_actions"
 

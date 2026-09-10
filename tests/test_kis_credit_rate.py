@@ -6,7 +6,7 @@ def test_credit_collector_really_sends_ten_calls_per_second() -> None:
     늘어나면 계좌를 늘려도 안 빨라진다.
     """
     import scripts.backfill_kis_credit as credit
-    from src.layer1_data import kis_accounts
+    from src.layer1_market_data import kis_accounts
 
     assert credit.WORKERS_PER_ACCOUNT == 5
     assert credit.WORKERS == 5 * kis_accounts.count()

@@ -45,7 +45,7 @@ def test_calendar_is_fetched_when_the_horizon_runs_short(monkeypatch, tmp_path) 
 def test_corp_actions_split_the_window_when_the_answer_is_truncated(monkeypatch) -> None:
     """한 콜 100 행이 천장이다 — 차면 창을 반으로 쪼개 다시 물어야 한다."""
     import scripts.backfill_kis_corp_actions as bca
-    from src.layer1_data import kis_corp_actions as ca
+    from src.layer1_market_data import kis_corp_actions as ca
 
     spec = ca.BY_KEY["rev_split"]
     windows: list[tuple[str, str]] = []
@@ -69,7 +69,7 @@ def test_corp_actions_split_the_window_when_the_answer_is_truncated(monkeypatch)
 def test_corp_actions_stop_splitting_at_the_narrowest_window(monkeypatch) -> None:
     """하루에 100 건이 넘으면 더 쪼갤 수 없다 — 끝없이 쪼개지 않는지."""
     import scripts.backfill_kis_corp_actions as bca
-    from src.layer1_data import kis_corp_actions as ca
+    from src.layer1_market_data import kis_corp_actions as ca
 
     monkeypatch.setattr(
         ca, "fetch",

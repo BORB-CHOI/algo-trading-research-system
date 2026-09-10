@@ -6,7 +6,7 @@ import time
 
 
 def test_freshness_reports_vi_and_market_funds() -> None:
-    from src.layer1_data.freshness import SOURCES
+    from src.layer1_market_data.freshness import SOURCES
 
     by_key = {source["key"]: source for source in SOURCES}
 
@@ -17,7 +17,7 @@ def test_freshness_reports_vi_and_market_funds() -> None:
 
 
 def test_freshness_uses_the_same_daily_sources_as_the_chart() -> None:
-    from src.layer1_data.freshness import SOURCES
+    from src.layer1_market_data.freshness import SOURCES
 
     by_key = {source["key"]: source for source in SOURCES}
 
@@ -29,7 +29,7 @@ def test_freshness_uses_the_same_daily_sources_as_the_chart() -> None:
 
 
 def test_web_members_freshness_uses_daily_snapshot_not_slow_backfill() -> None:
-    from src.layer1_data.freshness import SOURCES
+    from src.layer1_market_data.freshness import SOURCES
 
     members = {source["key"]: source for source in SOURCES}["members_snapshot"]
 
@@ -39,7 +39,7 @@ def test_web_members_freshness_uses_daily_snapshot_not_slow_backfill() -> None:
 
 
 def test_unavailable_source_is_not_reported_as_days_behind(tmp_path) -> None:
-    from src.layer1_data import freshness
+    from src.layer1_market_data import freshness
 
     freshness.write_mark(
         "supply",

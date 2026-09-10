@@ -50,12 +50,12 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.layer1_data import marcap_loader  # noqa: E402
-from src.layer1_data.derived import NAMUH_BARS_DIR  # noqa: E402 — 락 표시를 읽을 자리
-from src.layer1_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
-from src.layer1_data.adjust import apply_split_adjustment, broker_factor  # noqa: E402
-from src.layer1_data.derived import ADJUSTED_DIR, META_NAME  # noqa: E402
-from src.layer1_data.marcap_loader import available_years, normalize_code  # noqa: E402
+from src.layer1_market_data import marcap_loader  # noqa: E402
+from src.layer1_market_data.derived import NAMUH_BARS_DIR  # noqa: E402 — 락 표시를 읽을 자리
+from src.layer1_market_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
+from src.layer1_market_data.adjust import apply_split_adjustment, broker_factor  # noqa: E402
+from src.layer1_market_data.derived import ADJUSTED_DIR, META_NAME  # noqa: E402
+from src.layer1_market_data.marcap_loader import available_years, normalize_code  # noqa: E402
 
 # 산출 컬럼 — derived.load_adjusted / 러너와의 계약.
 OUT_COLS = ["Date", "Open", "High", "Low", "Close", "Volume", "Amount", "Marcap", "Stocks"]
@@ -64,6 +64,8 @@ SRC_COLS = ["Date", "Code", *OUT_COLS[1:]]
 
 # 경로는 저장소 루트 기준으로 고정한다 — 어느 cwd 에서 실행해도 같은 곳을 본다.
 MARCAP_DIR = REPO_ROOT / marcap_loader.MARCAP_DIR
+# marcap 저장소 뒤쪽 공백을 KRX 로 채워 둔 자리 — 같은 열이라 그대로 이어 붙인다.
+RECENT_DIR = REPO_ROOT / "data" / "derived" / "recent"
 DEFAULT_OUT_DIR = REPO_ROOT / ADJUSTED_DIR
 
 PROGRESS_STEP = 0.10  # 진행 로그 간격 — 10%마다 한 줄 (tqdm 미사용)
@@ -98,12 +100,26 @@ def collect_by_code(
 
     반환: (종목코드 → 연도 조각 목록, 소스 마지막 거래일).
     조각에서 Code 문자열 컬럼은 떼어낸다 — 키로 이미 알고 있고 메모리만 먹는다.
+
+    ## marcap 저장소 뒤쪽 공백을 KRX 보충분으로 메운다
+
+    FinanceData/marcap 저장소는 며칠씩 늦게 올라온다. 그 공백은 `krx_gapfill` 이
+    KRX Open API 로 받아 `recent/YYYY-MM-DD.parquet` 에 넣어 두는데, **여기서 그걸
+    안 읽고 있었다.** 그래서 차트(나무 일봉)는 오늘까지 보이는데 **백테스트가 읽는
+    수정주가만 며칠 뒤처졌다**(실측 2026-09-11: marcap 09-03, 보충분 09-09, 차트 09-10).
+
+    열이 marcap 과 같아 그대로 이어 붙인다.
     """
     chunks: dict[str, list[pd.DataFrame]] = defaultdict(list)
     last_date: pd.Timestamp | None = None
     state = {"next": PROGRESS_STEP}
-    for i, year in enumerate(years, start=1):
-        df = pd.read_parquet(MARCAP_DIR / f"marcap-{year}.parquet", columns=SRC_COLS)
+    sources = [MARCAP_DIR / f"marcap-{year}.parquet" for year in years]
+    sources += sorted(RECENT_DIR.glob("*.parquet")) if RECENT_DIR.is_dir() else []
+    for i, path in enumerate(sources, start=1):
+        try:
+            df = pd.read_parquet(path, columns=SRC_COLS)
+        except (OSError, ValueError, KeyError):
+            continue  # 보충분 한 장이 깨져도 전체를 버리지 않는다
         df["Code"] = normalize_code(df["Code"])  # 2000-05 이전 앞자리 0 소실 복원 (정본 재사용)
         if codes_filter is not None:
             df = df[df["Code"].isin(codes_filter)]
@@ -112,7 +128,7 @@ def collect_by_code(
             last_date = year_max if last_date is None else max(last_date, year_max)
             for code, g in df.groupby("Code", sort=False):
                 chunks[str(code)].append(g.drop(columns=["Code"]))
-        _progress(i, len(years), state, "로드")
+        _progress(i, len(sources), state, "로드")
     return chunks, last_date
 
 

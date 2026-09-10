@@ -18,7 +18,7 @@
 ## 값이 같은지 먼저 확인했다 (2026-09-10)
 
 이미 받아 둔 2024Q4 전체 재무제표 100 종목과 다중회사 주요계정을 맞춰 봤다.
-읽개(`src/layer1_data/dart.py`)가 쓰는 계정 6개(매출액·영업이익·당기순이익·자산총계·
+읽개(`src/layer1_market_data/dart.py`)가 쓰는 계정 6개(매출액·영업이익·당기순이익·자산총계·
 부채총계·자본총계) 기준:
 
     비교 590 건 · 값이 같음 590 · 다름 0 · **일치율 100.00%**
@@ -54,7 +54,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 import backfill_dart as single  # noqa: E402 — 법인 목록·속도 조절·한도 판정을 그대로 쓴다
 from dotenv import load_dotenv  # noqa: E402
-from src.layer1_data import parquet_io  # noqa: E402
+from src.layer1_market_data import parquet_io  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 

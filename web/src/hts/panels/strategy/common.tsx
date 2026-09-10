@@ -65,7 +65,7 @@ export const PLACEHOLDER: Record<string, string> = {
 
 /** 폼 드래프트 → 서버가 받는 손절 설정. ③ 시뮬레이션·④ 백테스팅이 **같은 값**을 보내야
  *  같은 자리를 그린다 — 전에는 두 화면이 각자 만들어서 한쪽만 고치기 쉬웠다.
- *  계산 정본은 서버 `layer4_execution.stops.stop_price` 하나다. */
+ *  계산 정본은 서버 `layer2_backtest.stops.stop_price` 하나다. */
 export function stopPayload(draft: StrategyDraft): SimulateRequest['stop'] {
   if (!draft.stopEnabled) return undefined
   const num = (v: string) => (Number(v) > 0 ? Number(v) : undefined)

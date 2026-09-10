@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.layer1_data.provider import DataProvider
+from src.layer1_market_data.provider import DataProvider
 
 
 def data_notes() -> list[dict]:

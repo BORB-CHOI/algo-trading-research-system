@@ -57,8 +57,8 @@ from api.routers import (
     strategy,
     symbols,
 )
-from src.layer1_data.marcap_loader import available_years
-from src.layer1_data.recent import recent_meta
+from src.layer1_market_data.marcap_loader import available_years
+from src.layer1_market_data.recent import recent_meta
 
 load_dotenv(
     Path(__file__).resolve().parents[1] / ".env"

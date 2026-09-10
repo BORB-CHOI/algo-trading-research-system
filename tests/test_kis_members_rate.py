@@ -1,7 +1,7 @@
 def test_member_collector_really_sends_ten_calls_per_second() -> None:
     """계좌 하나가 초당 10건. 계좌를 늘려도 이 간격은 그대로여야 한다."""
     import scripts.collect_kis_members as members
-    from src.layer1_data import kis_accounts
+    from src.layer1_market_data import kis_accounts
 
     assert members.WORKERS_PER_ACCOUNT == 5
     assert members.WORKERS == 5 * kis_accounts.count()

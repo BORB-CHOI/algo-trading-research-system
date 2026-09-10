@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from src.layer4_execution.stops import DEFAULT_FIB_STOP_RATIO
+from src.layer2_backtest.stops import DEFAULT_FIB_STOP_RATIO
 
 
 class SimStage(BaseModel):
@@ -19,7 +19,7 @@ class SimStage(BaseModel):
 class SimStop(BaseModel):
     """손절 정의 — 평단 대비 % / 기준선 / 되돌림 선(±N호가). 전부 데이터(ADR-0009).
 
-    계산 정본은 `layer4_execution.stops.stop_price` 하나다 — ③·④·전 구간이 같은 값을 쓴다.
+    계산 정본은 `layer2_backtest.stops.stop_price` 하나다 — ③·④·전 구간이 같은 값을 쓴다.
     """
 
     enabled: bool = False

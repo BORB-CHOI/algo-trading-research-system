@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.layer1_data import parquet_io  # noqa: E402
+from src.layer1_market_data import parquet_io  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "derived" / "namuh_bars"
 STATE_PATH = OUT_DIR / "_state.json"

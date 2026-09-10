@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.layer1_data import parquet_io, period_bars  # noqa: E402
+from src.layer1_market_data import parquet_io, period_bars  # noqa: E402
 
 BARS = ROOT / "data" / "derived" / "namuh_bars"
 WORKERS = 8  # 파일 읽고쓰기가 일의 전부다 — 실측 2026-08-29: 1줄기 54초 → 8줄기 22초

@@ -6,10 +6,10 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Query
 
 from api.candles import change_vs_prev, load_year_screen
-from src.layer1_data.dart import load_financials
-from src.layer1_data.marcap_loader import available_years
-from src.layer1_data.market import index_boards, market_snapshot
-from src.layer1_data.news import market_news, stock_news
+from src.layer1_market_data.dart import load_financials
+from src.layer1_market_data.marcap_loader import available_years
+from src.layer1_market_data.market import index_boards, market_snapshot
+from src.layer3_text_data.news import market_news, stock_news
 
 load_dotenv(
     Path(__file__).resolve().parents[1] / ".env"

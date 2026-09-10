@@ -55,7 +55,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 import collect_namuh_bars as bars  # noqa: E402
 
-from src.layer1_data import kiwoom_bars, min1_lanes, parquet_io  # noqa: E402
+from src.layer1_market_data import kiwoom_bars, min1_lanes, parquet_io  # noqa: E402
 
 STATE_PATH = bars.OUT_DIR / "_kiwoom_min1_state.json"
 WORKERS = 8  # 호출을 기다리는 일이라 줄기로 나뉜다. 속도는 kiwoom_bars.THROTTLE 이 잡는다

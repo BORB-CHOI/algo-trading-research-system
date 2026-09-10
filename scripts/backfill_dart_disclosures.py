@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.layer1_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
+from src.layer1_market_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
 
 OUT_DIR = ROOT / "data" / "derived" / "disclosures"
 STATE_PATH = OUT_DIR / "_state.json"

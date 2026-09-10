@@ -94,7 +94,7 @@ import collect_kis_members as members  # noqa: E402
 import build_adjusted  # noqa: E402 — 수정주가 일봉 만들기(호출 0)
 import collect_namuh_bars as bars  # noqa: E402
 
-from src.layer1_data import (  # noqa: E402
+from src.layer1_market_data import (  # noqa: E402
     derived,
     kis_corp_actions as corp_actions,
     kis_extra_supply as extra_flows,
@@ -111,7 +111,7 @@ from src.layer1_data import (  # noqa: E402
     parquet_io,
     period_bars,
 )
-from src.layer4_execution.brokers.kis.client import CallPolicy, KisApiError, KisClient  # noqa: E402
+from src.layer1_market_data.brokers.kis.client import CallPolicy, KisApiError, KisClient  # noqa: E402
 
 LOCK_PATH = ROOT / "data" / "derived" / "_update.lock"
 LOG_PATH = ROOT / "data" / "derived" / "_update_log.jsonl"
@@ -1670,17 +1670,29 @@ def update_extra_supply(last_day: str, *, progress: ProgressFn | None = None) ->
         out["loan"] = {"error": f"{type(e).__name__}: {e}"}
 
     # 공매도·프로그램매매 — 종목별이라 콜이 든다. 저장본 뒤쪽만 채운다.
+    #
+    # **창구를 갈라 동시에 돌린다.** 공매도는 키움(ka10014, 한 콜에 372거래일),
+    # 프로그램매매는 KIS. 한도가 따로 놀아 겹쳐도 서로 안 깎는다 — 줄 세우면 합쳐
+    # 12.8분인데(실측 2026-09-10) 나눠 돌리면 긴 쪽 하나로 줄어든다.
     codes = sorted({str(r.sCode) for r in bars.load_master("m_new_stock").itertuples()})
     state = extra_supply.load_state()
-    for flow in extra_flows.FLOWS:
-        try:
-            if progress:
-                progress(f"{flow.label} {len(codes):,}종목", 0, len(codes))
-            out[flow.key] = extra_supply.run_flow(
-                flow, codes, EXTRA_SUPPLY_SINCE, last_day, state
-            )
-        except Exception as e:  # noqa: BLE001
-            out[flow.key] = {"error": f"{type(e).__name__}: {e}"}
+    program = extra_flows.BY_KEY["program"]
+
+    def _short() -> dict:
+        return extra_supply.run_short_kiwoom(codes, EXTRA_SUPPLY_SINCE, last_day)
+
+    def _program() -> dict:
+        return extra_supply.run_flow(program, codes, EXTRA_SUPPLY_SINCE, last_day, state)
+
+    if progress:
+        progress(f"공매도·프로그램매매 {len(codes):,}종목 (창구 둘 동시)", 0, len(codes))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = {"short_sale": pool.submit(_short), "program": pool.submit(_program)}
+        for key, fut in jobs.items():
+            try:
+                out[key] = fut.result()
+            except Exception as e:  # noqa: BLE001 — 한 갈래 때문에 회차를 버리지 않는다
+                out[key] = {"error": f"{type(e).__name__}: {e}"}
     extra_supply.save_state(state)
     return out
 

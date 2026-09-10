@@ -8,7 +8,7 @@ import pytest
 
 def test_rename_is_retried_when_windows_refuses(monkeypatch, tmp_path) -> None:
     """백신·인덱서가 잡고 있으면 PermissionError 가 난다 — 곧 놓으므로 다시 하면 된다."""
-    from src.layer1_data import parquet_io
+    from src.layer1_market_data import parquet_io
 
     calls = {"n": 0}
     real = parquet_io.os.replace
@@ -31,7 +31,7 @@ def test_rename_is_retried_when_windows_refuses(monkeypatch, tmp_path) -> None:
 
 def test_rename_gives_up_after_enough_tries(monkeypatch, tmp_path) -> None:
     """영영 안 놓으면 끝없이 붙잡고 있지 말고 위로 올린다."""
-    from src.layer1_data import parquet_io
+    from src.layer1_market_data import parquet_io
 
     calls = {"n": 0}
 

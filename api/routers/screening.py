@@ -15,11 +15,11 @@ from api.candles import (
     load_year_slim,
 )
 from api.notes import data_notes
-from src.layer1_data.exclusions import DEFAULT_POLICY, apply_exclusions
-from src.layer1_data.marcap_loader import available_years
-from src.layer1_data.themes import theme_map
-from src.layer1_data.unified import apply_unified, is_unified, unified_last_day
-from src.layer3_strategy import conditions as cond_registry
+from src.layer1_market_data.exclusions import DEFAULT_POLICY, apply_exclusions
+from src.layer1_market_data.marcap_loader import available_years
+from src.layer3_text_data.themes import theme_map
+from src.layer1_market_data.unified import apply_unified, is_unified, unified_last_day
+from src.layer2_backtest import conditions as cond_registry
 
 load_dotenv(
     Path(__file__).resolve().parents[1] / ".env"
@@ -51,7 +51,7 @@ class ScreenRunRequest(BaseModel):
     conditions: list[ConditionSpec] = Field(default_factory=list)
     limit: int = Field(100, ge=1, le=200)
     # 어느 거래소 체결로 거를지. krx = marcap 그대로, unt = 넥스트레이드까지 합친 값
-    # (거래량·거래대금만 바뀐다 — src/layer1_data/unified.py). 기본은 지금까지와 같은 KRX.
+    # (거래량·거래대금만 바뀐다 — src/layer1_market_data/unified.py). 기본은 지금까지와 같은 KRX.
     market: Literal["krx", "unt"] = "krx"
 
 

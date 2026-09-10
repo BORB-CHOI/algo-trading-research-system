@@ -24,7 +24,7 @@
 `rcept_no` 앞 8자리를 `rcept_dt` 로 남긴다 — **그 날짜 이후에만 이 숫자를 쓸 수 있다.**
 최초 제출본 숫자는 공시서류 원본(`document.xml`)을 파싱해야만 나오는데 그건 별도 작업이다.
 복원하기로 하면 `{종목}/{연도}Q{분기}__{접수번호}.parquet` 로 옆에 쌓으면 된다 —
-읽개(`src/layer1_data/dart.py`)의 `*Q4.parquet` 글롭에 안 걸려 지금 동작이 안 바뀐다.
+읽개(`src/layer1_market_data/dart.py`)의 `*Q4.parquet` 글롭에 안 걸려 지금 동작이 안 바뀐다.
 
 ## 저장
 
@@ -63,8 +63,8 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-from src.layer1_data import parquet_io  # noqa: E402
-from src.layer1_data.kiwoom_bars import Throttle  # noqa: E402 — 스레드가 공유하는 스로틀
+from src.layer1_market_data import parquet_io  # noqa: E402
+from src.layer1_market_data.kiwoom_bars import Throttle  # noqa: E402 — 스레드가 공유하는 스로틀
 
 API = "https://opendart.fss.or.kr/api"
 OUT_DIR = ROOT / "data" / "derived" / "dart"
