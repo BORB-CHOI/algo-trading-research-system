@@ -106,6 +106,7 @@ from src.layer1_market_data import (  # noqa: E402
     krx_gapfill,
     krx_openapi,
     last_dates,
+    listing,
     min1_lanes,
     minute_bars,
     parquet_io,
@@ -1288,6 +1289,8 @@ def update_kis(
         "called": 0,
         "missing_backfill": 0,
         "known_no_data": 0,
+        "not_stock": 0,
+        "new_listing": 0,
         "empty_responses": 0,
         "observed_latest": "",
     }
@@ -1299,6 +1302,16 @@ def update_kis(
         backfill_state = module.load_state()
     except (AttributeError, OSError, ValueError):
         backfill_state = {}
+
+    # 저장 파일이 없는 종목을 어떻게 볼 것인가 — **주식이면 신규 상장, 아니면 유니버스 밖.**
+    #
+    # 백필 유니버스는 marcap 이고 ETF/ETN 은 marcap 에 없다. 그래서 파일이 없다고 다
+    # 받으러 가면 유니버스 밖 ETF 1,535종목을 새로 받고, 다 건너뛰면 백필(2026-08-16)
+    # 뒤에 상장한 종목이 영원히 빈다(실측 2026-09-11: 수급 9종목·신용잔고 8종목이
+    # 한 줄도 없었다). 가르는 규칙은 `listing.stock_codes` 에 있다.
+    stocks = listing.stock_codes(master)
+    floor = str(getattr(module, "FLOOR_DATE", "") or "")
+    fresh_empty: set[str] = set()  # 신규 상장인데 제공처에 자료가 없던 종목
 
     # 낮에 대체 창구로 반쪽만 채워 둔 종목 — 정본은 **그 앞 날짜부터 다시** 받아 덮는다.
     # 안 그러면 저장된 마지막 날짜가 이미 최신이라 그 종목을 건너뛰고, 항목이 21개뿐인
@@ -1328,17 +1341,30 @@ def update_kis(
         redo_from = redo.get(code)
         if redo_from and since:
             since = redo_from  # 반쪽 구간을 다시 받으러 뒤로 물린다
+        new_listing = False
         if not since:
-            with lock:
-                if backfill_state.get(code, {}).get("done"):
+            if backfill_state.get(code, {}).get("done"):
+                with lock:
                     totals["known_no_data"] += 1
-                else:
-                    totals["missing_backfill"] += 1
-            return  # 백필이 아직 안 만든 종목 — 백필 몫이다
-        if last_day and since >= last_day:
+                return  # 백필이 "자료 없음"으로 확정한 종목 — 다시 안 부른다
+            if code not in stocks or not floor:
+                with lock:
+                    totals["not_stock"] += 1
+                return  # ETF·ETN — 백필 유니버스(marcap) 밖이다
+            # 백필 뒤에 상장했다. **첫 거래일부터** 달라고 한다 — 바닥(1994·2007)을 주면
+            # KIS 가 상장 전 날짜에도 날짜만 든 빈 행을 돌려줘 8,400여 줄이 쌓이고
+            # 종목당 280여 콜을 헛쓴다(실측 2026-09-11).
+            since = max(listing.first_traded(code), floor)
+            new_listing = True
+            with lock:
+                totals["new_listing"] += 1
+        # 저장된 날짜가 마지막 거래일까지 와 있으면 파일도 안 열고 호출도 안 한다.
+        # **신규 상장은 빼고 본다** — 상장 당일이면 `since`(첫 거래일)와 마지막 거래일이
+        # 같아서 여기 걸려 첫 파일이 안 생긴다(실측: 엔에이치스팩34호 20260910 상장).
+        if last_day and since >= last_day and not new_listing:
             with lock:
                 totals["skipped"] += 1
-            return  # 마지막 거래일까지 이미 있다 — 파일도 안 열고 호출도 안 한다
+            return
         old = parquet_io.read(path)
         try:
             new = module.collect_code(kis_client_for(module), code, since, today)
@@ -1368,6 +1394,10 @@ def update_kis(
             with lock:
                 totals["called"] += 1
                 totals["empty_responses"] += 1
+                if new_listing:
+                    # 제공처에 이 종목 자료가 아예 없다(신용잔고는 신규 상장 종목에
+                    # 흔하다). 표시를 안 남기면 회차마다 다시 부른다.
+                    fresh_empty.add(code)
             return
         observed = max(str(v) for v in new[date_col].dropna().tolist()) if len(new) else ""
         grown = merge_save(path, old, new, [date_col], force=bool(redo_from))
@@ -1383,6 +1413,16 @@ def update_kis(
         list(pool.map(work, codes))
     if redone:  # 덮은 종목만 표에서 뺀다 — 못 덮은 건 다음 회차가 다시 시도한다
         module.save_partial({c: d for c, d in redo.items() if c not in redone})
+    if fresh_empty:
+        # 백필과 같은 표시를 남긴다 — 다음 회차부터 `known_no_data` 로 걸러진다.
+        stamp = datetime.now().isoformat(timespec="seconds")
+        for code in fresh_empty:
+            backfill_state[code] = {"done": True, "rows": 0, "oldest": "", "newest": "",
+                                    "collected_at": stamp}
+        try:
+            module.save_state(backfill_state)
+        except (AttributeError, OSError, ValueError):
+            pass  # 표시를 못 남겨도 자료는 멀쩡하다 — 다음 회차가 한 번 더 부를 뿐이다
     out = {
         "label": label,
         "repaired_partial": len(redone),
@@ -1392,6 +1432,8 @@ def update_kis(
         "called": totals["called"],
         "missing_backfill": totals["missing_backfill"],
         "known_no_data": totals["known_no_data"],
+        "not_stock": totals["not_stock"],
+        "new_listing": totals["new_listing"],
         "empty_responses": totals["empty_responses"],
         "observed_latest": totals["observed_latest"],
         "target_codes": len(codes),
@@ -1471,21 +1513,26 @@ def update_financials(budget_sec: float = FINANCIALS_BUDGET_SEC) -> dict:
         return {"error": f"재무제표를 못 받았습니다 — {type(e).__name__}: {e}"}
 
 
-def update_adjusted(marcap_last: str | None) -> dict:
-    """수정주가 일봉(`data/derived/adjusted/`)을 marcap 최신으로 다시 만든다 — 호출 0.
+def update_adjusted(_unused: str | None = None) -> dict:
+    """수정주가 일봉(`data/derived/adjusted/`)을 원천 최신으로 다시 만든다 — 호출 0.
 
     **이게 갱신에서 통째로 빠져 있었다**(실측 2026-09-07: marcap 은 2026-08-31 까지인데
     수정주가는 2026-08-03 기준에 멈춰 있었다). 백테스트·조건검색·시뮬레이션이 이 파일을
     읽으므로, 여기가 낡으면 화면은 최신인데 검사 결과만 한 달 전 자료로 나온다.
 
-    marcap 이 앞으로 나갔을 때만 만든다. 전체 재생성이지만 증권사 호출이 0 이고
+    **판정 기준은 `build_adjusted.source_last_date()` 하나다.** 전에는 marcap 파일의 끝만
+    보고 판정했는데, 수정주가가 읽는 원천은 marcap + KRX 보충분 둘이라 어긋났다
+    (실측 2026-09-11: marcap 09-03 · 보충분 09-10 인데 "이미 최신"이라며 건너뛰었다).
+
+    원천이 앞으로 나갔을 때만 만든다. 전체 재생성이지만 증권사 호출이 0 이고
     실측 7년 46초라 전 구간(1995~)도 몇 분이면 끝난다.
     """
-    if not marcap_last:
-        return {"skipped": "marcap 마지막 날짜를 몰라 건너뜁니다."}
+    source_last = build_adjusted.source_last_date()
+    if not source_last:
+        return {"skipped": "원천 마지막 날짜를 몰라 건너뜁니다."}
     have = derived.derived_last_date()
     have_s = have.strftime("%Y-%m-%d") if have is not None else None
-    if have_s and have_s >= str(marcap_last):
+    if have_s and have_s >= source_last:
         return {"skipped": f"이미 {have_s} 기준입니다.", "last_date": have_s}
     started = time.monotonic()
     rc = build_adjusted.main([])
@@ -1837,9 +1884,9 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
         summary["last_trading_day"] = last_day
         step("⓪-2 marcap 뒤쪽 공백 (KRX)...")
         summary["recent"] = krx_gapfill.fill_marcap_gap()
-        # 수정주가 일봉은 marcap 을 읽어 만든다 — 공백을 채운 **뒤에** 띄운다.
+        # 수정주가 일봉은 marcap + KRX 보충분을 읽어 만든다 — 공백을 채운 **뒤에** 띄운다.
         # 호출이 0 이라 증권사 한도와 무관하고, 봉 받는 동안 뒤에서 끝난다.
-        adj_future = adj_pool.submit(update_adjusted, summary["recent"].get("marcap_last"))
+        adj_future = adj_pool.submit(update_adjusted)
 
         step("①-0 오늘 일봉 (KIS 멀티시세, 30종목/콜)...")
         summary["bars_day_kis"] = update_day_bars_kis(last_day)
@@ -1938,10 +1985,12 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
                 note=(
                     "이번 증분 대상 종목에서 제공처가 돌려준 최신 날짜는 "
                     f"{freshness._norm(credit_result['observed_latest'])}입니다. "
-                    f"사전 수집 자료가 없는 후보 {credit_result.get('missing_backfill', 0):,}종목은 "
-                    "별도 사전 수집 대상입니다."
+                    f"ETF·ETN {credit_result.get('not_stock', 0):,}종목은 유니버스 밖이라 "
+                    "부르지 않습니다."
                 ),
             )
+        # 증분이 신규 상장 종목을 직접 받으므로 따로 사전 수집할 종목은 남지 않는다.
+        # 이 값은 화면이 읽는다 — 키를 없애지 않고 0 으로 남긴다.
         summary["precollection_needed"] = {
             key: int(summary.get(key, {}).get("missing_backfill", 0))
             for key in ("supply", "credit")

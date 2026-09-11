@@ -71,6 +71,33 @@ DEFAULT_OUT_DIR = REPO_ROOT / ADJUSTED_DIR
 PROGRESS_STEP = 0.10  # 진행 로그 간격 — 10%마다 한 줄 (tqdm 미사용)
 
 
+def source_last_date() -> str:
+    """**내가 읽는 원천의 마지막 날짜** (YYYY-MM-DD). 없으면 빈 글자.
+
+    원천은 marcap 과 KRX 보충분 둘이다(`collect_by_code` 의 `sources`). 갱신이 "다시
+    만들어야 하나"를 판정할 때 이 값을 쓴다 — 판정하는 쪽이 원천 목록을 따로 들고 있으면
+    반드시 어긋난다.
+
+    실제 사고 2026-09-11: 갱신이 marcap 파일의 끝(2026-09-03)만 보고 판정해서, KRX
+    보충분이 2026-09-10 까지 채워져 있는데도 "이미 최신"이라며 건너뛰었다. 그래서
+    백테스트가 읽는 수정주가만 이틀 뒤처졌다.
+    """
+    days: list[str] = []
+    if RECENT_DIR.is_dir():
+        days += [p.stem for p in RECENT_DIR.glob("*.parquet")]
+    years = available_years(MARCAP_DIR)
+    if years:
+        try:
+            last = pd.read_parquet(
+                MARCAP_DIR / f"marcap-{max(years)}.parquet", columns=["Date"]
+            )["Date"].max()
+            if pd.notna(last):
+                days.append(pd.Timestamp(last).strftime("%Y-%m-%d"))
+        except (OSError, ValueError, KeyError):
+            pass  # marcap 한 해가 깨져도 보충분만으로 판정한다
+    return max(days) if days else ""
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="marcap → 수정주가 일봉 사전 계산 (ADR-0006)")
     p.add_argument("--start-year", type=int, default=None,

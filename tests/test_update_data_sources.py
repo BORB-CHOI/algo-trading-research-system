@@ -135,20 +135,105 @@ def test_bar_errors_make_web_update_incomplete() -> None:
     assert update_data.web_update_problems(summary) == ["1분봉 2종목을 받지 못했습니다."]
 
 
-def test_missing_backfill_is_counted_without_starting_slow_collection(monkeypatch, tmp_path) -> None:
-    import scripts.update_data as update_data
-
-    class Master:
-        def itertuples(self):
-            return iter([type("Row", (), {"sCode": "000001"})()])
-
-    monkeypatch.setattr(update_data.bars, "load_master", lambda _name: Master())
-    result = update_data.update_kis(
-        object(), tmp_path, "date", "신용잔고", "20260901"
+def _master(rows: list[tuple[str, str]]) -> pd.DataFrame:
+    """상장 목록 흉내 — (종목코드, 액면가)."""
+    return pd.DataFrame(
+        [{"sCode": code, "sParvalue": par, "sKorName": code} for code, par in rows]
     )
 
+
+def test_etf_without_a_saved_file_is_not_called(monkeypatch, tmp_path) -> None:
+    """ETF·ETN 은 백필 유니버스(marcap) 밖이다 — 파일이 없어도 부르지 않는다."""
+    import scripts.update_data as update_data
+
+    monkeypatch.setattr(
+        update_data.bars, "load_master", lambda _name: _master([("069500", "0000000")])
+    )
+    monkeypatch.setattr(update_data.listing, "marcap_codes", lambda *a, **k: set())
+
+    result = update_data.update_kis(object(), tmp_path, "date", "신용잔고", "20260901")
+
     assert result["called"] == 0
-    assert result["missing_backfill"] == 1
+    assert result["not_stock"] == 1
+    assert result["new_listing"] == 0
+
+
+def test_newly_listed_stock_is_collected_even_on_its_listing_day(monkeypatch, tmp_path) -> None:
+    """백필 뒤에 상장한 주식은 첫 거래일부터 받아 첫 파일을 만든다.
+
+    옛 코드는 "저장 파일이 없으면 백필 몫"이라며 건너뛰어서, 백필을 다시 돌리기 전까지
+    신규 상장 종목이 영원히 비어 있었다(실측 2026-09-11: 수급 9종목·신용잔고 8종목).
+
+    상장 당일이면 첫 거래일과 마지막 거래일이 같다 — "이미 최신"으로 보고 건너뛰면
+    첫 파일이 안 생긴다(엔에이치스팩34호가 2026-09-10 에 그랬다).
+    """
+    import scripts.update_data as update_data
+
+    monkeypatch.setattr(
+        update_data.bars, "load_master", lambda _name: _master([("386380", "0000500")])
+    )
+    monkeypatch.setattr(update_data.listing, "marcap_codes", lambda *a, **k: set())
+    monkeypatch.setattr(update_data.listing, "first_traded", lambda _c, **_k: "20260901")
+
+    asked: list[tuple[str, str, str]] = []
+
+    class Module:
+        FLOOR_DATE = "20070712"
+        KisApiError = update_data.KisApiError
+
+        @staticmethod
+        def load_state() -> dict:
+            return {}
+
+        @staticmethod
+        def collect_code(_client, code, first_date, last_date):
+            asked.append((code, first_date, last_date))
+            return pd.DataFrame([{"date": "20260908", "v": 1}])
+
+    monkeypatch.setattr(update_data, "kis_client_for", lambda _m: object())
+    result = update_data.update_kis(Module(), tmp_path, "date", "신용잔고", "20260901")
+
+    assert len(asked) == 1
+    assert asked[0][0] == "386380"
+    assert asked[0][1] == "20260901"  # 첫 거래일부터 — 마지막 거래일과 같아도 받는다
+    assert result["new_listing"] == 1
+    assert result["called"] == 1
+    assert (tmp_path / "386380.parquet").exists()
+
+
+def test_new_listing_with_no_provider_data_is_marked_done(monkeypatch, tmp_path) -> None:
+    """제공처에 자료가 없으면 표시를 남긴다 — 회차마다 다시 부르지 않게."""
+    import scripts.update_data as update_data
+
+    monkeypatch.setattr(
+        update_data.bars, "load_master", lambda _name: _master([("282620", "0000500")])
+    )
+    monkeypatch.setattr(update_data.listing, "marcap_codes", lambda *a, **k: set())
+
+    saved: dict = {}
+
+    class Module:
+        FLOOR_DATE = "20070712"
+        KisApiError = update_data.KisApiError
+
+        @staticmethod
+        def load_state() -> dict:
+            return {}
+
+        @staticmethod
+        def save_state(state) -> None:
+            saved.update(state)
+
+        @staticmethod
+        def collect_code(_client, _code, _first, _last):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(update_data, "kis_client_for", lambda _m: object())
+    result = update_data.update_kis(Module(), tmp_path, "date", "신용잔고", "20260901")
+
+    assert result["empty_responses"] == 1
+    assert saved["282620"]["done"] is True
+    assert saved["282620"]["rows"] == 0
 
 
 def test_members_and_credit_run_together_after_supply(monkeypatch) -> None:
@@ -210,11 +295,10 @@ def test_partially_filled_days_are_refetched_by_the_full_source(monkeypatch, tmp
     """낮에 대체 창구로 채운 구간을 정본 회차가 다시 받아 덮는지."""
     import scripts.update_data as update_data
 
-    class Master:
-        def itertuples(self):
-            return iter([type("Row", (), {"sCode": "000001"})()])
-
-    monkeypatch.setattr(update_data.bars, "load_master", lambda _name: Master())
+    monkeypatch.setattr(
+        update_data.bars, "load_master", lambda _name: _master([("000001", "0000500")])
+    )
+    monkeypatch.setattr(update_data.listing, "marcap_codes", lambda *a, **k: set())
 
     path = tmp_path / "000001.parquet"
     pd.DataFrame(
@@ -262,3 +346,88 @@ def test_partially_filled_days_are_refetched_by_the_full_source(monkeypatch, tmp
     assert saved == [{}], "덮은 종목은 반쪽 표에서 빠져야 한다"
     after = pd.read_parquet(path)
     assert after.loc[after["date"] == "20260901", "value"].tolist() == ["정본"]
+
+
+def test_adjusted_gate_looks_at_the_krx_gap_fill_too(monkeypatch) -> None:
+    """수정주가 재생성 관문은 marcap 뿐 아니라 KRX 보충분까지 본다.
+
+    실측 2026-09-11 사고: marcap 파일은 2026-09-03 에서 멈췄고 보충분이 2026-09-10 까지
+    채워져 있었는데, 관문이 marcap 만 보고 "이미 최신"이라며 건너뛰었다. 그래서 백테스트가
+    읽는 수정주가만 이틀 뒤처졌다.
+    """
+    import pandas as pd
+
+    import scripts.update_data as update_data
+
+    built: list[int] = []
+    monkeypatch.setattr(
+        update_data.build_adjusted, "source_last_date", lambda: "2026-09-10"
+    )
+    monkeypatch.setattr(
+        update_data.derived, "derived_last_date", lambda: pd.Timestamp("2026-09-09")
+    )
+    monkeypatch.setattr(
+        update_data.build_adjusted, "main", lambda _argv: built.append(1) or 0
+    )
+
+    result = update_data.update_adjusted()
+
+    assert built == [1], "원천이 앞서 있으면 다시 만들어야 한다"
+    assert "skipped" not in result
+
+
+def test_adjusted_is_not_rebuilt_when_already_current(monkeypatch) -> None:
+    import pandas as pd
+
+    import scripts.update_data as update_data
+
+    built: list[int] = []
+    monkeypatch.setattr(
+        update_data.build_adjusted, "source_last_date", lambda: "2026-09-10"
+    )
+    monkeypatch.setattr(
+        update_data.derived, "derived_last_date", lambda: pd.Timestamp("2026-09-10")
+    )
+    monkeypatch.setattr(
+        update_data.build_adjusted, "main", lambda _argv: built.append(1) or 0
+    )
+
+    result = update_data.update_adjusted()
+
+    assert built == []
+    assert result["last_date"] == "2026-09-10"
+
+
+def test_new_listing_asks_from_its_first_trading_day_not_the_floor(monkeypatch, tmp_path) -> None:
+    """바닥(1994·2007)부터 달라고 하면 KIS 가 상장 전 빈 행을 8,400여 줄 돌려준다.
+
+    실측 2026-09-11: 10종목에 8,490행씩 담겼는데 값이 든 행은 2~22줄이었고, 종목당
+    280여 콜을 헛썼다. 첫 거래일부터 달라고 하면 30행 한 페이지로 끝난다.
+    """
+    import scripts.update_data as update_data
+
+    monkeypatch.setattr(
+        update_data.bars, "load_master", lambda _name: _master([("386380", "0000500")])
+    )
+    monkeypatch.setattr(update_data.listing, "marcap_codes", lambda *a, **k: set())
+    monkeypatch.setattr(update_data.listing, "first_traded", lambda _c, **_k: "20260904")
+
+    asked: list[str] = []
+
+    class Module:
+        FLOOR_DATE = "20070712"
+        KisApiError = update_data.KisApiError
+
+        @staticmethod
+        def load_state() -> dict:
+            return {}
+
+        @staticmethod
+        def collect_code(_client, _code, first_date, _last):
+            asked.append(first_date)
+            return pd.DataFrame([{"date": "20260911", "v": 1}])
+
+    monkeypatch.setattr(update_data, "kis_client_for", lambda _m: object())
+    update_data.update_kis(Module(), tmp_path, "date", "수급", "20260911")
+
+    assert asked == ["20260904"]
