@@ -1093,7 +1093,7 @@ def categories_payload() -> dict:
             }
             for ckey, cname, keys in CATEGORIES
         ],
-        # 재무 조건은 데이터가 있는 종목만 판정된다. 지금은 절반뿐이라 화면이 알려줘야 한다.
+        # 재무 조건은 요약 테이블에 있는 종목만 판정된다. 몇 종목이 있는지 화면이 알려줘야 한다.
         "finance_coverage": finance_coverage(),
     }
 

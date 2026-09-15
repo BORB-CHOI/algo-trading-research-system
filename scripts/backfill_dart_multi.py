@@ -136,7 +136,7 @@ def collect_years(key: str, years: list[int], *, progress=None) -> dict:
     cmap = single.load_corp_map(key)
     corps = sorted({str(c).strip() for c in cmap["corp_code"] if str(c).strip()})
     chunks = [corps[i:i + CHUNK] for i in range(0, len(corps), CHUNK)]
-    out = {"saved": 0, "kept": 0, "calls": 0, "years": years, "corps": len(corps)}
+    out = {"saved": 0, "saved_q4": 0, "kept": 0, "calls": 0, "years": years, "corps": len(corps)}
     for year in years:
         for q, reprt in single.REPRT_BY_QUARTER.items():
             for chunk in chunks:
@@ -150,6 +150,10 @@ def collect_years(key: str, years: list[int], *, progress=None) -> dict:
                 s, k = save_period(frame, year, q)
                 out["saved"] += s
                 out["kept"] += k
+                if q == 4:
+                    # 재무 요약(financials.parquet)은 사업보고서만 읽는다 — 이게 0이면 요약을 다시
+                    # 만들 일이 없다. 갱신(update_data)이 이 숫자로 요약을 만들지 정한다.
+                    out["saved_q4"] += s
             if progress:
                 progress(f"재무제표 {year}Q{q}", out["calls"], len(years) * 4 * len(chunks))
     return out

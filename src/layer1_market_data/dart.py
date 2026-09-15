@@ -106,6 +106,7 @@ SUMMARY_PATH = DART_DIR.parent / "financials.parquet"
 GROWTH_ACCOUNTS = ("매출액", "영업이익")
 
 _summary_cache: pd.DataFrame | None = None
+_summary_key: tuple[int, int] | None = None
 
 
 def build_summary() -> pd.DataFrame:
@@ -143,11 +144,27 @@ def save_summary(df: pd.DataFrame | None = None) -> Path:
     return SUMMARY_PATH
 
 
+def _summary_stamp() -> tuple[int, int] | None:
+    """요약 파일의 (수정 시각, 크기). 파일이 없으면 None."""
+    try:
+        st = SUMMARY_PATH.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def load_summary(force: bool = False) -> pd.DataFrame:
-    """요약 테이블. 없으면 빈 프레임 — 재무 조건은 전 종목 탈락이 아니라 '판정 불가'로 다룬다."""
-    global _summary_cache
-    if _summary_cache is None or force:
-        _summary_cache = pd.read_parquet(SUMMARY_PATH) if SUMMARY_PATH.exists() else pd.DataFrame()
+    """요약 테이블. 없으면 빈 프레임 — 그러면 재무 조건에서 전 종목이 판정 불가(NaN)로 빠진다.
+
+    **파일의 수정 시각·크기가 바뀌면 다시 읽는다**(`last_dates.py` 와 같은 방식). 갱신은 웹 버튼이면
+    서버 프로세스 안에서, 터미널이면 다른 프로세스에서 요약을 새로 만든다. 한 번 읽은 표를 계속
+    들고 있으면 파일이 없던 때의 빈 표가 남아, 요약을 만들어도 재무 조건이 0종목 그대로다.
+    """
+    global _summary_cache, _summary_key
+    stamp = _summary_stamp()
+    if _summary_cache is None or force or stamp != _summary_key:
+        _summary_cache = pd.read_parquet(SUMMARY_PATH) if stamp is not None else pd.DataFrame()
+        _summary_key = stamp
     return _summary_cache
 
 

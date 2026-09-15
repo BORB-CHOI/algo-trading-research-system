@@ -95,6 +95,7 @@ import build_adjusted  # noqa: E402 — 수정주가 일봉 만들기(호출 0)
 import collect_namuh_bars as bars  # noqa: E402
 
 from src.layer1_market_data import (  # noqa: E402
+    dart,
     derived,
     kis_corp_actions as corp_actions,
     kis_extra_supply as extra_flows,
@@ -1513,6 +1514,36 @@ def update_financials(budget_sec: float = FINANCIALS_BUDGET_SEC) -> dict:
         return {"error": f"재무제표를 못 받았습니다 — {type(e).__name__}: {e}"}
 
 
+
+def update_financial_summary(fin: dict) -> dict:
+    """재무 요약(`data/derived/financials.parquet`)을 **사업보고서가 새로 들어온 회차에만** 통째로
+    다시 만든다 (오너 결정 2026-09-15).
+
+    조건검색은 종목별 파일이 아니라 이 요약을 읽는다(`dart.load_summary`). 요약은 사업보고서(Q4)
+    파일만 읽으므로 1~3분기 파일만 들어온 회차엔 바뀔 것이 없다. 통째로 만들면 약 14분이다
+    (2026-09-15 실측 — 120종목 표본 두 번 13.7분·14.0분).
+
+    **요약 파일이 아예 없으면** 사업보고서가 안 들어왔어도 만든다. 없으면 재무 조건이 0종목이다
+    (2026-09-15 실측: 종목별 파일 96,867개가 있었는데 요약이 없어 재무 조건이 전부 빠졌다).
+    """
+    have = dart.SUMMARY_PATH.exists()
+    new_q4 = int(fin.get("saved_q4", 0) or 0)
+    if have and new_q4 == 0:
+        return {"skipped": "새로 들어온 사업보고서가 없어 요약을 다시 만들지 않습니다."}
+    started = time.monotonic()
+    df = dart.build_summary()
+    if df.empty:
+        return {"skipped": "재무 파일이 없어 요약을 만들 수 없습니다."}
+    dart.save_summary(df)
+    return {
+        "rows": len(df),
+        "codes": int(df["code"].nunique()),
+        "new_q4": new_q4,
+        "built_because": "사업보고서 새로 들어옴" if new_q4 else "요약 파일이 없었음",
+        "sec": round(time.monotonic() - started, 1),
+    }
+
+
 def update_adjusted(_unused: str | None = None) -> dict:
     """수정주가 일봉(`data/derived/adjusted/`)을 원천 최신으로 다시 만든다 — 호출 0.
 
@@ -1806,6 +1837,10 @@ def web_update_problems(summary: dict) -> list[str]:
     elif int(fin.get("failed", 0)):
         problems.append(f"재무제표 {fin['failed']}건을 받지 못했습니다.")
 
+    fin_summary = summary.get("financial_summary", {})
+    if fin_summary.get("error"):
+        problems.append(f"재무 요약: {fin_summary['error']}")
+
     adj = summary.get("adjusted", {})
     if adj.get("error"):
         problems.append(f"수정주가 일봉: {adj['error']}")
@@ -1954,6 +1989,11 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
             summary["financials"] = fin_future.result(timeout=FINANCIALS_BUDGET_SEC + 300)
         except Exception as e:  # 재무 하나 때문에 나머지 갱신을 버리지 않는다
             summary["financials"] = {"error": f"{type(e).__name__}: {e}"}
+        step("③-5 재무 요약 — 사업보고서가 새로 들어왔으면 다시 만들기...")
+        try:
+            summary["financial_summary"] = update_financial_summary(summary.get("financials", {}))
+        except Exception as e:  # 요약 하나 때문에 나머지 갱신을 버리지 않는다
+            summary["financial_summary"] = {"error": f"{type(e).__name__}: {e}"}
         step("④ 수정주가 일봉 — 뒤에서 돌던 것 거두기...")
         try:
             summary["adjusted"] = adj_future.result(timeout=1800) if adj_future else {}

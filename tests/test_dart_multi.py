@@ -81,3 +81,18 @@ def test_amounts_lose_their_commas_and_keep_the_filing_date(monkeypatch) -> None
     assert frame["thstrm_amount"].iloc[0] == "556691161000000"
     assert frame["rcept_dt"].iloc[0] == "20250310"
     assert frame["stock_code"].iloc[0] == "005930", "여섯 자리로 채워야 한다"
+
+
+def test_business_report_saves_are_counted_on_their_own(monkeypatch) -> None:
+    """재무 요약은 사업보고서(Q4)만 읽는다 — 갱신은 이 숫자로 요약을 다시 만들지 정한다."""
+    import scripts.backfill_dart_multi as multi
+
+    monkeypatch.setattr(multi.single, "load_corp_map", lambda _k: pd.DataFrame({"corp_code": ["00126380"]}))
+    monkeypatch.setattr(multi, "ask", lambda *_a, **_k: ("000", _multi_rows("005930", "A")))
+    # 1분기와 사업보고서만 새로 저장됐다고 친다
+    monkeypatch.setattr(multi, "save_period", lambda _f, _y, q: (1, 0) if q in (1, 4) else (0, 1))
+
+    out = multi.collect_years("k", [2025])
+
+    assert out["saved"] == 2
+    assert out["saved_q4"] == 1, "1분기 저장은 요약과 상관없다"

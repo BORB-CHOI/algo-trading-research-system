@@ -431,3 +431,23 @@ def test_new_listing_asks_from_its_first_trading_day_not_the_floor(monkeypatch, 
     update_data.update_kis(Module(), tmp_path, "date", "수급", "20260911")
 
     assert asked == ["20260904"]
+
+
+def test_financial_summary_is_rebuilt_only_when_a_business_report_arrives(monkeypatch, tmp_path) -> None:
+    """요약은 사업보고서만 읽는다 — 1~3분기만 들어온 회차에 14분을 쓰지 않는다. 요약이 없으면 무조건 만든다."""
+    import scripts.update_data as update_data
+
+    built = []
+    fake = pd.DataFrame({"code": ["005930"], "year": [2025]})
+    monkeypatch.setattr(update_data.dart, "SUMMARY_PATH", tmp_path / "financials.parquet")
+    monkeypatch.setattr(update_data.dart, "build_summary", lambda: built.append(1) or fake)
+
+    first = update_data.update_financial_summary({"saved": 40, "saved_q4": 0})
+    assert first["built_because"] == "요약 파일이 없었음"
+    assert (tmp_path / "financials.parquet").exists() and len(built) == 1
+
+    quiet = update_data.update_financial_summary({"saved": 40, "saved_q4": 0})
+    assert "skipped" in quiet and len(built) == 1, "1~3분기만 들어오면 안 만든다"
+
+    q4 = update_data.update_financial_summary({"saved": 3, "saved_q4": 2})
+    assert q4["built_because"] == "사업보고서 새로 들어옴" and len(built) == 2
