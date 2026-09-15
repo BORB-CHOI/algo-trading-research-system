@@ -1,7 +1,7 @@
 """파생 데이터 읽기 창구 — 사전 계산된 수정주가 일봉 (data/derived/adjusted).
 
 `scripts/build_adjusted.py` 가 미리 만들어 둔 종목별 parquet 을 읽는 얇은 헬퍼다.
-보정 계산의 정본은 layer1 `adjust.apply_split_adjustment`(ADR-0006) — 여기서는
+보정 계산의 정본은 1단계 `adjust.apply_split_adjustment`(ADR-0006) — 여기서는
 어떤 보정도 다시 하지 않고 파일을 그대로 돌려준다.
 
 파일 규격 (build_adjusted.py 와의 계약):

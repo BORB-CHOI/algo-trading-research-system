@@ -145,7 +145,7 @@ def full_history_adjusted(code: str) -> pd.DataFrame:
     """
     code = code.strip().zfill(6)
     # 상장 종목은 나무 수집본이 정본이다 — 증권사가 보정한 값이라 액면분할·병합이 이미
-    # 반영돼 있고, marcap 저장소보다 하루 빠르다 (오너 결정 2026-08-16, layer1/daily.py).
+    # 반영돼 있고, marcap 저장소보다 하루 빠르다 (오너 결정 2026-08-16, layer1_market_data/daily.py).
     if daily_source(code) == NAMUH:
         bars = daily_bars(code)
         if bars is not None and not bars.empty:
@@ -203,7 +203,7 @@ def get_candles(code: str, start: str | None, end: str | None, adjust: bool = Tr
         return df
 
     if adjust:
-        df = apply_split_adjustment(df)  # 정본은 layer1 (ADR-0006)
+        df = apply_split_adjustment(df)  # 정본은 1단계 adjust.py (ADR-0006)
 
     if start:
         df = df[df["Date"] >= pd.Timestamp(start)]
@@ -389,7 +389,7 @@ def load_year_screen_market(year: int, market: str = "krx") -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def symbol_master_cached() -> pd.DataFrame:
-    """종목 검색용 마스터 — **상장폐지 종목까지 전부** (정본은 layer1 `symbol_master`)."""
+    """종목 검색용 마스터 — **상장폐지 종목까지 전부** (정본은 1단계 `symbol_master`)."""
     return symbol_master()
 
 

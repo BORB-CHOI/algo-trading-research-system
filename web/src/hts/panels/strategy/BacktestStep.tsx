@@ -26,18 +26,18 @@ import { BacktestScore } from './BacktestScore'
 import { BacktestTable } from './BacktestTable'
 import { StrategySummary } from './StrategySummary'
 
-// ④ 백테스팅 — 전수 검사 (layer4 strategy_one). 전략 값은 ②의 현재 값(draft)을 쓴다.
+// ④ 백테스팅 — 전수 검사 (2단계 strategy_one). 전략 값은 ②의 현재 값(draft)을 쓴다.
 // StrategyPanel.tsx 분할(구조 리팩토링 2026-08-06)로 옮겨온 스텝.
 
 // ④ 검사 구간 — **오너가 날짜로 정한다.** 코드가 기간을 갈라 놓지 않는다(ADR-0019).
 //
 // 2026-08-16 이전에는 여기 '값 맞추기용 / 확인용 / 채점용' 3분할 라디오가 있었다.
-// 오너 결정으로 없앴다: "2007~ 나누지 않고 전체". 최종 확인은 나무 모의투자(단계 5)가 한다.
-// 검사는 늘 **거래일마다 종목을 다시 고르는** 방식이다(layer4 walk_forward,
+// 오너 결정으로 없앴다: "2007~ 나누지 않고 전체". 최종 확인은 나무 모의투자가 한다.
+// 검사는 늘 **거래일마다 종목을 다시 고르는** 방식이다(2단계 walk_forward,
 // 오너 2026-08-10: "그때부터 하루씩 지금까지 매매 가능해야지").
 
 // 기본 시작일 — 리먼 사태(2008-09-15) 전부터 보겠다는 오너 지시.
-// 서버 정본은 layer4 backtest.DEFAULT_START. 끝은 오늘(todayStr).
+// 서버 정본은 2단계 backtest.DEFAULT_START. 끝은 오늘(todayStr).
 const ALL_START_DEFAULT = '2007-01-01'
 
 /** 행에서 바로 여는 차트 — **④ 화면을 떠나지 않는다.**

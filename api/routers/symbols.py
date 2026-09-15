@@ -193,7 +193,7 @@ def api_screen(
     max_marcap: float | None = Query(None, description="시총 상한 (원)"),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict:
-    """조건검색 종목선별 (BORB-39 ③). layer1 유니버스 제외 + layer3 screen() 재사용.
+    """조건검색 종목선별 (BORB-39 ③). 1단계 유니버스 제외 + 2단계 screen() 재사용.
 
     임계값은 요청마다 사용자가 준다 — 서버에 확정값을 박지 않는다(CLAUDE.md placeholder 원칙).
     """

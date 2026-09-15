@@ -32,7 +32,7 @@ class SimStop(BaseModel):
     fib_ratio: float = DEFAULT_FIB_STOP_RATIO
 
     def to_cfg(self) -> dict:
-        """`stops.stop_price` 가 받는 평범한 dict — layer4 에 pydantic 을 들이지 않는다."""
+        """`stops.stop_price` 가 받는 평범한 dict — 2단계에 pydantic 을 들이지 않는다."""
         return {
             "enabled": self.enabled,
             "mode": self.mode,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""거래원(증권사별 매매) 수집 — KIS. **조회만 한다. 주문 없음**(CLAUDE.md 단계 6).
+"""거래원(증권사별 매매) 수집 — KIS. **조회만 한다. 주문 없음**(실거래를 시작하기 전까지 — CLAUDE.md).
 
 실행:
     .venv/Scripts/python scripts/collect_kis_members.py --snapshot   # 당일 상위5, 전 종목 (매일)

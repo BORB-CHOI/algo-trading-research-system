@@ -152,7 +152,7 @@ def api_simulate(req: SimulateRequest) -> dict:
                 ),
             )
         cycle = picked
-    # 끝점(최고점)은 layer3 정본 하나가 정한다 — ③·④·오버레이가 같은 답을 내야 한다(ADR-0020).
+    # 끝점(최고점)은 2단계 정본 하나가 정한다 — ③·④·오버레이가 같은 답을 내야 한다(ADR-0020).
     try:
         high_price, high_date = fibonacci.wave_high_of(plan_df, cycle, sim_p)
     except ValueError as e:
@@ -411,7 +411,7 @@ def api_simulate(req: SimulateRequest) -> dict:
             continue  # 아직 못 거는 차수(보유 없음 등 기준가 미확정) — 선도 안 그린다
         computed[stage.id] = px  # 매도도 가로선은 안 보낸다 — 봉 위 표식으로 본다
 
-    # ── 손절선 — 공식은 ④ 와 같은 함수(layer4.stops). 되돌림 선 기준(fib)은 파동만
+    # ── 손절선 — 공식은 ④ 와 같은 함수(2단계 stops). 되돌림 선 기준(fib)은 파동만
     #    정해지면 자리가 정해지므로 매수 전에도 그린다(오너 2026-08-10). 평단 기준(pct)은
     #    미청산 라운드가 있을 때만 그릴 수 있다.
     stop_cfg = req.stop.to_cfg() if req.stop else None

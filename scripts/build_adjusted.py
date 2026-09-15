@@ -3,13 +3,13 @@
 
 marcap 연도별 parquet(원주가)을 종목별로 모아 액면분할/병합 back-adjust(ADR-0006)를
 적용한 수정주가 일봉을 `data/derived/adjusted/{code}.parquet` 으로 저장한다.
-멀티종목 백테스트 러너(layer4 runner)가 매 실행마다 전 연도를 다시 보정하는 비용을
-없애기 위한 사전 계산이다. 읽기는 layer1 `derived.load_adjusted()` 가 담당한다.
+멀티종목 백테스트 러너(2단계 runner)가 매 실행마다 전 연도를 다시 보정하는 비용을
+없애기 위한 사전 계산이다. 읽기는 1단계 `derived.load_adjusted()` 가 담당한다.
 
 ## 규격 (derived.py 와의 계약)
 
 - 컬럼: Date, Open, High, Low, Close, Volume, Amount, Marcap, Stocks (Date 오름차순)
-- OHLC·Volume 은 layer1 `adjust.apply_split_adjustment` 재사용(정본 하나 — 재구현 ❌).
+- OHLC·Volume 은 1단계 `adjust.apply_split_adjustment` 재사용(정본 하나 — 재구현 ❌).
 - Amount·Marcap·Stocks 는 원본 그대로 둔다 — 거래대금·시총·주식수는 "그 날의 사실"이라
   보정 대상이 아니다. 따라서 보정 후 `Close × Stocks == Marcap` 정합식은 분할 이전
   구간에서 깨진다(의도된 것 — 정합 검증은 원본 marcap 에서만 한다).
@@ -182,7 +182,7 @@ def write_adjusted(chunks: dict[str, list[pd.DataFrame]], out_dir: Path) -> int:
             by_guess += 1
         else:
             by_flag += 1
-        adjusted = apply_split_adjustment(df, factor)  # 정본은 layer1 (ADR-0006)
+        adjusted = apply_split_adjustment(df, factor)  # 정본은 1단계 adjust.py (ADR-0006)
         parquet_io.save(adjusted[OUT_COLS], out_dir / f"{code}.parquet")
         _progress(n, total, state, "저장")
     print(f"[보정] 증권사 수정주가로 {by_flag:,}종목 · 일봉이 없어 옛 짐작으로 {by_guess:,}종목",

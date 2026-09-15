@@ -28,7 +28,7 @@ router = APIRouter()
 
 # ─────────────────────────────────────────────────────────────
 # 전략 카탈로그·신호·오버레이 (ADR-0009) — GET /api/strategies + POST /api/signals·/api/overlay
-# 전략 정의·계산의 정본은 layer3 case_overlay.py(레지스트리)·fibonacci.py 다.
+# 전략 정의·계산의 정본은 2단계 case_overlay.py(레지스트리)·fibonacci.py 다.
 # 모든 정량 값은 요청 params 로 받는다 — 서버 기본값·하드코딩 금지(ADR-0009).
 # 기존 GET /api/signals 는 제거 — 파라미터를 숨기지 않기 위해 항상 명시 전달(POST).
 # ─────────────────────────────────────────────────────────────

@@ -2,8 +2,8 @@
 
 ADR-0009 §2: **화면의 조건검색식이 곧 백테스트 유니버스다.** `run_universe` 는
 POST /api/screen/run 과 동일한 데이터 형식(conditions 리스트 + logic)을 받아
-layer3 `cond_registry` 로 평가한다 — 조건 정의·계산의 정본은 하나, 하드코딩 없음.
-전략도 마찬가지로 `{key, params}` 데이터로 받아 layer3 전략 카탈로그에서 찾는다.
+2단계 `cond_registry` 로 평가한다 — 조건 정의·계산의 정본은 하나, 하드코딩 없음.
+전략도 마찬가지로 `{key, params}` 데이터로 받아 2단계 전략 카탈로그에서 찾는다.
 모든 정량 값(조건 임계값·전략 파라미터)은 호출자가 준다 — 이 모듈엔 전략 숫자가 없다.
 
 ## v1 단순화 (알려진 한계)
@@ -241,7 +241,7 @@ def run_universe(
       합친 통합(2025-03-04 개장 이후 구간만 값이 바뀐다). 선별 패널의 거래량·거래대금과
       종목별 일봉 둘 다 통합으로 간다.
     - hist/loader: 데이터 주입점(테스트용). 기본은 marcap(선별)과
-      layer1.daily.daily_bars(상장 종목=나무 수집본 · 상폐=marcap 보정본).
+      layer1_market_data.daily.daily_bars(상장 종목=나무 수집본 · 상폐=marcap 보정본).
 
     반환:
     {split, split_start, split_end, base_date, universe, skipped: {code: 사유},
