@@ -38,7 +38,7 @@
 - marcap 에 업종 분류가 없어 시장맵은 시장(KOSPI/KOSDAQ) 그룹까지만 — 업종 중첩은 업종
   데이터 소스 확보 후(별도 이슈).
 - 관심종목은 localStorage 데모 수준 — 서버 저장(파일/SQLite)으로 승격은 후속.
-- 뉴스 패널은 자리만 — 소스는 Backtest Phase 2 때(지침서).
+- 뉴스 패널은 자리만 — 소스는 Backtest Phase 2 때(지침서). → 지금은 3단계에서 받는다(ADR-0024).
 
 ## 미해결 (Open questions)
 

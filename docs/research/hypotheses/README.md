@@ -40,7 +40,7 @@
 | [exit.md](exit.md) | 청산 · 비중 | 전략 화면에서 ⭕ |
 | [avoid.md](avoid.md) | 회피 (위험 관리) | 일부 ⭕ |
 | [flows.md](flows.md) | 수급 · 거래원 · 프로그램 | 데이터 있음 · 화면 조건은 ❌ |
-| [news.md](news.md) | 재료 · 심리 | ❌ 2단계(LLM) 전에는 불가 |
+| [news.md](news.md) | 재료 · 심리 | ❌ 3단계(글 모으기)·4단계(LLM) 전에는 대부분 불가 |
 | [fib-wave-label-candidates.md](fib-wave-label-candidates.md) | 파동 정답지 후보 | 수동 라벨링 자료 |
 
 ## 데이터로 확인할 때 지킬 것

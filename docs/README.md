@@ -8,14 +8,14 @@
 | 질문 | 먼저 읽을 문서 | 역할 |
 |---|---|---|
 | 이 시스템은 무엇을 지키는가? | [확정 원칙](foundation/PROJECT_GUIDELINES.md) | 목적·역할 경계·연구 및 안전 원칙의 정본 |
-| 코드는 어디에 있고 어떻게 연결되는가? | [아키텍처](foundation/ARCHITECTURE.md) | 레이어·데이터 흐름·모듈 책임 |
+| 코드는 어디에 있고 어떻게 연결되는가? | [아키텍처](foundation/ARCHITECTURE.md) | 5단계 구조·데이터 흐름·모듈 책임 |
 | 데이터 열과 시점 기준은 무엇인가? | [데이터 계약](foundation/DATA_SCHEMA.md) | 스키마·단위·결측·시점 규칙 |
 | 어떤 주장을 아직 확인하지 않았나? | [연구 안내](research/README.md) | 가설 원재료와 분석 절차로 안내 |
 | 지금까지 데이터로 무엇을 확인했나? | [검증 결과](research/FINDINGS.md) | 재현 가능한 분석 결과 누적 |
 | 왜 이런 구현 결정을 했나? | [ADR 목록](adr/README.md) | 되돌리기 어려운 결정과 폐기 이력 |
 | 개발 환경을 어떻게 띄우나? | [개발 환경](development/DEV_SETUP.md) | 설치·실행·검사 명령 |
 | 문서를 포함해 어떻게 변경하나? | [기여 안내](development/CONTRIBUTING.md) | 브랜치·테스트·문서 갱신 규칙 |
-| 현재 어느 단계인가? | [진행 상황](project/PROGRESS.md) | 현재 구현 상태의 요약 |
+| 지금 무엇까지 만들었나? | [진행 상황](project/PROGRESS.md) | 단계별로 끝낸 작업 |
 | 지침이 어떻게 바뀌었나? | [변경 이력](project/CHANGELOG.md) | 버전별 역사 |
 
 ## 폴더 책임

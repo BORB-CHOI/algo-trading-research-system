@@ -11,7 +11,8 @@
 원래 표현이다.
 
 계산 자체는 산술이다 — 무리 구성원의 등락을 세면 된다. LLM 은 필요 없고, 넣어서도 안 된다
-(PROJECT_GUIDELINES §3.2 — LLM 은 ordinal 등급까지, 매매 판단은 결정론적 코드).
+(당시 PROJECT_GUIDELINES §3.2 — LLM 은 ordinal 등급까지, 매매 판단은 결정론적 코드. LLM 경계는
+ADR-0024 로 바뀌었지만, 이 계산에 LLM 이 필요 없다는 결론은 그대로다).
 **진짜 문제는 데이터다: 각 시점에 그 무리가 누구였는지를 알아야 한다.**
 
 기존 `src/layer3_text_data/themes.py`(네이버 m.stock 테마)는 쓸 수 없다. 코드 주석에도
