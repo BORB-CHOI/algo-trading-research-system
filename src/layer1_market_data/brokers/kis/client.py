@@ -27,10 +27,13 @@ KIS 는 엔드포인트가 200 개가 넘는데, 인증 헤더와 실패 판정 
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+
+from src import collection_logging as audit
 
 from .auth import AccessToken, KisCredentials
 
@@ -74,6 +77,10 @@ class KisApiError(RuntimeError):
     """KIS 호출 실패. HTTP 실패와 `rt_cd != "0"` 을 모두 여기로 모은다."""
 
 
+class KisResponseError(KisApiError):
+    """API 대신 리다이렉트·HTML 등 예상하지 않은 응답을 받았다."""
+
+
 _SESSIONS = threading.local()
 
 
@@ -97,10 +104,15 @@ def _session():
 
 
 def _requests_transport(url: str, headers: dict, params: dict) -> RawResponse:
-    response = _session().get(url, headers=headers, params=params, timeout=10)
+    # 오류 페이지로 따라가면 302가 200 HTML로 바뀐다. 인증 헤더도 다른 경로로 보내지 않는다.
+    response = _session().get(
+        url, headers=headers, params=params, timeout=10, allow_redirects=False
+    )
     try:
         body = response.json()
     except ValueError:
+        body = {}
+    if not isinstance(body, dict):
         body = {}
     return RawResponse(status_code=response.status_code, body=body, headers=dict(response.headers))
 
@@ -124,6 +136,7 @@ class KisClient:
         self._sleep = sleep
         self._monotonic = monotonic
         self._last_call_at: float | None = None
+        audit.register_secrets(creds.app_key, creds.app_secret, token.value)
 
     def get(
         self,
@@ -150,10 +163,36 @@ class KisClient:
 
         for attempt in range(1, max(self._policy.max_attempts, 1) + 1):
             self._wait_turn()
-            response = self._transport(url, headers, params or {})
+            started = time.monotonic()
+            metadata = dict(
+                endpoint=path,
+                tr_id=tr_id,
+                attempt=attempt,
+                account_ref=self._creds.fingerprint,
+                environment=self._creds.env,
+            )
+            symbol = (params or {}).get("FID_INPUT_ISCD")
+            if isinstance(symbol, str) and re.fullmatch(r"[0-9A-Z]{6}", symbol):
+                metadata["symbol"] = symbol
+            try:
+                response = self._transport(url, headers, params or {})
+            except Exception as exc:
+                audit.event(
+                    "kis.transport_failed",
+                    **metadata,
+                    error_type=type(exc).__name__,
+                    duration_ms=round((time.monotonic() - started) * 1000, 1),
+                )
+                raise
             self._last_call_at = self._monotonic()
 
             error = self._failure(response, tr_id, path)
+            audit.event(
+                "kis.request_succeeded" if error is None else "kis.request_failed",
+                **metadata,
+                **audit.response_fields(response.status_code, response.headers, response.body),
+                duration_ms=round((time.monotonic() - started) * 1000, 1),
+            )
             if error is None:
                 return response
 
@@ -178,12 +217,18 @@ class KisClient:
 
     @staticmethod
     def _failure(response: RawResponse, tr_id: str, path: str) -> KisApiError | None:
+        if 300 <= response.status_code < 400:
+            return KisResponseError(
+                f"KIS HTTP {response.status_code} ({tr_id}): API 대신 다른 페이지로 이동시켰습니다"
+            )
         if response.status_code != 200:
             return KisApiError(f"HTTP {response.status_code} ({tr_id} {path}): {response.body}")
 
-        # rt_cd 가 없는 응답(일부 인증 계열)은 HTTP 상태만으로 판정한다.
+        # 인증 발급은 auth.py에서 처리한다. 조회 API는 rt_cd로 성공을 확인해야 한다.
         rt_cd = response.body.get("rt_cd")
-        if rt_cd is not None and rt_cd != "0":
+        if rt_cd is None:
+            return KisResponseError(f"KIS 응답 형식 오류 ({tr_id}): 결과 코드가 없습니다")
+        if rt_cd != "0":
             msg_cd = response.body.get("msg_cd", "")
             msg = response.body.get("msg1", "")
             return KisApiError(f"KIS 실패 {msg_cd} ({tr_id}): {msg}")

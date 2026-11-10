@@ -24,10 +24,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from src import collection_logging as audit
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +150,30 @@ def load_cached_token(path: Path, creds: KisCredentials) -> AccessToken | None:
 
 
 def issue_token(creds: KisCredentials, now: datetime | None = None) -> AccessToken:
+    audit.register_secrets(creds.app_key, creds.app_secret)
+    started = time.monotonic()
+    audit.event("kis.token_issue_started", account_ref=creds.fingerprint, environment=creds.env)
+    try:
+        token = _issue_token(creds, now)
+    except Exception as exc:
+        audit.event(
+            "kis.token_issue_failed",
+            account_ref=creds.fingerprint,
+            error_type=type(exc).__name__,
+            duration_ms=round((time.monotonic() - started) * 1000, 1),
+        )
+        raise
+    audit.register_secrets(token.value)
+    audit.event(
+        "kis.token_issue_succeeded",
+        account_ref=creds.fingerprint,
+        expires_at=token.expires_at.isoformat(),
+        duration_ms=round((time.monotonic() - started) * 1000, 1),
+    )
+    return token
+
+
+def _issue_token(creds: KisCredentials, now: datetime | None = None) -> AccessToken:
     """실제로 KIS 에 토큰을 요청한다(네트워크). 테스트는 이 함수를 주입 교체한다."""
     import requests  # 지연 import — 캐싱·파싱 테스트는 네트워크 의존 없이 돈다.
 
@@ -160,10 +187,41 @@ def issue_token(creds: KisCredentials, now: datetime | None = None) -> AccessTok
         },
         headers={"Content-Type": "application/json"},
         timeout=10,
+        allow_redirects=False,
+    )
+    try:
+        diagnostic_body = response.json()
+    except ValueError:
+        diagnostic_body = {}
+    audit.event(
+        "kis.token_response",
+        account_ref=creds.fingerprint,
+        endpoint=TOKEN_PATH,
+        **audit.response_fields(
+            response.status_code,
+            response.headers,
+            diagnostic_body if isinstance(diagnostic_body, dict) else {},
+        ),
     )
     if response.status_code != 200:
-        raise TokenIssueError(f"토큰 발급 HTTP {response.status_code}: {response.text}")
-    return parse_token_response(response.json(), now=now)
+        # 본문 전체에는 인증값이 포함될 수 있다. 진단에 필요한 짧은 오류 코드만 남긴다.
+        code = ""
+        try:
+            failure = response.json()
+            if isinstance(failure, dict):
+                candidate = failure.get("error_code") or failure.get("msg_cd")
+                if isinstance(candidate, str) and candidate.isalnum() and len(candidate) <= 20:
+                    code = f" ({candidate})"
+        except ValueError:
+            pass
+        raise TokenIssueError(f"토큰 발급 HTTP {response.status_code}{code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise TokenIssueError("토큰 발급 응답이 JSON이 아닙니다") from exc
+    if not isinstance(payload, dict):
+        raise TokenIssueError("토큰 발급 응답이 JSON 객체가 아닙니다")
+    return parse_token_response(payload, now=now)
 
 
 def get_access_token(
@@ -177,9 +235,22 @@ def get_access_token(
     now = now or datetime.now(UTC)
 
     cached = load_cached_token(cache_path, creds)
+    audit.register_secrets(creds.app_key, creds.app_secret)
     if cached is not None and not cached.is_expired(now, margin):
+        audit.register_secrets(cached.value)
+        audit.event(
+            "kis.token_cache_used",
+            account_ref=creds.fingerprint,
+            expires_at=cached.expires_at.isoformat(),
+        )
         return cached
 
+    audit.event(
+        "kis.token_cache_miss",
+        account_ref=creds.fingerprint,
+        reason="expired_or_near_expiry" if cached else "missing_invalid_or_mismatch",
+        expires_at=cached.expires_at.isoformat() if cached else None,
+    )
     token = issue(creds)
     save_token(cache_path, token, creds)
     logger.info("KIS 토큰 재발급 (env=%s, 만료 %s)", creds.env, token.expires_at.isoformat())

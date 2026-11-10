@@ -26,7 +26,6 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -46,6 +45,7 @@ for _stream in (sys.stdout, sys.stderr):
 import backfill_kis_supply as supply  # noqa: E402
 import collect_namuh_bars as bars  # noqa: E402
 
+from src.collection_logging import CollectionThreadPoolExecutor as ThreadPoolExecutor  # noqa: E402
 from src.layer1_market_data import kis_market_state as state  # noqa: E402
 from src.layer1_market_data import parquet_io  # noqa: E402
 from src.layer1_market_data.marcap_loader import available_years, load_years  # noqa: E402

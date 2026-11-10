@@ -64,7 +64,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -94,6 +94,7 @@ import collect_kis_members as members  # noqa: E402
 import build_adjusted  # noqa: E402 — 수정주가 일봉 만들기(호출 0)
 import collect_namuh_bars as bars  # noqa: E402
 
+from src.collection_logging import CollectionThreadPoolExecutor as ThreadPoolExecutor  # noqa: E402
 from src.layer1_market_data import (  # noqa: E402
     dart,
     derived,
@@ -113,7 +114,8 @@ from src.layer1_market_data import (  # noqa: E402
     parquet_io,
     period_bars,
 )
-from src.layer1_market_data.brokers.kis.client import CallPolicy, KisApiError, KisClient  # noqa: E402
+from src.layer1_market_data.brokers.kis.client import CallPolicy, KisApiError, KisClient, KisResponseError  # noqa: E402
+from src.layer1_market_data.brokers.kis.auth import TokenIssueError  # noqa: E402
 
 LOCK_PATH = ROOT / "data" / "derived" / "_update.lock"
 LOG_PATH = ROOT / "data" / "derived" / "_update_log.jsonl"
@@ -1369,6 +1371,14 @@ def update_kis(
         old = parquet_io.read(path)
         try:
             new = module.collect_code(kis_client_for(module), code, since, today)
+        except (KisResponseError, TokenIssueError) as e:
+            # 공통 API 경로가 거부되면 종목을 바꿔 수천 번 반복하지 않는다.
+            with lock:
+                totals["errors"] += 1
+                totals["error"] = str(e)
+                totals["provider_unavailable"] = True
+            stop.set()
+            return
         except module.KisApiError as e:
             # KIS 는 시간대로 막는 TR 이 있다. 수급이 그렇다 — OPSQ2001 "TIME LIMIT 00:00 ~ 15:40".
             # 이 문구의 00:00~15:40 은 **막히는 구간**이고, 열리는 건 15:40 이후다
@@ -1441,6 +1451,8 @@ def update_kis(
     }
     if totals.get("blocked"):
         out["blocked"] = totals["blocked"]  # 조회 가능 시각이 아니었다 — 다음 회차에 받는다
+    if totals.get("provider_unavailable"):
+        out.update(provider_unavailable=True, error=totals["error"])
     return out
 
 
@@ -1660,12 +1672,21 @@ def _kis_stream(last_day: str, progress: ProgressFn | None = None) -> dict:
     def safely(name: str, run) -> None:
         try:
             out[name] = run()
+        except (KisResponseError, TokenIssueError) as e:
+            out[name] = {"error": f"{type(e).__name__}: {e}", "provider_unavailable": True}
         except Exception as e:  # noqa: BLE001 — 한 단계 때문에 회차를 버리지 않는다
             out[name] = {"error": f"{type(e).__name__}: {e}"}
 
     safely("supply", lambda: update_kis(
         supply, supply.OUT_DIR, "stck_bsop_date", "수급", last_day, progress=progress
     ))
+    if out["supply"].get("provider_unavailable"):
+        message = "KIS가 정상 API 응답을 주지 않아 수집을 중단했습니다."
+        for name in ("members", "credit", "market_state"):
+            out[name] = {"error": message, "provider_unavailable": True}
+        if progress:
+            progress(message, 0, 0)
+        return out
     if progress:
         if out["supply"].get("blocked"):
             progress("수급: 현재 수집 가능 시간이 아니어서 제외", 0, 0)
@@ -1859,7 +1880,42 @@ def credit_is_provider_latest(result: dict) -> bool:
     )
 
 
+_DIAGNOSTIC_RUN_LOCK = threading.Lock()
+
+
 def run_update(*, progress: ProgressFn | None = None) -> dict:
+    """CLI와 웹 공용 진입점. 회차와 오류를 영구 진단 로그에 남긴다."""
+    from src import collection_logging as audit
+
+    if not _DIAGNOSTIC_RUN_LOCK.acquire(blocking=False):
+        return {"skipped": "같은 프로세스에서 수집이 이미 실행 중입니다."}
+    result: dict = {}
+    error_type = None
+    try:
+        run_id = audit.begin_run()
+
+        def report(label: str, done: int, total: int) -> None:
+            # 최종 summary 문자열은 원문에 개인정보가 포함될 수 있으므로 제외한다.
+            if not label.startswith("갱신 끝:"):
+                phases = ("수급", "신용", "거래원", "일봉", "주·월봉", "분봉", "DART", "재무", "공시", "시장", "marcap")
+                phase = next((name for name in phases if name in label), "other")
+                audit.event("collection.progress", phase=phase, done=done, total=total)
+            if progress:
+                progress(label, done, total)
+
+        result = _run_update(progress=report, diagnostic_run_id=run_id)
+        return result
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        try:
+            audit.end_run(ok=bool(result.get("ok")), error_type=error_type)
+        finally:
+            _DIAGNOSTIC_RUN_LOCK.release()
+
+
+def _run_update(*, progress: ProgressFn | None = None, diagnostic_run_id: str | None = None) -> dict:
     """갱신 전체 한 회차 — CLI(`main`)와 API(`/api/data/update`)가 **같은 함수**를 쓴다.
 
     잠금 파일(`LOCK_PATH`)로 겹침을 막는다 — 터미널에서 돌리든 웹 버튼으로 돌리든 같은
@@ -1898,7 +1954,7 @@ def run_update(*, progress: ProgressFn | None = None) -> dict:
     # **분봉은 늘 받는다** (오너 결정 2026-08-29). 켜고 끄는 갈래를 없앴다 —
     # 요일로 정하던 것도, 손으로 `--minutes` 를 붙이던 것도 다 없다.
     # 1분봉만 받고 굵은 건 만들기 때문에(ADR-0022) 늘 받아도 감당이 된다.
-    summary: dict = {"minutes_included": True}
+    summary: dict = {"minutes_included": True, "run_id": diagnostic_run_id}
     # DART 는 KIS·나무와 **다른 서버**라 한도가 따로 논다. 뒤에서 같이 돌려 두고 마지막에
     # 결과만 거둔다 — 혼자 60초를 먹던 단계가 공짜가 된다(실측 2026-08-28).
     # 중간에 어디서 죽더라도 반드시 닫히게 try 밖에서 만든다.

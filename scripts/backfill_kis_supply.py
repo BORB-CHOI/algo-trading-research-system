@@ -25,7 +25,6 @@ import json
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +34,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.collection_logging import CollectionThreadPoolExecutor as ThreadPoolExecutor  # noqa: E402
 from src.layer1_market_data import kis_accounts  # noqa: E402 — 계좌를 여러 개 물린다
 from src.layer1_market_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
 from src.layer1_market_data.marcap_loader import available_years, load_years, normalize_code  # noqa: E402

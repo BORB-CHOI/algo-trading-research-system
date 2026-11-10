@@ -1,0 +1,6 @@
+# KIS 공식 문서 검색 전용. 계정 키나 주문 도구를 사용하지 않는다.
+[mcp_servers.kis-code-assistant]
+command = "npx.cmd"
+args = ["-y", "@koreainvestment/kis-code-assistant-mcp@0.1.1"]
+startup_timeout_sec = 60
+tool_timeout_sec = 60

@@ -18,7 +18,6 @@ import json
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -30,6 +29,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import backfill_kis_supply as base  # noqa: E402  (유니버스·클라이언트 재사용)
 
+from src.collection_logging import CollectionThreadPoolExecutor as ThreadPoolExecutor  # noqa: E402
 from src.layer1_market_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
 from src.layer1_market_data.brokers.kis.client import (  # noqa: E402
     CallPolicy,

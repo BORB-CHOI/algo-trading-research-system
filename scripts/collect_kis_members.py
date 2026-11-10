@@ -29,7 +29,6 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +40,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import backfill_kis_supply as S  # noqa: E402
 
+from src.collection_logging import CollectionThreadPoolExecutor as ThreadPoolExecutor  # noqa: E402
 from src.layer1_market_data import parquet_io  # noqa: E402 — 임시파일에 쓰고 바꿔치기(BORB-84)
 
 from src.layer1_market_data.marcap_loader import available_years, load_years  # noqa: E402
